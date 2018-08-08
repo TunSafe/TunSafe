@@ -866,6 +866,31 @@ void TunsafeBackendBsd::RunLoop() {
 void InitCpuFeatures();
 void Benchmark();
 
+static const char *print_ip(char buf[kSizeOfAddress], in_addr_t ip) {
+  snprintf(buf, kSizeOfAddress, "%d.%d.%d.%d", (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, (ip >> 0) & 0xff);
+  return buf;
+}
+
+static uint32 g_ui_ip;
+class MyProcessorDelegate : public ProcessorDelegate {
+public:
+  virtual void OnConnected(in_addr_t my_ip) {
+    if (my_ip != g_ui_ip) {
+      if (my_ip) {
+        char buf[kSizeOfAddress];
+        print_ip(buf, my_ip);
+        RINFO("Connection established. IP %s", buf);
+      }
+      g_ui_ip = my_ip;
+    }
+  }
+  virtual void OnDisconnected() {
+    MyProcessorDelegate::OnConnected(0);
+  }
+};
+
+static MyProcessorDelegate my_procdel;
+
 int main(int argc, char **argv) {
   bool exit_flag = false;
 
@@ -886,7 +911,7 @@ int main(int argc, char **argv) {
 #endif
 
   TunsafeBackendBsd socket_loop;
-  WireguardProcessor wg(&socket_loop, &socket_loop, NULL);
+  WireguardProcessor wg(&socket_loop, &socket_loop, &my_procdel);
   socket_loop.SetProcessor(&wg);
 
   if (!ParseWireGuardConfigFile(&wg, argv[1], &exit_flag)) return 1;
