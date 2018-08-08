@@ -523,9 +523,9 @@ static bool GetDefaultRoute(char *iface, size_t iface_size, uint32 *gw_addr) {
       if (len > rep.buf + 512 - pos)
         break; // invalid
 //      RINFO("rtm %d %d", i, ((struct sockaddr*)pos)->sa_len);
-      if (i == RTA_IFP && ((struct sockaddr*)pos)->sa_len == sizeof(struct sockaddr_dl)) {
+      if (i == RTA_IFP && ((struct sockaddr*)pos)->sa_len >= sizeof(struct sockaddr_dl)) {
         ifp = (struct sockaddr_dl *)pos;
-      } else if (i == RTA_GATEWAY && ((struct sockaddr*)pos)->sa_len == sizeof(struct sockaddr_in)) {
+      } else if (i == RTA_GATEWAY && ((struct sockaddr*)pos)->sa_len >= sizeof(struct sockaddr_in)) {
         gw = (struct sockaddr_in *)pos;
 
       }
@@ -596,7 +596,7 @@ static void AddOrRemoveRoute(const RouteInfo &cd, bool remove) {
   } else {
     RunCommand("/sbin/route %s -net inet6 %s gw %s", cmd, buf1, buf2);
   }
-#elif defined(OS_MACOSX)
+#elif defined(OS_MACOSX) || defined(OS_FREEBSD)
   const char *cmd = remove ? "delete" : "add";
   if (cd.family == AF_INET) {
     RunCommand("/sbin/route -q %s %s %s", cmd, buf1, buf2);
