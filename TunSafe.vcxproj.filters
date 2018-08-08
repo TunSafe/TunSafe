@@ -1,0 +1,154 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="crypto">
+      <UniqueIdentifier>{cfa17b4c-1bee-434e-81b4-ba780c3f7e2d}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\Win32">
+      <UniqueIdentifier>{49ba9478-f871-449f-a410-b401e993893f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="crypto\aesgcm">
+      <UniqueIdentifier>{d31b1b9f-4a2e-42d4-a26c-7c3daa4ccbe3}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="stdafx.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_endian.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="resource.h" />
+    <ClInclude Include="wireguard.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="wireguard_proto.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="network_win32_dnsblock.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
+    <ClInclude Include="network_win32.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
+    <ClInclude Include="network_win32_api.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\chacha20poly1305.h">
+      <Filter>crypto</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\blake2s.h">
+      <Filter>crypto</Filter>
+    </ClInclude>
+    <ClInclude Include="wireguard_config.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="netapi.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\siphash.h">
+      <Filter>crypto</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_types.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\aesgcm\aes.h">
+      <Filter>crypto\aesgcm</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_cpu.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="bit_ops.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_config.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="stdafx.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="wireguard.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="wireguard_proto.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="util.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="network_win32_dnsblock.cpp">
+      <Filter>Source Files\Win32</Filter>
+    </ClCompile>
+    <ClCompile Include="tunsafe_win32.cpp">
+      <Filter>Source Files\Win32</Filter>
+    </ClCompile>
+    <ClCompile Include="network_win32.cpp">
+      <Filter>Source Files\Win32</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\blake2s.cpp">
+      <Filter>crypto</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\blake2s_sse.cpp">
+      <Filter>crypto</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\chacha20poly1305.cpp">
+      <Filter>crypto</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\curve25519-donna.cpp">
+      <Filter>crypto</Filter>
+    </ClCompile>
+    <ClCompile Include="wireguard_config.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\siphash.cpp">
+      <Filter>crypto</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\aesgcm\aesgcm.cpp">
+      <Filter>crypto\aesgcm</Filter>
+    </ClCompile>
+    <ClCompile Include="benchmark.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="tunsafe_cpu.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="TunSafe.rc" />
+  </ItemGroup>
+  <ItemGroup>
+    <Image Include="icons\neutral-icon.ico" />
+    <Image Include="icons\green-icon.ico" />
+    <Image Include="icons\red-icon.ico" />
+    <Image Include="icons\green-bg-icon.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <NASM Include="crypto\chacha20_x64.asm">
+      <Filter>crypto</Filter>
+    </NASM>
+    <NASM Include="crypto\curve25519_x64_nasm.asm">
+      <Filter>crypto</Filter>
+    </NASM>
+    <NASM Include="crypto\poly1305_x64_nasm.asm">
+      <Filter>crypto</Filter>
+    </NASM>
+    <NASM Include="crypto\aesgcm\aesni_gcm_x64_nasm.asm">
+      <Filter>crypto\aesgcm</Filter>
+    </NASM>
+    <NASM Include="crypto\aesgcm\aesni_x64_nasm.asm">
+      <Filter>crypto\aesgcm</Filter>
+    </NASM>
+    <NASM Include="crypto\aesgcm\ghash_x64_nasm.asm">
+      <Filter>crypto\aesgcm</Filter>
+    </NASM>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,48 @@
+2018-06-20 - TunSafe v1.3-rc3
+
+Changes:
+1.Add option to block Internet traffic outside of TunSafe. Either
+  based on firewall rules, or by adding a null route, or both.
+  The firewall rule blocks all traffic except traffic from TunSafe,
+  loopback traffic, and DHCP traffic on the default NIC.
+  The route rule adds two /1 routes to 0.0.0.0.
+2.Convert LF to CRLF when importing config files
+3.Update some logging messages
+4.Delete the old routing rule pointing at the VPN server IP when
+  disconnecting
+5.Delete any conflicting old routing rule pointing at the VPN server
+  when connecting.
+6.Tray popup menu did not disappear when clicking outside of it.
+7.Show config file names also in tray popup menu.
+8.Make the menu item bold if connection is selected in popup menu.
+9.Don't show the .conf filename extension in the UI.
+10.Show also config file name when hovering on tray icon.
+11.Click on the connected server to toggle connection
+12.Fix bug where internet blocking checkbox was not removed.
+13.Change so bold is used for selected server, and checkbox
+   is used when connected.
+14.Use WS_EX_COMPOSITED to reduce flicker
+15.Now possible to enter a filename on command line to connect to.
+16.Support /minimize and /minimize_on_connect command line opts.
+17.Support PreUp,PostUp,PreDown,PostDown options on [Interface]
+   Note: For security reasons you need to first enable them,
+   so either Shift-Click on Options and select Allow Pre/Post Commands
+   or specify the /allow_pre_post command line option.
+
+2018-04-29 - TunSafe v1.2
+
+Changes:
+1.Use /24 instead of failing when a /32 Address is used
+2.Use /120 instead of failing when a /128 Address is used
+3.Add routes for all entries in AllowedIPs
+
+2018-04-29 - TunSafe v1.1
+
+Changes:
+1.Retry on failed DNS lookup. Helps when resuming from sleep.
+2.Display a better message if the TAP adapter can't be found.
+3.Retry connect when getting ERROR_FILE_NOT_FOUND.
+
+2018-03-06 - TunSafe v1.0
+
+First public release.
