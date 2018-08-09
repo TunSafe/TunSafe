@@ -38,6 +38,7 @@
 #include <linux/if.h>
 #include <linux/if_tun.h>
 #include <sys/prctl.h>
+#include <linux/rtnetlink.h>
 #endif
 
 void SetThreadName(const char *name) {
@@ -149,8 +150,94 @@ static bool GetDefaultRoute(char *iface, size_t iface_size, uint32 *gw_addr) {
 #endif  // defined(OS_MACOSX) || defined(OS_FREEBSD)
 
 #if defined(OS_LINUX)
+struct LinuxParsedRoute {
+  int has;
+  struct in_addr dst, gateway;
+  char ifname[IF_NAMESIZE];
+};
+
+static bool ParseLinuxRoutes(struct nlmsghdr *nl, struct LinuxParsedRoute *result) {
+  struct rtmsg *rt = (struct rtmsg *)NLMSG_DATA(nl);
+  if (rt->rtm_family != AF_INET || rt->rtm_table != RT_TABLE_MAIN)
+    return false;
+
+  struct rtattr *attr = (struct rtattr *)RTM_RTA(rt);
+  int len = RTM_PAYLOAD(nl);
+  int has = 0;
+  for(; RTA_OK(attr, len); attr = RTA_NEXT(attr, len)) {
+    switch(attr->rta_type) {
+    case RTA_OIF:
+      has |= 1;
+      if_indextoname(*(int *)RTA_DATA(attr), result->ifname);
+      break;
+    case RTA_GATEWAY:
+      has |= 2;
+      memcpy(&result->gateway, RTA_DATA(attr), sizeof(result->gateway));
+      break;
+    case RTA_DST:
+      has |= 4;
+      memcpy(&result->dst, RTA_DATA(attr), sizeof(result->dst));
+      break;
+    }
+  }
+  result->has = has;
+  return true;
+}
+
 static bool GetDefaultRoute(char *iface, size_t iface_size, uint32 *gw_addr) {
-  return false;
+  enum {BUFSIZE = 8192};
+  struct nlmsghdr *nl;
+  struct rtmsg *rt;
+  struct LinuxParsedRoute parsed_route;
+  char buffer[BUFSIZE];
+  int fd, len, pid = getpid();
+  bool result = false;
+
+  if ((fd = socket(PF_NETLINK, SOCK_DGRAM, NETLINK_ROUTE)) < 0)
+    return false;
+
+  size_t msg_size = NLMSG_SPACE(sizeof(struct rtmsg));
+  memset(buffer, 0, msg_size);
+  nl = (struct nlmsghdr *)buffer;
+  nl->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
+  nl->nlmsg_type = RTM_GETROUTE;
+  nl->nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST;
+  nl->nlmsg_seq = 1;
+  nl->nlmsg_pid = pid;
+  rt = (struct rtmsg *)NLMSG_DATA(nl);
+  rt->rtm_family = AF_INET;
+  rt->rtm_table = RT_TABLE_MAIN;
+  if (send(fd, nl, msg_size, 0) != msg_size) {
+    RERROR("write to route socket failed");
+    goto done;
+  }
+  do {
+    if ((len = recv(fd, buffer, BUFSIZE, 0)) < 0) {
+      RERROR("read from route socket failed");
+      goto done;
+    }
+    for (nl = (struct nlmsghdr *)buffer; NLMSG_OK(nl, len); nl = NLMSG_NEXT(nl, len)) {
+      if (nl->nlmsg_seq != 1 || nl->nlmsg_pid != pid)
+        continue;
+      if (nl->nlmsg_type == NLMSG_DONE)
+        goto done;
+      if (nl->nlmsg_type == NLMSG_ERROR) {
+        RERROR("Error in recieved packet");
+        goto done;
+      }
+      if (ParseLinuxRoutes(nl, &parsed_route) && (parsed_route.has & (1+2+4)) == (1+2)) {
+        size_t l = strlen(parsed_route.ifname);
+        if (l < iface_size) {
+          *gw_addr = ReadBE32(&parsed_route.gateway);
+          memcpy(iface, parsed_route.ifname, l + 1);
+          result = true;
+        }
+      }
+    }
+  } while ((nl->nlmsg_flags & NLM_F_MULTI) != 0);
+done:
+  close(fd);
+  return result;
 }
 #endif  // defined(OS_LINUX)
 
@@ -367,9 +454,11 @@ static void AddOrRemoveRoute(const RouteInfo &cd, bool remove) {
 #if defined(OS_LINUX)
   const char *cmd = remove ? "delete" : "add";
   if (cd.family == AF_INET) {
-    RunCommand("/sbin/route %s -net %s gw %s", cmd, buf1, buf2);
+    const char *net_or_host = (cd.cidr == 32) ? "-host" : "-net";
+    RunCommand("/sbin/route %s %s %s gw %s", cmd, net_or_host, buf1, buf2);
   } else {
-    RunCommand("/sbin/route %s -net inet6 %s gw %s", cmd, buf1, buf2);
+    const char *net_or_host = (cd.cidr == 128) ? "-host" : "-net";
+    RunCommand("/sbin/route %s %s inet6 %s gw %s", cmd, net_or_host, buf1, buf2);
   }
 #elif defined(OS_MACOSX) || defined(OS_FREEBSD)
   const char *cmd = remove ? "delete" : "add";
