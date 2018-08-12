@@ -987,7 +987,7 @@ DWORD SetMetricOnNetworkAdapter(NET_LUID *InterfaceLuid, ADDRESS_FAMILY family, 
 static const char *PrintIPV6(const uint8 new_address[16]) {
   sockaddr_in6 sin6 = {0};
   static char buf[100];
-  if (!inet_ntop(PF_INET6, new_address, buf, 100))
+  if (!inet_ntop(PF_INET6, (void*)new_address, buf, 100))
     memcpy(buf, "unknown", 8);
   return buf;
 }

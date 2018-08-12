@@ -25,7 +25,8 @@
 #endif
 
 const char *print_ip_prefix(char buf[kSizeOfAddress], int family, const void *ip, int prefixlen) {
-  if (!inet_ntop(family, ip, buf, kSizeOfAddress - 8)) {
+  // cast to void* to work on VS2015
+  if (!inet_ntop(family, (void*)ip, buf, kSizeOfAddress - 8)) {
     memcpy(buf, "unknown", 8);
   }
   if (prefixlen >= 0)
