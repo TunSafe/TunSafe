@@ -68,7 +68,7 @@ public:
   virtual void HandleExit() override { exit_ = true; }
   
 private:
-  bool ReadFromUdp();
+  bool ReadFromUdp(bool overload);
   bool ReadFromTun();
   bool WriteToUdp();
   bool WriteToTun();
@@ -131,7 +131,7 @@ void TunsafeBackendBsdImpl::SetTunFd(int fd) {
 }
 
 
-bool TunsafeBackendBsdImpl::ReadFromUdp() {
+bool TunsafeBackendBsdImpl::ReadFromUdp(bool overload) {
   socklen_t sin_len;
   sin_len = sizeof(read_packet_->addr.sin);
   int r = recvfrom(udp_fd_, read_packet_->data, kPacketCapacity, 0,
@@ -141,7 +141,7 @@ bool TunsafeBackendBsdImpl::ReadFromUdp() {
     read_packet_->sin_size = sin_len;
     read_packet_->size = r;
     if (processor_) {
-      processor_->HandleUdpPacket(read_packet_, false);
+      processor_->HandleUdpPacket(read_packet_, overload);
       read_packet_ = AllocPacket();
     }
     return true;        
@@ -277,62 +277,70 @@ void TunsafeBackendBsdImpl::WriteUdpPacket(Packet *packet) override {
 
 void TunsafeBackendBsdImpl::RunLoopInner() {
   int free_packet_interval = 10;
+  int overload_ctr = 0;
 
   while (!exit_) {
     int n = -1;
 
-//    printf("entering sleep %d,%d,%d %d\n", udp_fd_, tun_fd_, max_fd_, FD_ISSET(tun_fd_, &readfds_));
-    // Wait for sockets to become usable
-    if (!got_sig_alarm_) {
-
-      if (tun_fd_ >= 0) {
-        FD_SET(tun_fd_, &readfds_);
-        if (tun_writable_) FD_CLR(tun_fd_, &writefds_); else FD_SET(tun_fd_, &writefds_);
-      }
-
-      if (udp_fd_ >= 0) {
-        FD_SET(udp_fd_, &readfds_);
-        if (udp_writable_) FD_CLR(udp_fd_, &writefds_); else FD_SET(udp_fd_, &writefds_);
-      }
-
-      n = select(max_fd_, &readfds_, &writefds_, NULL, NULL);
-      if (n == -1) {
-        if (errno != EINTR) {
-          fprintf(stderr, "select failed\n");
-          break;
-        }
-      }
-    }
     // This is not fully signal safe.
     if (got_sig_alarm_) {
       got_sig_alarm_ = false;
       processor_->SecondLoop();
+
       if (free_packet_interval == 0) {
         FreePackets();
         free_packet_interval = 10;
       }
       free_packet_interval--;
+
+      overload_ctr -= (overload_ctr != 0);
     }
-    if (n < 0) continue;
 
     if (tun_fd_ >= 0) {
-      tun_readable_ = (FD_ISSET(tun_fd_, &readfds_) != 0);
-      tun_writable_ |= (FD_ISSET(tun_fd_, &writefds_) != 0);
-    }
-    if (udp_fd_ >= 0) {
-      udp_readable_ = (FD_ISSET(udp_fd_, &readfds_) != 0);
-      udp_writable_ |= (FD_ISSET(udp_fd_, &writefds_) != 0);
+      FD_SET(tun_fd_, &readfds_);
+      if (tun_writable_) FD_CLR(tun_fd_, &writefds_); else FD_SET(tun_fd_, &writefds_);
     }
 
-    for(int loop = 0; loop < 256; loop++) {
+    if (udp_fd_ >= 0) {
+      FD_SET(udp_fd_, &readfds_);
+      if (udp_writable_) FD_CLR(udp_fd_, &writefds_); else FD_SET(udp_fd_, &writefds_);
+    }
+
+    n = select(max_fd_, &readfds_, &writefds_, NULL, NULL);
+    if (n == -1) {
+      if (errno != EINTR) {
+        fprintf(stderr, "select failed\n");
+        break;
+      }
+    } else {
+      if (tun_fd_ >= 0) {
+        tun_readable_ = (FD_ISSET(tun_fd_, &readfds_) != 0);
+        tun_writable_ |= (FD_ISSET(tun_fd_, &writefds_) != 0);
+      }
+      if (udp_fd_ >= 0) {
+        udp_readable_ = (FD_ISSET(udp_fd_, &readfds_) != 0);
+        udp_writable_ |= (FD_ISSET(udp_fd_, &writefds_) != 0);
+      }
+    }
+    
+    bool overload = (overload_ctr != 0);
+
+    for(int loop = 0; ; loop++) {
+      // Whenever we don't finish set overload ctr.
+      if (loop == 256) {
+        overload_ctr = 4;
+        break;
+      }
       bool more_work = false;
       if (tun_queue_ != NULL && tun_writable_) more_work |= WriteToTun();
       if (udp_queue_ != NULL && udp_writable_) more_work |= WriteToUdp();
       if (tun_readable_)                       more_work |= ReadFromTun();
-      if (udp_readable_)                       more_work |= ReadFromUdp();
+      if (udp_readable_)                       more_work |= ReadFromUdp(overload);
       if (!more_work)
         break;
     }    
+
+    processor_->RunAllMainThreadScheduled();
   }  
 }
 

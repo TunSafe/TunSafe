@@ -229,6 +229,7 @@ void *WorkerLoop::ThreadMain() {
         got_sig_alarm_ = false;
         lock_.Release();
         processor_->SecondLoop();
+        processor_->RunAllMainThreadScheduled();
         lock_.Acquire();
       }
       if (shutting_down_ || queue_ != NULL)
@@ -252,6 +253,7 @@ void *WorkerLoop::ThreadMain() {
       }
       packet_queue = next;
     }
+    processor_->RunAllMainThreadScheduled();
     lock_.Acquire();
   }
   lock_.Release();

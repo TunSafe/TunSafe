@@ -1,4 +1,6 @@
 2018-08-11 - TunSafe v1.4-rc1
+
+Changes:
 1.Subfolders in the Config/ directory now show up as submenus.
 2.Added a way to run TunSafe as a Windows Service.
   Foreground Mode: The service will disconnect when TunSafe closes.
