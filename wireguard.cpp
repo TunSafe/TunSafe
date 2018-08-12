@@ -12,7 +12,9 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
+#include "ipzip2/ipzip2.h"
 #include "wireguard.h"
+#include "wireguard_config.h"
 
 uint64 OsGetMilliseconds();
 
@@ -35,10 +37,22 @@ WireguardProcessor::WireguardProcessor(UdpInterface *udp, TunInterface *tun, Pro
   dns_blocking_ = true;
   internet_blocking_ = kBlockInternet_Default;
   dns6_addr_.sin.sin_family = dns_addr_.sin.sin_family = 0;
+
+  stats_last_bytes_in_ = 0;
+  stats_last_bytes_out_ = 0;
+  stats_last_ts_ = OsGetMilliseconds();
+
+  main_thread_scheduled_ = NULL;
+  main_thread_scheduled_last_ = &main_thread_scheduled_;
 }
 
 WireguardProcessor::~WireguardProcessor() {
 }
+
+void WireguardProcessor::SetListenPort(int listen_port) {
+  listen_port_ = listen_port;
+}
+
 
 bool WireguardProcessor::AddDnsServer(const IpAddr &sin) {
   IpAddr *target = (sin.sin.sin_family == AF_INET6) ? &dns6_addr_ : &dns_addr_;
@@ -48,7 +62,6 @@ bool WireguardProcessor::AddDnsServer(const IpAddr &sin) {
   return true;
 }
 
-
 bool WireguardProcessor::SetTunAddress(const WgCidrAddr &addr) {
   WgCidrAddr *target = (addr.size == 128) ? &tun6_addr_ : &tun_addr_;
   if (target->size != 0)
@@ -57,9 +70,37 @@ bool WireguardProcessor::SetTunAddress(const WgCidrAddr &addr) {
   return true;
 }
 
+void WireguardProcessor::AddExcludedIp(const WgCidrAddr &cidr_addr) {
+  excluded_ips_.push_back(cidr_addr);
+}
 
-ProcessorStats WireguardProcessor::GetStats() {
-  stats_.last_complete_handskake_timestamp = dev_.last_complete_handskake_timestamp();
+void WireguardProcessor::SetMtu(int mtu) {
+  if (mtu >= 576 && mtu <= 10000)
+    mtu_ = mtu;
+}
+
+void WireguardProcessor::SetAddRoutesMode(bool mode) {
+  add_routes_mode_ = mode;
+}
+
+void WireguardProcessor::SetDnsBlocking(bool dns_blocking) {
+  dns_blocking_ = dns_blocking;
+}
+
+void WireguardProcessor::SetInternetBlocking(InternetBlockState internet_blocking) {
+  internet_blocking_ = internet_blocking;
+}
+
+void WireguardProcessor::SetHeaderObfuscation(const char *key) {
+  dev_.SetHeaderObfuscation(key);
+}
+
+WgProcessorStats WireguardProcessor::GetStats() {
+  // todo: only supports one peer but i want this in the ui for now.
+  stats_.endpoint.sin.sin_family = 0;
+  WgPeer *peer = dev_.first_peer();
+  if (peer)
+    stats_.endpoint = peer->endpoint_;
   return stats_;
 }
 
@@ -92,6 +133,7 @@ static bool IsWgCidrAddrSubsetOf(const WgCidrAddr &inner, const WgCidrAddr &oute
 }
 
 bool WireguardProcessor::Start() {
+  assert(dev_.IsMainThread());
   if (!udp_->Initialize(listen_port_))
     return false;
 
@@ -101,7 +143,7 @@ bool WireguardProcessor::Start() {
   }
 
   if (tun_addr_.cidr >= 31) {
-    RERROR("The TAP driver is not compatible with Address using CIDR /31 or /32. Changing to /24");
+    RERROR("TAP is not compatible CIDR /31 or /32. Changing to /24");
     tun_addr_.cidr = 24;
   }
 
@@ -110,7 +152,8 @@ bool WireguardProcessor::Start() {
   config.cidr = tun_addr_.cidr;
   config.mtu = mtu_;
   config.pre_post_commands = pre_post_;
-  
+  config.excluded_ips = excluded_ips_;
+
   uint32 netmask = tun_addr_.cidr == 32 ? 0xffffffff : 0xffffffff << (32 - tun_addr_.cidr);
 
   uint32 ipv4_broadcast_addr = (netmask == 0xffffffff) ? 0xffffffff : config.ip | ~netmask;
@@ -130,6 +173,7 @@ bool WireguardProcessor::Start() {
       config.default_route_endpoint_v4 = (peer->endpoint_.sin.sin_family == AF_INET) ? ReadBE32(&peer->endpoint_.sin.sin_addr) : 0;
       // Set the default route to something
       config.use_ipv4_default_route = true;
+      peer->allow_endpoint_change_ = false;
     }
 
     // Also configure ipv6 gw?
@@ -139,6 +183,7 @@ bool WireguardProcessor::Start() {
         if (peer->endpoint_.sin.sin_family == AF_INET6)
           memcpy(&config.default_route_endpoint_v6, &peer->endpoint_.sin6.sin6_addr, 16);
         config.use_ipv6_default_route = true;
+        peer->allow_endpoint_change_ = false;
       }
     }
 
@@ -158,7 +203,8 @@ bool WireguardProcessor::Start() {
 
   uint8 dhcp_options[6];
 
-  config.block_dns_on_adapters = dns_blocking_;
+  config.block_dns_on_adapters = dns_blocking_ && ((config.use_ipv4_default_route && dns_addr_.sin.sin_family == AF_INET) ||
+                                                   (config.use_ipv6_default_route && dns6_addr_.sin6.sin6_family == AF_INET6));
   config.internet_blocking = internet_blocking_;
 
   if (dns_addr_.sin.sin_family == AF_INET) {
@@ -187,7 +233,7 @@ bool WireguardProcessor::Start() {
     peer->ipv4_broadcast_addr_ = ipv4_broadcast_addr;
     if (peer->endpoint_.sin.sin_family != 0) {
       RINFO("Sending handshake...");
-      SendHandshakeInitiationAndResetRetries(peer);
+      SendHandshakeInitiation(peer);
     }
   }
 
@@ -222,9 +268,7 @@ struct ICMPv6NaPacketWithoutTarget {
   uint8 reserved[3];
   uint8 target[16];
 };
-
 #pragma pack (pop)
-
 
 static uint16 ComputeIcmpv6Checksum(const uint8 *buf, int buf_size, const uint8 src_addr[16], const uint8 dst_addr[16]) {
   uint32 sum = 0;
@@ -242,28 +286,25 @@ static uint16 ComputeIcmpv6Checksum(const uint8 *buf, int buf_size, const uint8 
   return ((uint16)~sum);
 }
 
-
 bool WireguardProcessor::HandleIcmpv6NeighborSolicitation(const byte *data, size_t data_size) {
   if (data_size < 48 + 16)
     return false;
 
   // Filter out neighbor solicitation
-  if (data[40] != kICMPv6_NeighborSolicitation || data[41] != 0)
-    return false;
-
-  if (!network_discovery_spoofing_)
+  if (data[40] != kICMPv6_NeighborSolicitation || data[41] != 0 || !network_discovery_spoofing_)
     return false;
 
   bool is_broadcast = true;
-
   if (memcmp(data + 24, kIcmpv6NeighborMulticastPrefix, sizeof(kIcmpv6NeighborMulticastPrefix)) != 0) {
     if (memcmp(data + 24, data + 48, 16) != 0)
       return false;
     is_broadcast = false;
   }
-   
+
   // Target address must match a peer's range.
+  WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
   WgPeer *peer = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 48);
+  WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
   if (peer == NULL)
     return false;
 
@@ -273,8 +314,7 @@ bool WireguardProcessor::HandleIcmpv6NeighborSolicitation(const byte *data, size
     return false;
 
   byte *odata = out->data;
-
-  int packet_size = is_broadcast ? sizeof(ICMPv6NaPacket) : sizeof(ICMPv6NaPacketWithoutTarget);
+  size_t packet_size = is_broadcast ? sizeof(ICMPv6NaPacket) : sizeof(ICMPv6NaPacketWithoutTarget);
 
   memcpy(odata, data, 4);
   WriteBE16(odata + 4, packet_size);
@@ -298,10 +338,10 @@ bool WireguardProcessor::HandleIcmpv6NeighborSolicitation(const byte *data, size
     // For some reason this is openvpn's 'related mac'
     ((ICMPv6NaPacket*)(odata + 40))->target_mac[2] += 1;
   }
-  uint16 checksum = ComputeIcmpv6Checksum(odata + 40, packet_size, odata + 8, odata + 24);
+  uint16 checksum = ComputeIcmpv6Checksum(odata + 40, (int)packet_size, odata + 8, odata + 24);
   WriteBE16(&((ICMPv6NaPacket*)(odata + 40))->checksum, checksum);
 
-  out->size = 40 + packet_size;
+  out->size = (unsigned)(40 + packet_size);
   tun_->WriteTunPacket(out);
   return true;
 }
@@ -317,9 +357,6 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
   unsigned ip_version, size_from_header;
   WgPeer *peer;
 
-  stats_.tun_bytes_in += data_size;
-  stats_.tun_packets_in++;
-
   // Sanity check that it looks like a valid ipv4 or ipv6 packet,
   // and determine the destination peer from the ip header
   if (data_size < IPV4_HEADER_SIZE)
@@ -328,7 +365,9 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
   ip_version = *data >> 4;
   if (ip_version == 4) {
     uint32 ip = ReadBE32(data + 16);
+    WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ip);
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
     if (peer == NULL)
       goto getout;
     if ((ip >= (224 << 24) || ip == peer->ipv4_broadcast_addr_) && !peer->allow_multicast_through_peer_)
@@ -346,7 +385,9 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
     if (data[6] == kIpProto_ICMPv6 && HandleIcmpv6NeighborSolicitation(data, data_size))
       goto getout;
 
+    WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_); 
     peer = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 24);
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
     if (peer == NULL)
       goto getout;
     
@@ -359,10 +400,10 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
   }
   if (size_from_header > data_size)
     goto getout;
-  if (peer->endpoint_.sin.sin_family == 0)
-    goto getout;
 
-  WritePacketToUdp(peer, packet);
+  // WriteAndEncryptPacketToUdp needs a held lock
+  WG_ACQUIRE_LOCK(peer->mutex_);
+  WriteAndEncryptPacketToUdp_WillUnlock(peer, packet);
   return;
   
 getout:
@@ -370,24 +411,51 @@ getout:
   FreePacket(packet);
 }
 
-void WireguardProcessor::WritePacketToUdp(WgPeer *peer, Packet *packet) {
-  byte *data = packet->data;
-  size_t size = packet->size;
+void WgPeer::AddPacketToPeerQueue(Packet *packet) {
+  assert(IsPeerLocked());
+  // Keep only the first MAX_QUEUED_PACKETS packets.
+  while (num_queued_packets_ >= MAX_QUEUED_PACKETS_PER_PEER) {
+    Packet *packet = first_queued_packet_;
+    first_queued_packet_ = packet->next;
+    num_queued_packets_--;
+    FreePacket(packet);
+  }
+  // Add the packet to the out queue that will get sent once handshake completes
+  *last_queued_packet_ptr_ = packet;
+  last_queued_packet_ptr_ = &packet->next;
+  packet->next = NULL;
+  num_queued_packets_++;
+}
+
+// This function must be called with the peer lock held. It will remove the lock
+void WireguardProcessor::WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Packet *packet) {
+  assert(peer->IsPeerLocked());
+  uint8 *data = packet->data, *ad;
+  size_t size = packet->size, ad_len, orig_size = size;
   bool want_handshake;
+  WgKeypair *keypair;
   uint64 send_ctr;
-  WgKeypair *keypair = peer->curr_keypair_;
-
-  if (keypair == NULL ||
-      keypair->send_key_state == WgKeypair::KEY_INVALID ||
-      keypair->send_ctr >= REJECT_AFTER_MESSAGES)
-    goto getout_handshake;
-
-  want_handshake = (keypair->send_ctr >= REKEY_AFTER_MESSAGES ||
-                    keypair->send_key_state == WgKeypair::KEY_WANT_REFRESH);
 
   // Ensure packet will fit including the biggest padding
-  if (size > kPacketCapacity - 15 - CHACHA20POLY1305_AUTHTAGLEN)
+  if (peer->endpoint_.sin.sin_family == 0 ||
+      size > kPacketCapacity - 15 - CHACHA20POLY1305_AUTHTAGLEN)
     goto getout_discard;
+
+  if ((keypair = peer->curr_keypair_) == NULL ||
+      (send_ctr = keypair->send_ctr) >= REJECT_AFTER_MESSAGES) {
+    peer->AddPacketToPeerQueue(packet);
+    WG_RELEASE_LOCK(peer->mutex_);
+    ScheduleNewHandshake(peer);
+    return;
+  }
+
+  stats_.tun_bytes_in += size;
+  stats_.tun_packets_in++;
+
+  want_handshake = (send_ctr >= REKEY_AFTER_MESSAGES ||
+                    keypair->send_key_state == WgKeypair::KEY_WANT_REFRESH);
+  keypair->send_ctr = send_ctr + 1;
+  packet->addr = peer->endpoint_;
 
   if (size == 0) {
     peer->OnKeepaliveSent();
@@ -416,7 +484,6 @@ add_padding:
       size += padding;
     }
   }
-  send_ctr = keypair->send_ctr++;
 
 #if WITH_SHORT_HEADERS
   if (keypair->enabled_features[WG_FEATURE_ID_SHORT_HEADER]) {
@@ -434,8 +501,9 @@ add_padding:
         WriteLE32(write -= 4, (uint32)next_expected_packet);
         inner_tag = WG_ACK_HEADER_COUNTER_4;
       } else {
-        WriteLE64(write -= 8, next_expected_packet);
-        inner_tag = WG_ACK_HEADER_COUNTER_8;
+        WriteLE32(write -= 4, (uint32)next_expected_packet);
+        WriteLE16(write -= 2, (uint16)(next_expected_packet>>32));
+        inner_tag = WG_ACK_HEADER_COUNTER_6;
       }
       if (keypair->broadcast_short_key != 0) {
         inner_tag += keypair->addr_entry_slot;
@@ -448,6 +516,7 @@ add_padding:
       *--write = keypair->addr_entry_slot;
       tag += WG_SHORT_HEADER_ACK;
     }
+    byte *write_after_ack_header = write;
 
     // Determine the distance from the most recently acked packet,
     // be conservative when picking a suitable packet length to send.
@@ -471,61 +540,54 @@ add_padding:
       WriteLE32(write -= 4, keypair->remote_key_id);
     *--write = tag;
 
+    // Not using any fields from now on
+    WG_RELEASE_LOCK(peer->mutex_);
 
     header_size = data - write;
-
     stats_.compression_wg_saved_out += (int64)16 - header_size;
-
     packet->data = data - header_size;
     packet->size = (int)(size + header_size + keypair->auth_tag_length);
-    WgKeypairEncryptPayload(data, size, write, data - write, send_ctr, keypair);
+
+    // todo: figure out what to actually use as ad.
+    ad = write_after_ack_header;
+    ad_len = data - write_after_ack_header;
   } else {
 need_big_packet:
 #else
   {
 #endif  // #if WITH_SHORT_HEADERS
+    // Not using any fields from now on
+    WG_RELEASE_LOCK(peer->mutex_);
+
     ((MessageData*)data)[-1].type = ToLE32(MESSAGE_DATA);
     ((MessageData*)data)[-1].receiver_id = keypair->remote_key_id;
     ((MessageData*)data)[-1].counter = ToLE64(send_ctr);
     packet->data = data - sizeof(MessageData);
     packet->size = (int)(size + sizeof(MessageData) + keypair->auth_tag_length);
-    WgKeypairEncryptPayload(data, size, NULL, 0, send_ctr, keypair);
+    ad = NULL;
+    ad_len = 0;
   }
 
-  packet->addr = peer->endpoint_;
+  WgKeypairEncryptPayload(data, size, ad, ad_len, send_ctr, keypair);
+
   DoWriteUdpPacket(packet);
   if (want_handshake)
-    SendHandshakeInitiationAndResetRetries(peer);
+    ScheduleNewHandshake(peer);
   return;
 
 getout_discard:
+  WG_RELEASE_LOCK(peer->mutex_);
   FreePacket(packet);
   return;
-
-getout_handshake:
-  // Keep only the first MAX_QUEUED_PACKETS packets.
-  while (peer->num_queued_packets_ >= MAX_QUEUED_PACKETS_PER_PEER) {
-    Packet *packet = peer->first_queued_packet_;
-    peer->first_queued_packet_ = packet->next;
-    peer->num_queued_packets_--;
-    FreePacket(packet);
-  }
-  // Add the packet to the out queue that will get sent once handshake completes
-  *peer->last_queued_packet_ptr_ = packet;
-  peer->last_queued_packet_ptr_ = &packet->next;
-  packet->next = NULL;
-  peer->num_queued_packets_++;
-
-  SendHandshakeInitiationAndResetRetries(peer);
 }
 
 // This scrambles the initial 16 bytes of the packet with the
-// trailing 8 bytes of the packet.
+// next 8 bytes of the packet as a seed.
 static void ScrambleUnscramblePacket(Packet *packet, ScramblerSiphashKeys *keys) {
   uint8 *data = packet->data;
   size_t data_size = packet->size;
 
-  if (data_size < 8)
+  if (data_size <= 8)
     return;
 
   uint64 last_uint64 = ReadLE64(data_size >= 24 ? data + 16 : data + data_size - 8);
@@ -537,10 +599,12 @@ static void ScrambleUnscramblePacket(Packet *packet, ScramblerSiphashKeys *keys)
     ((uint64*)data)[0] ^= a;
     ((uint64*)data)[1] ^= b;
   } else {
-    struct { uint64 a, b; } scramblers = {a, b};
-    uint8 *s = (uint8*)&scramblers;
+    union {
+      uint64 d[2];
+      uint8 s[16];
+    } scrambler = {{a,b}};
     for (size_t i = 0; i < data_size - 8; i++)
-      data[i] ^= s[i];
+      data[i] ^= scrambler.s[i];
   }
 }
 
@@ -560,37 +624,80 @@ void WireguardProcessor::DoWriteUdpPacket(Packet *packet) {
     ScrambleUnscrambleAndWrite(packet, &dev_.header_obfuscation_key_, udp_); 
 }
 
-void WireguardProcessor::SendHandshakeInitiationAndResetRetries(WgPeer *peer) {
-  peer->handshake_attempts_ = 0;
-  SendHandshakeInitiation(peer);
+void WireguardProcessor::ScheduleNewHandshake(WgPeer *peer) {
+  if (peer->main_thread_scheduled_.fetch_or(WgPeer::kMainThreadScheduled_ScheduleHandshake) == 0) {
+    peer->main_thread_scheduled_next_ = NULL;
+    WG_ACQUIRE_LOCK(main_thread_scheduled_lock_);
+    *main_thread_scheduled_last_ = peer;
+    main_thread_scheduled_last_ = &peer->main_thread_scheduled_next_;
+    WG_RELEASE_LOCK(main_thread_scheduled_lock_);
+    // todo: in multithreaded impl need to trigger |RunAllMainThreadScheduled| to get called
+  }
+}
+
+void WireguardProcessor::RunAllMainThreadScheduled() {
+  assert(dev_.IsMainThread());
+
+  if (main_thread_scheduled_ == NULL)
+    return;
+
+  WG_ACQUIRE_LOCK(main_thread_scheduled_lock_);
+  WgPeer *peer = main_thread_scheduled_;
+  main_thread_scheduled_ = NULL;
+  main_thread_scheduled_last_ = &main_thread_scheduled_;
+  WG_RELEASE_LOCK(main_thread_scheduled_lock_);
+
+  while (peer) {
+    // todo: for the multithreaded use case figure out whether to use atomic_thread_fence here.
+    WgPeer *next = peer->main_thread_scheduled_next_;
+    uint32 ev = peer->main_thread_scheduled_.exchange(0);
+    if (ev & WgPeer::kMainThreadScheduled_ScheduleHandshake) {
+      peer->handshake_attempts_ = 0;
+      SendHandshakeInitiation(peer);
+    }
+    peer = next;
+  }
 }
 
 void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
-  // Send out a handshake init packet to trigger the handshake procedure
+  assert(dev_.IsMainThread());
+
   if (!peer->CheckHandshakeRateLimit())
     return;
+  stats_.handshakes_out++;
   Packet *packet = AllocPacket();
-  if (!packet)
-    return;
-  peer->CreateMessageHandshakeInitiation(packet);
+  if (packet) {
+    peer->CreateMessageHandshakeInitiation(packet);
+    WG_ACQUIRE_LOCK(peer->mutex_);
+    int attempts = ++peer->total_handshake_attempts_;
+    if (procdel_)
+      procdel_->OnConnectionRetry(attempts);
+    peer->OnHandshakeInitSent();
+    packet->addr = peer->endpoint_;
+    WG_RELEASE_LOCK(peer->mutex_);
+    DoWriteUdpPacket(packet);
+    if (attempts > 1 && attempts <= 20)
+      RINFO("Retrying handshake, attempt %d...%s", attempts, (attempts == 20) ? " (last notice)" : "");
+  }
+}
 
-  packet->addr = peer->endpoint_;
-  DoWriteUdpPacket(packet);
-  peer->OnHandshakeInitSent();
+bool WireguardProcessor::IsMainThreadPacket(Packet *packet) {
+  // TODO(ludde): Support header obfuscation
+  return packet->size == 0 || (packet->data[0] != MESSAGE_DATA && !(packet->data[0] & WG_SHORT_HEADER_BIT));
 }
 
 // Handles an incoming WireGuard packet from the UDP side, decrypt etc.
 void WireguardProcessor::HandleUdpPacket(Packet *packet, bool overload) {
   uint32 type;
 
-  stats_.udp_bytes_in += packet->size;
-  stats_.udp_packets_in++;
-
   // Unscramble incoming packets
 #if WITH_HEADER_OBFUSCATION
   if (dev_.header_obfuscation_)
     ScrambleUnscramblePacket(packet, &dev_.header_obfuscation_key_);
 #endif  // WITH_HEADER_OBFUSCATION
+
+  stats_.udp_bytes_in += packet->size;
+  stats_.udp_packets_in++;
 
   if (packet->size < sizeof(uint32))
     goto invalid_size;
@@ -604,22 +711,23 @@ void WireguardProcessor::HandleUdpPacket(Packet *packet, bool overload) {
     HandleShortHeaderFormatPacket(type, packet);
 #endif  // WITH_SHORT_HEADERS
   } else if (type == MESSAGE_HANDSHAKE_COOKIE) {
+    assert(dev_.IsMainThread());
     if (packet->size != sizeof(MessageHandshakeCookie))
       goto invalid_size;
     HandleHandshakeCookiePacket(packet);
   } else if (type == MESSAGE_HANDSHAKE_INITIATION) {
+    assert(dev_.IsMainThread());
     if (WITH_HANDSHAKE_EXT ? (packet->size < sizeof(MessageHandshakeInitiation)) : (packet->size != sizeof(MessageHandshakeInitiation)))
       goto invalid_size;
-
-    if (!CheckIncomingHandshakeRateLimit(packet, overload))
-      return;
-    HandleHandshakeInitiationPacket(packet);
+    stats_.handshakes_in++;
+    if (CheckIncomingHandshakeRateLimit(packet, overload))
+      HandleHandshakeInitiationPacket(packet);
   } else if (type == MESSAGE_HANDSHAKE_RESPONSE) {
+    assert(dev_.IsMainThread());
     if (WITH_HANDSHAKE_EXT ? (packet->size < sizeof(MessageHandshakeResponse)) : (packet->size != sizeof(MessageHandshakeResponse)))
       goto invalid_size;
-    if (!CheckIncomingHandshakeRateLimit(packet, overload))
-      return;
-    HandleHandshakeResponsePacket(packet);
+    if (CheckIncomingHandshakeRateLimit(packet, overload))
+      HandleHandshakeResponsePacket(packet);
   } else {
     // unknown packet
 invalid_size:
@@ -628,7 +736,7 @@ invalid_size:
 }
 
 // Returns nonzero if two endpoints are different.
-static uint32 CompareEndpoint(const IpAddr *a, const IpAddr *b) {
+static uint32 CompareIpAddr(const IpAddr *a, const IpAddr *b) {
   uint32 rv = b->sin.sin_family ^ a->sin.sin_family;
   if (b->sin.sin_family != AF_INET6) {
     rv |= b->sin.sin_addr.s_addr ^ a->sin.sin_addr.s_addr;
@@ -642,9 +750,10 @@ static uint32 CompareEndpoint(const IpAddr *a, const IpAddr *b) {
   return rv;
 }
 
-void WgPeer::CopyEndpointToPeer(WgKeypair *keypair, const IpAddr *addr) {
+void WgPeer::CopyEndpointToPeer_Locked(WgKeypair *keypair, const IpAddr *addr) {
   // Remember how to send packets to this peer
-  if (CompareEndpoint(&keypair->peer->endpoint_, addr)) {
+  if (keypair->peer->allow_endpoint_change_ &&
+      CompareIpAddr(&keypair->peer->endpoint_, addr)) {
 #if WITH_SHORT_HEADERS
     // When the endpoint changes, forget about using the short key.
     keypair->broadcast_short_key = 0;
@@ -660,28 +769,21 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
   size_t bytes_left = packet->size - 1;
   WgKeypair *keypair;
   uint64 counter, acked_counter;
-  uint8 ack_tag;
+  uint8 ack_tag, *ack_start;
 
   if ((tag & WG_SHORT_HEADER_KEY_ID_MASK) == 0x00) {
     // The key_id is explicitly included in the packet.
     if (bytes_left < 4) goto getout;
     uint32 key_id = ReadLE32(data);
     data += 4, bytes_left -= 4;
-    auto it = dev_.key_id_lookup().find(key_id);
-    if (it == dev_.key_id_lookup().end()) goto getout;
-    keypair = it->second.second;
+    keypair = dev_.LookupKeypairByKeyId(key_id);
   } else {
     // Lookup the packet source ip and port in the address mapping
     uint64 addr_id = packet->addr.sin.sin_addr.s_addr | ((uint64)packet->addr.sin.sin_port << 32);
-    auto it = dev_.addr_entry_map().find(addr_id);
-    if (it == dev_.addr_entry_map().end())
-      goto getout;
-    WgAddrEntry *addr_entry = it->second;
-    keypair = addr_entry->keys[((tag / WG_SHORT_HEADER_KEY_ID) & 3) - 1];
+    keypair = dev_.LookupKeypairInAddrEntryMap(addr_id, ((tag / WG_SHORT_HEADER_KEY_ID) & 3) - 1);
   }
 
-  if (!keypair || keypair->recv_key_state == WgKeypair::KEY_INVALID ||
-      !keypair->enabled_features[WG_FEATURE_ID_SHORT_HEADER])
+  if (!keypair || !keypair->enabled_features[WG_FEATURE_ID_SHORT_HEADER])
     goto getout;
 
   // Pick the closest possible counter value with the same low bits.
@@ -709,11 +811,13 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
   acked_counter = 0;
   ack_tag = 0;
 
+  ack_start = data;
   // If the acknowledge header is present, then parse it so we may
   // get an ack for the highest seen packet.
   if (tag & WG_SHORT_HEADER_ACK) {
     if (bytes_left == 0) goto getout;
     ack_tag = *data;
+    if (ack_tag & 0xF0) goto getout; // undefined bits
     data += 1, bytes_left -= 1;
 
     switch (ack_tag & WG_ACK_HEADER_COUNTER_MASK) {
@@ -727,83 +831,104 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
       acked_counter = ReadLE32(data);
       data += 4, bytes_left -= 4;
       break;
-    case WG_ACK_HEADER_COUNTER_8:
-      if (bytes_left < 8) goto getout;
-      acked_counter = ReadLE64(data);
-      data += 8, bytes_left -= 8;
+    case WG_ACK_HEADER_COUNTER_6:
+      if (bytes_left < 6) goto getout;
+      acked_counter = ReadLE32(data) | ((uint64)ReadLE16(data + 4) << 32);
+      data += 6, bytes_left -= 6;
       break;
     default:
-      break;
+      goto getout;
     }
   }
   if (counter >= REJECT_AFTER_MESSAGES)
     goto getout;
   // Authenticate the packet before we can apply the state changes.
-  if (!WgKeypairDecryptPayload(data, bytes_left, packet->data, data - packet->data, counter, keypair))
+  if (!WgKeypairDecryptPayload(data, bytes_left, ack_start, data - ack_start, counter, keypair))
     goto getout;
 
+  WG_ACQUIRE_LOCK(keypair->peer->mutex_);
+
+  if (keypair->recv_key_state == WgKeypair::KEY_INVALID)
+    goto getout_unlock;
+
   if (!keypair->replay_detector.CheckReplay(counter))
-    goto getout;
+    goto getout_unlock;
 
   stats_.compression_wg_saved_in += 16 - (data - packet->data);
 
   keypair->send_ctr_acked = std::max<uint64>(keypair->send_ctr_acked, acked_counter);
   keypair->incoming_packet_count++;
 
-  WgPeer::CopyEndpointToPeer(keypair, &packet->addr);
+  WgPeer::CopyEndpointToPeer_Locked(keypair, &packet->addr);
 
   // Periodically broadcast out the short key 
   if ((tag & WG_SHORT_HEADER_KEY_ID_MASK) == 0x00 && !keypair->did_attempt_remember_ip_port) {
     keypair->did_attempt_remember_ip_port = true;
     if (keypair->enabled_features[WG_FEATURE_ID_SKIP_KEYID_IN]) {
       uint64 addr_id = packet->addr.sin.sin_addr.s_addr | ((uint64)packet->addr.sin.sin_port << 32);
-      dev_.UpdateKeypairAddrEntry(addr_id, keypair);
+      dev_.UpdateKeypairAddrEntry_Locked(addr_id, keypair);
     }
   }
-
   // Ack header may also signal that we can omit the key id in packets from now on.
   if (tag & WG_SHORT_HEADER_ACK)
     keypair->can_use_short_key_for_outgoing = (ack_tag & WG_ACK_HEADER_KEY_MASK) * WG_SHORT_HEADER_KEY_ID;
 
-  HandleAuthenticatedDataPacket(keypair, packet, data, bytes_left - keypair->auth_tag_length);
+  HandleAuthenticatedDataPacket_WillUnlock(keypair, packet, data, bytes_left - keypair->auth_tag_length);
   return;
+getout_unlock:
+  WG_RELEASE_LOCK(keypair->peer->mutex_);
 getout:
   FreePacket(packet);
   return;
 }
 #endif  // WITH_SHORT_HEADERS
 
-void WireguardProcessor::HandleAuthenticatedDataPacket(WgKeypair *keypair, Packet *packet, uint8 *data, size_t data_size) {
+void WireguardProcessor::NotifyHandshakeComplete() {
+  uint64 now = OsGetMilliseconds();
+  
+  // todo: should lock something
+  stats_.last_complete_handshake_timestamp = now;
+  if (stats_.first_complete_handshake_timestamp == 0)
+    stats_.first_complete_handshake_timestamp = now;
+
+  if (procdel_)
+    procdel_->OnConnected();
+}
+
+void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet, uint8 *data, size_t data_size) {
   WgPeer *peer = keypair->peer;
+  assert(peer->IsPeerLocked());
 
   // Promote the next key to the current key when we receive a data packet,
   // the handshake is now complete.
-  if (peer->CheckSwitchToNextKey(keypair)) {
-    if (procdel_) {
-      procdel_->OnConnected(ReadBE32(tun_addr_.addr));
-    }
+  if (peer->CheckSwitchToNextKey_Locked(keypair)) {
+    stats_.handshakes_in_success++;
     peer->OnHandshakeFullyComplete();
-    SendQueuedPackets(peer);
+    NotifyHandshakeComplete();
+    SendQueuedPackets_Locked(peer);
   }
 
   // Refresh when current key gets too old
-  if (peer->curr_keypair_ && peer->curr_keypair_->recv_key_state == WgKeypair::KEY_WANT_REFRESH) {
-    peer->curr_keypair_->recv_key_state = WgKeypair::KEY_DID_REFRESH;
-    SendHandshakeInitiationAndResetRetries(peer);
+  WgKeypair *curr_keypair = peer->curr_keypair_;
+  if (curr_keypair && curr_keypair->recv_key_state == WgKeypair::KEY_WANT_REFRESH) {
+    curr_keypair->recv_key_state = WgKeypair::KEY_DID_REFRESH;
+    ScheduleNewHandshake(peer);
   }
 
   if (data_size == 0) {
     peer->OnKeepaliveReceived();
+    WG_RELEASE_LOCK(peer->mutex_);
     goto getout;
   }
   peer->OnDataReceived();
+  WG_RELEASE_LOCK(peer->mutex_);
 
 #if WITH_HANDSHAKE_EXT
   // Unpack the packet headers using ipzip
   if (keypair->enabled_features[WG_FEATURE_ID_IPZIP]) {
     uint32 rv = IpzipDecompress(data, (uint32)data_size, &keypair->ipzip_state_, IPZIP_RECV_BY_CLIENT);
     if (rv == (uint32)-1)
-      goto getout; // ipzip failed decompress
+      goto getout;
     stats_.compression_hdr_saved_in += (int64)rv - data_size;
     data -= (int64)rv - data_size, data_size = rv;
   }
@@ -816,36 +941,30 @@ void WireguardProcessor::HandleAuthenticatedDataPacket(WgKeypair *keypair, Packe
 
   ip_version = *data >> 4;
   if (ip_version == 4) {
-    if (data_size < IPV4_HEADER_SIZE) {
-      // too small ipv4 header
-      goto getout;
-    }
+    if (data_size < IPV4_HEADER_SIZE)
+      goto getout_error_header;
+    WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ReadBE32(data + 12));
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
     size_from_header = ReadBE16(data + 2);
     if (size_from_header < IPV4_HEADER_SIZE) {
       // too small packet?
-      goto getout;
+      goto getout_error_header;
     }
   } else if (ip_version == 6) {
-    if (data_size < IPV6_HEADER_SIZE) {
-      // too small ipv6 header
-      goto getout;
-    }
+    if (data_size < IPV6_HEADER_SIZE)
+      goto getout_error_header;
+    WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 8);
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
     size_from_header = IPV6_HEADER_SIZE + ReadBE16(data + 4);
   } else {
     // invalid ip version
-    goto getout;
+    goto getout_error_header;
   }
-  if (size_from_header > data_size) {
-    // oversized packet?
-    goto getout;
-  }
-  if (peer_from_header != peer) {
-    // source address mismatch?
-    goto getout;
-  }
-  //RINFO("Outgoing TUN packet of size %d", (int)size_from_header);
+  if (peer_from_header != peer || size_from_header > data_size)
+    goto getout_error_header;
+
   packet->data = data;
   packet->size = size_from_header;
 
@@ -855,9 +974,10 @@ void WireguardProcessor::HandleAuthenticatedDataPacket(WgKeypair *keypair, Packe
   tun_->WriteTunPacket(packet);
   return;
 
+getout_error_header:
+  stats_.error_header++;
 getout:
   FreePacket(packet);
-  return;
 }
 
 void WireguardProcessor::HandleDataPacket(Packet *packet) {
@@ -865,29 +985,33 @@ void WireguardProcessor::HandleDataPacket(Packet *packet) {
   size_t data_size = packet->size;
   uint32 key_id = ((MessageData*)data)->receiver_id;
   uint64 counter = ToLE64((((MessageData*)data)->counter));
-  WgKeypair *keypair;
-
-  auto it = dev_.key_id_lookup().find(key_id);
-  if (it == dev_.key_id_lookup().end() ||
-      (keypair = it->second.second) == NULL ||
-      keypair->recv_key_state == WgKeypair::KEY_INVALID) {
+  WgKeypair *keypair = dev_.LookupKeypairByKeyId(key_id);
+  if (keypair == NULL || counter >= REJECT_AFTER_MESSAGES) {
+    stats_.error_key_id++;
 getout:
     FreePacket(packet);
     return;
   }
 
-  if (counter >= REJECT_AFTER_MESSAGES)
-    goto getout;
-
   if (!WgKeypairDecryptPayload(data + sizeof(MessageData), data_size - sizeof(MessageData),
-                        NULL, 0, counter, keypair)) {
+                               NULL, 0, counter, keypair)) {
+    stats_.error_mac++;
     goto getout;
   }
-  if (!keypair->replay_detector.CheckReplay(counter))
-    goto getout;
 
-  WgPeer::CopyEndpointToPeer(keypair, &packet->addr);
-  HandleAuthenticatedDataPacket(keypair, packet, data + sizeof(MessageData), data_size - sizeof(MessageData) - keypair->auth_tag_length);
+  WG_ACQUIRE_LOCK(keypair->peer->mutex_);
+  if (keypair->recv_key_state == WgKeypair::KEY_INVALID) {
+    stats_.error_key_id++;
+    WG_RELEASE_LOCK(keypair->peer->mutex_);
+    goto getout;
+  } else if (!keypair->replay_detector.CheckReplay(counter)) {
+    stats_.error_duplicate++;
+    WG_RELEASE_LOCK(keypair->peer->mutex_);
+    goto getout;
+  } else {
+    WgPeer::CopyEndpointToPeer_Locked(keypair, &packet->addr);
+    HandleAuthenticatedDataPacket_WillUnlock(keypair, packet, data + sizeof(MessageData), data_size - sizeof(MessageData) - keypair->auth_tag_length);
+  } 
 }
 
 static uint64 GetIpForRateLimit(Packet *packet) {
@@ -899,54 +1023,55 @@ static uint64 GetIpForRateLimit(Packet *packet) {
 }
 
 bool WireguardProcessor::CheckIncomingHandshakeRateLimit(Packet *packet, bool overload) {
+  assert(dev_.IsMainThread());
   WgRateLimit::RateLimitResult rr = dev_.rate_limiter()->CheckRateLimit(GetIpForRateLimit(packet));
   if ((overload && rr.is_rate_limited()) || !dev_.CheckCookieMac1(packet)) {
     FreePacket(packet);
     return false;
   }
+  dev_.rate_limiter()->CommitResult(rr);
   if (overload && !rr.is_first_ip() && !dev_.CheckCookieMac2(packet)) {
-    dev_.rate_limiter()->CommitResult(rr);
     dev_.CreateCookieMessage((MessageHandshakeCookie*)packet->data, packet, ((MessageHandshakeInitiation*)packet->data)->sender_key_id);
     packet->size = sizeof(MessageHandshakeCookie);
     DoWriteUdpPacket(packet);
     return false;
   }
-  dev_.rate_limiter()->CommitResult(rr);
   return true;
 }
 
 // server receives this when client wants to setup a session
 void WireguardProcessor::HandleHandshakeInitiationPacket(Packet *packet) {
+  assert(dev_.IsMainThread());
   WgPeer *peer = WgPeer::ParseMessageHandshakeInitiation(&dev_, packet);
-  if (!peer) {
+  if (peer) {
+    DoWriteUdpPacket(packet);
+  } else {
     FreePacket(packet);
-    return;
   }
-  peer->OnHandshakeAuthComplete();
-  DoWriteUdpPacket(packet);
 }
 
 // client receives this after session is established
 void WireguardProcessor::HandleHandshakeResponsePacket(Packet *packet) {
+  assert(dev_.IsMainThread());
   WgPeer *peer = WgPeer::ParseMessageHandshakeResponse(&dev_, packet);
-  if (!peer) {
-    FreePacket(packet);
-    return;
+  if (peer) {
+    stats_.handshakes_out_success++;
+    WG_SCOPED_LOCK(peer->mutex_);
+    if (peer->allow_endpoint_change_)
+      peer->endpoint_ = packet->addr;
+    peer->OnHandshakeAuthComplete();
+    peer->OnHandshakeFullyComplete();
+    NotifyHandshakeComplete();
+    SendKeepalive_Locked(peer);
   }
-  peer->endpoint_ = packet->addr;
   FreePacket(packet);
-  peer->OnHandshakeAuthComplete();
-  peer->OnHandshakeFullyComplete();
-  if (procdel_)
-    procdel_->OnConnected(ReadBE32(tun_addr_.addr));
-  SendKeepalive(peer);
 }
 
-void WireguardProcessor::SendKeepalive(WgPeer *peer) {
+void WireguardProcessor::SendKeepalive_Locked(WgPeer *peer) {
+  assert(dev_.IsMainThread() && peer->IsPeerLocked());
   // can't send keepalive if no endpoint is configured
   if (peer->endpoint_.sin.sin_family == 0)
     return;
-
   // If nothing is queued, insert a keepalive packet
   if (peer->first_queued_packet_ == NULL) {
     Packet *packet = AllocPacket();
@@ -956,43 +1081,70 @@ void WireguardProcessor::SendKeepalive(WgPeer *peer) {
     packet->next = NULL;
     peer->first_queued_packet_ = packet;
   }
-  SendQueuedPackets(peer);
+  SendQueuedPackets_Locked(peer);
 }
 
-void WireguardProcessor::SendQueuedPackets(WgPeer *peer) {
-  // Steal the packets
+void WireguardProcessor::SendQueuedPackets_Locked(WgPeer *peer) {
+  assert(peer->IsPeerLocked());
+  // Steal the queue of all packets and send them all.
   Packet *packet = peer->first_queued_packet_;
   peer->first_queued_packet_ = NULL;
   peer->last_queued_packet_ptr_ = &peer->first_queued_packet_;
   peer->num_queued_packets_ = 0;
-  while (packet) {
+  while (packet != NULL) {
     Packet *next = packet->next;
-    WritePacketToUdp(peer, packet);
+    WriteAndEncryptPacketToUdp_WillUnlock(peer, packet);
     packet = next;
+    WG_ACQUIRE_LOCK(peer->mutex_);  // WriteAndEncryptPacketToUdp_WillUnlock releases the lock
   }
 }
 
 void WireguardProcessor::HandleHandshakeCookiePacket(Packet *packet) {
+  assert(dev_.IsMainThread());
   WgPeer::ParseMessageHandshakeCookie(&dev_, (MessageHandshakeCookie *)packet->data);
 }
 
+// Only one thread may run the second loop
 void WireguardProcessor::SecondLoop() {
+  assert(dev_.IsMainThread());
   uint64 now = OsGetMilliseconds();
+
+  uint64 bytes_in = stats_.tun_bytes_in - stats_last_bytes_in_;
+  uint64 bytes_out = stats_.tun_bytes_out - stats_last_bytes_out_;
+
+  stats_last_bytes_in_ = stats_.tun_bytes_in;
+  stats_last_bytes_out_ = stats_.tun_bytes_out;
+
+  uint64 millis = now - stats_last_ts_;
+  stats_last_ts_ = now;
+
+  double f = 1000.0 / std::max<uint32>((uint32)millis, 500);
+
+  stats_.tun_bytes_in_per_second = (float)(bytes_in * f);
+  stats_.tun_bytes_out_per_second = (float)(bytes_out * f);
+
   for (WgPeer *peer = dev_.first_peer(); peer; peer = peer->next_peer_) {
+    WgKeypair *keypair = peer->curr_keypair_;
 
     // Allow ip/port to be remembered again for this keypair
-    if (peer->curr_keypair_)
-      peer->curr_keypair_->did_attempt_remember_ip_port = false;
+    if (keypair)
+      keypair->did_attempt_remember_ip_port = false;
 
-    uint32 mask = peer->CheckTimeouts(now);
-    if (mask == 0)
-      continue;
-    if (mask & WgPeer::ACTION_SEND_KEEPALIVE)
-      SendKeepalive(peer);
-    if (mask & WgPeer::ACTION_SEND_HANDSHAKE)
-      SendHandshakeInitiation(peer);
+    // Avoid taking the lock if it seems unneccessary
+    if (now >= peer->time_of_next_key_event_ || peer->timers_ != 0) {
+      uint32 mask;
+      {
+        WG_SCOPED_LOCK(peer->mutex_);
+        mask = peer->CheckTimeouts(now);
+        if (mask == 0)
+          continue;
+        if (mask & WgPeer::ACTION_SEND_KEEPALIVE)
+          SendKeepalive_Locked(peer);
+      }
+      if (mask & WgPeer::ACTION_SEND_HANDSHAKE)
+        SendHandshakeInitiation(peer);
+    }
   }
 
   dev_.SecondLoop(now);
 }
-

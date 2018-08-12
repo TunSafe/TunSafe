@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: AGPL-1.0-only
 // Copyright (C) 2018 Ludvig Strigeus <info@tunsafe.com>. All Rights Reserved.
+// Note: This is an experimental implementation that doesn't work, there's no way
+// for the alarm signal to interrupt the tunsafe main thread.
 #include "network_bsd_common.h"
 #include "tunsafe_endian.h"
 #include "tunsafe_config.h"
+#include "tunsafe_threading.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -91,7 +94,7 @@ private:
   bool shutting_down_;
   bool got_sig_alarm_;
 
-  pthread_mutex_t lock_;
+  Mutex lock_;
   pthread_cond_t cond_;
 };
 
@@ -120,7 +123,7 @@ private:
 
   bool shutting_down_;
 
-  pthread_mutex_t lock_;
+  Mutex lock_;
   pthread_cond_t cond_;
 };
 
@@ -147,7 +150,7 @@ private:
   WorkerLoop *worker_;
   pthread_t read_tid_, write_tid_;
   Packet *queue_, **queue_end_;
-  pthread_mutex_t lock_;
+  Mutex lock_;
   pthread_cond_t cond_;
 };
 
@@ -158,12 +161,11 @@ WorkerLoop::WorkerLoop() {
   shutting_down_ = false;
   got_sig_alarm_ = false;
   processor_ = NULL;
-  pthread_mutex_init(&lock_, NULL);
-  pthread_cond_init(&cond_, NULL);
+  if (pthread_cond_init(&cond_, NULL) != 0)
+    tunsafe_die("pthread_cond_init failed");
 }
 
 WorkerLoop::~WorkerLoop() {
-  pthread_mutex_destroy(&lock_);
   pthread_cond_destroy(&cond_);
 }
 
@@ -174,13 +176,14 @@ bool WorkerLoop::Initialize(WireguardProcessor *processor) {
 
 void WorkerLoop::StartThread() {
   assert(tid_ == 0);
-  pthread_create(&tid_, NULL, &ThreadMainStatic, this);
+  if (pthread_create(&tid_, NULL, &ThreadMainStatic, this) != 0)
+    tunsafe_die("pthread_create failed");
 }
 
 void WorkerLoop::StopThread() {
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   shutting_down_ = true;
-  pthread_mutex_unlock(&lock_);
+  lock_.Release();
 
   if (tid_) {
     void *x;
@@ -198,16 +201,16 @@ void WorkerLoop::NotifyStop() {
 void WorkerLoop::HandlePacket(Packet *packet, int target) {
 //  RINFO("WorkerLoop::HandlePacket");
   packet->post_target = target;
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   Packet *old_queue = queue_;
   *queue_end_ = packet;
   queue_end_ = &packet->next;
   packet->next = NULL;
   if (old_queue == NULL) {
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
     pthread_cond_signal(&cond_);
   } else {
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
   }
 }
 
@@ -218,19 +221,19 @@ void *WorkerLoop::ThreadMainStatic(void *x) {
 void *WorkerLoop::ThreadMain() {
   Packet *packet_queue;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   for (;;) {
     // Grab the whole list
     for (;;) {
       while (got_sig_alarm_) {
         got_sig_alarm_ = false;
-        pthread_mutex_unlock(&lock_);
+        lock_.Release();
         processor_->SecondLoop();
-        pthread_mutex_lock(&lock_);
+        lock_.Acquire();
       }
       if (shutting_down_ || queue_ != NULL)
         break;
-      pthread_cond_wait(&cond_, &lock_);
+      pthread_cond_wait(&cond_, lock_.impl());
     }
     if (shutting_down_)
       break;
@@ -238,7 +241,7 @@ void *WorkerLoop::ThreadMain() {
     queue_ = NULL;
     queue_end_ = &queue_;
     
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
     // And send all items in the list
     while (packet_queue != NULL) {
       Packet *next = packet_queue->next;
@@ -249,9 +252,9 @@ void *WorkerLoop::ThreadMain() {
       }
       packet_queue = next;
     }
-    pthread_mutex_lock(&lock_);
+    lock_.Acquire();
   }
-  pthread_mutex_unlock(&lock_);
+  lock_.Release();
   return NULL;
 }
 
@@ -265,14 +268,13 @@ UdpLoop::UdpLoop() {
   worker_ = NULL;
   queue_ = NULL;
   queue_end_ = &queue_;
-  pthread_mutex_init(&lock_, NULL);
-  pthread_cond_init(&cond_, NULL);
+  if (pthread_cond_init(&cond_, NULL) != 0)
+    tunsafe_die("pthread_cond_init failed");
 }
 
 UdpLoop::~UdpLoop() {
   if (fd_ != -1)
     close(fd_);
-  pthread_mutex_destroy(&lock_);
   pthread_cond_destroy(&cond_);
 }
 
@@ -286,16 +288,18 @@ bool UdpLoop::Initialize(int listen_port, WorkerLoop *worker) {
 }
 
 void UdpLoop::Start() {
-  pthread_create(&read_tid_, NULL, &ReaderMainStatic, this);
-  pthread_create(&write_tid_, NULL, &WriterMainStatic, this);
+  if (pthread_create(&read_tid_, NULL, &ReaderMainStatic, this) != 0)
+    tunsafe_die("pthread_create failed");
+  if (pthread_create(&write_tid_, NULL, &WriterMainStatic, this) != 0)
+    tunsafe_die("pthread_create failed");
 }
 
 void UdpLoop::Stop() {
   void *x;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   shutting_down_ = true;
-  pthread_mutex_unlock(&lock_);
+  lock_.Release();
   pthread_cond_signal(&cond_);
 
   pthread_kill(read_tid_, SIGUSR1);
@@ -345,17 +349,17 @@ void *UdpLoop::ReaderMain() {
 void *UdpLoop::WriterMain() {
   Packet *queue;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   for (;;) {
     // Grab the whole list
     while (!shutting_down_ && queue_ == NULL)
-      pthread_cond_wait(&cond_, &lock_);
+      pthread_cond_wait(&cond_, lock_.impl());
     if (shutting_down_)
       break;
     queue = queue_;
     queue_ = NULL;
     queue_end_ = &queue_;
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
     // And send all items in the list
     while (queue != NULL) {
       int r = sendto(fd_, queue->data, queue->size, 0,
@@ -370,9 +374,9 @@ void *UdpLoop::WriterMain() {
       queue = queue->next;
       FreePacket(to_free);
     }
-    pthread_mutex_lock(&lock_);
+    lock_.Acquire();
   }
-  pthread_mutex_unlock(&lock_);
+  lock_.Release();
   return NULL;
 }
 
@@ -380,15 +384,15 @@ void UdpLoop::WriteUdpPacket(Packet *packet) {
 //  RINFO("write udp packet to queue!");
   packet->next = NULL;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   Packet *old_queue = queue_;
   *queue_end_ = packet;
   queue_end_ = &packet->next;
   if (old_queue == NULL) {
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
     pthread_cond_signal(&cond_);
   } else {
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
   }
 }
 
@@ -400,14 +404,13 @@ TunLoop::TunLoop() {
   write_tid_ = 0;
   queue_ = NULL;
   queue_end_ = &queue_;
-  pthread_mutex_init(&lock_, NULL);
-  pthread_cond_init(&cond_, NULL);
+  if (pthread_cond_init(&cond_, NULL) != 0)
+    tunsafe_die("pthread_cond_init failed");
 }
 
 TunLoop::~TunLoop() {
   if (fd_ != -1)
     close(fd_);
-  pthread_mutex_destroy(&lock_);
   pthread_cond_destroy(&cond_);
 }
 
@@ -421,16 +424,18 @@ bool TunLoop::Initialize(char devname[16], WorkerLoop *worker) {
 }
 
 void TunLoop::Start() {
-  pthread_create(&read_tid_, NULL, &ReaderMainStatic, this);
-  pthread_create(&write_tid_, NULL, &WriterMainStatic, this);
+  if (pthread_create(&read_tid_, NULL, &ReaderMainStatic, this) != 0)
+    tunsafe_die("pthread_create failed");
+  if (pthread_create(&write_tid_, NULL, &WriterMainStatic, this) != 0)
+    tunsafe_die("pthread_create failed");
 }
 
 void TunLoop::Stop() {
   void *x;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   shutting_down_ = true;
-  pthread_mutex_unlock(&lock_);
+  lock_.Release();
 
   pthread_kill(read_tid_, SIGUSR1);
   pthread_kill(write_tid_, SIGUSR1);
@@ -469,18 +474,18 @@ void *TunLoop::ReaderMain() {
 void *TunLoop::WriterMain() {
   Packet *queue;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   for (;;) {
     // Grab the whole list
     while (!shutting_down_ && queue_ == NULL) {
-      pthread_cond_wait(&cond_, &lock_);
+      pthread_cond_wait(&cond_, lock_.impl());
     }
     if (shutting_down_)
       break;
     queue = queue_;
     queue_ = NULL;
     queue_end_ = &queue_;
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
     // And send all items in the list
     while (queue != NULL) {
       if (TUN_PREFIX_BYTES)
@@ -494,24 +499,24 @@ void *TunLoop::WriterMain() {
       queue = queue->next;
       FreePacket(to_free);
     }
-    pthread_mutex_lock(&lock_);
+    lock_.Acquire();
   }
-  pthread_mutex_unlock(&lock_);
+  lock_.Release();
   return NULL;
 }
 
 void TunLoop::WriteTunPacket(Packet *packet) {
   packet->next = NULL;
 
-  pthread_mutex_lock(&lock_);
+  lock_.Acquire();
   Packet *old_queue = queue_;
   *queue_end_ = packet;
   queue_end_ = &packet->next;
   if (old_queue == NULL) {
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
     pthread_cond_signal(&cond_);
   } else {
-    pthread_mutex_unlock(&lock_);
+    lock_.Release();
   }
 }
 

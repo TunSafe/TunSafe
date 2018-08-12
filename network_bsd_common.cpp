@@ -41,6 +41,11 @@
 #include <linux/rtnetlink.h>
 #endif
 
+void tunsafe_die(const char *msg) {
+  fprintf(stderr, "%s\n", msg);
+  exit(1);
+}
+
 void SetThreadName(const char *name) {
 #if defined(OS_LINUX)
   prctl(PR_SET_NAME, name, 0, 0, 0);
@@ -438,11 +443,11 @@ static void ComputeIpv6DefaultRoute(const uint8 *ipv6_address, uint8 ipv6_cidr, 
     default_route_v6[15] ^= 3;
 }
 
-void TunsafeBackendBsd::AddRoute(uint32 ip, uint32 cidr, uint32 gw) {
+void TunsafeBackendBsd::AddRoute(uint32 ip, uint32 cidr, uint32 gw, const char *dev) {
   uint32 ip_be, gw_be;
   WriteBE32(&ip_be, ip);
   WriteBE32(&gw_be, gw);
-  AddRoute(AF_INET, &ip_be, cidr, &gw_be);
+  AddRoute(AF_INET, &ip_be, cidr, &gw_be, dev);
 }
 
 static void AddOrRemoveRoute(const RouteInfo &cd, bool remove) {
@@ -452,13 +457,12 @@ static void AddOrRemoveRoute(const RouteInfo &cd, bool remove) {
   print_ip_prefix(buf2, cd.family, cd.gw, -1);
 
 #if defined(OS_LINUX)
-  const char *cmd = remove ? "delete" : "add";
-  if (cd.family == AF_INET) {
-    const char *net_or_host = (cd.cidr == 32) ? "-host" : "-net";
-    RunCommand("/sbin/route %s %s %s gw %s", cmd, net_or_host, buf1, buf2);
+  const char *cmd = remove ? "del" : "add";
+  const char *proto = (cd.family == AF_INET) ? NULL : "-6";
+    if (cd.dev.empty()) {
+    RunCommand("/sbin/ip %s route %s %s via %s", proto, cmd, buf1, buf2);
   } else {
-    const char *net_or_host = (cd.cidr == 128) ? "-host" : "-net";
-    RunCommand("/sbin/route %s %s inet6 %s gw %s", cmd, net_or_host, buf1, buf2);
+    RunCommand("/sbin/ip %s route %s %s dev %s", proto, cmd, buf1, cd.dev.c_str());
   }
 #elif defined(OS_MACOSX) || defined(OS_FREEBSD)
   const char *cmd = remove ? "delete" : "add";
@@ -470,9 +474,10 @@ static void AddOrRemoveRoute(const RouteInfo &cd, bool remove) {
 #endif
 }
 
-bool TunsafeBackendBsd::AddRoute(int family, const void *dest, int dest_prefix, const void *gateway) {
+bool TunsafeBackendBsd::AddRoute(int family, const void *dest, int dest_prefix, const void *gateway, const char *dev) {
   RouteInfo c;
 
+  c.dev = dev ? dev : "";
   c.family = family;
   size_t len = (family == AF_INET) ? 4 : 16;
   memcpy(c.ip, dest, len);
@@ -493,7 +498,6 @@ static bool IsIpv6AddressSet(const void *p) {
 
 // Called to initialize tun
 bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) override {
-  char def_iface[12];
   char devname[16];
 
   if (!RunPrePostCommand(config.pre_post_commands.pre_up)) {
@@ -513,20 +517,24 @@ bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) 
   uint32 default_route_v4 = ComputeIpv4DefaultRoute(config.ip, netmask);
   
   RunCommand("/sbin/ifconfig %s %A mtu %d %A netmask %A up", devname, config.ip, config.mtu, config.ip, netmask);
-  AddRoute(config.ip & netmask, config.cidr, config.ip);
+  AddRoute(config.ip & netmask, config.cidr, config.ip, devname);
 
   if (config.use_ipv4_default_route) {
     if (config.default_route_endpoint_v4) {
-      uint32 gw;
-      if (!GetDefaultRoute(def_iface, sizeof(def_iface), &gw)) {
+      uint32 ipv4_default_gw;
+      char default_iface[16];
+      if (!GetDefaultRoute(default_iface, sizeof(default_iface), &ipv4_default_gw)) {
         RERROR("Unable to determine default interface.");
         return false;
       }
-      AddRoute(config.default_route_endpoint_v4, 32, gw);
-
+      AddRoute(config.default_route_endpoint_v4, 32, ipv4_default_gw, NULL);
+      for (auto it = config.excluded_ips.begin(); it != config.excluded_ips.end(); ++it) {
+        if (it->size == 32)
+          AddRoute(ReadBE32(it->addr), it->cidr, ipv4_default_gw, default_iface);
+      }
     }
-    AddRoute(0x00000000, 1, default_route_v4);
-    AddRoute(0x80000000, 1, default_route_v4);
+    AddRoute(0x00000000, 1, default_route_v4, devname);
+    AddRoute(0x80000000, 1, default_route_v4, devname);
   }
 
   uint8 default_route_v6[16];
@@ -537,23 +545,23 @@ bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) 
 
     ComputeIpv6DefaultRoute(config.ipv6_address, config.ipv6_cidr, default_route_v6);
 
-    RunCommand("/sbin/ifconfig %s inet6 %s", devname, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
+    RunCommand("/sbin/ifconfig %s inet6 add %s", devname, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
 
     if (config.use_ipv6_default_route) {
       if (IsIpv6AddressSet(config.default_route_endpoint_v6)) {
         RERROR("default_route_endpoint_v6 not supported");
       }
-      AddRoute(AF_INET6, matchall_1_route + 1, 1, default_route_v6);
-      AddRoute(AF_INET6, matchall_1_route + 0, 1, default_route_v6);
+      AddRoute(AF_INET6, matchall_1_route + 1, 1, default_route_v6, devname);
+      AddRoute(AF_INET6, matchall_1_route + 0, 1, default_route_v6, devname);
     }
   }
 
   // Add all the extra routes
   for (auto it = config.extra_routes.begin(); it != config.extra_routes.end(); ++it) {
     if (it->size == 32) {
-      AddRoute(ReadBE32(it->addr), it->cidr, default_route_v4);
+      AddRoute(ReadBE32(it->addr), it->cidr, default_route_v4, devname);
     } else if (it->size == 128 && config.ipv6_cidr) {
-      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6);
+      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, devname);
     }
   }
 
@@ -688,34 +696,38 @@ void InitCpuFeatures();
 void Benchmark();
 
 
-uint32 g_ui_ip;
-
 const char *print_ip(char buf[kSizeOfAddress], in_addr_t ip) {
   snprintf(buf, kSizeOfAddress, "%d.%d.%d.%d", (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, (ip >> 0) & 0xff);
   return buf;
 }
 
-
 class MyProcessorDelegate : public ProcessorDelegate {
 public:
-  virtual void OnConnected(in_addr_t my_ip) {
-    if (my_ip != g_ui_ip) {
-      if (my_ip) {
-        char buf[kSizeOfAddress];
-        print_ip(buf, my_ip);
-        RINFO("Connection established. IP %s", buf);
-      }
-      g_ui_ip = my_ip;
+  MyProcessorDelegate() {
+    wg_processor_ = NULL;
+    is_connected_ = false;
+  }
+
+  virtual void OnConnected() override {
+    if (!is_connected_) {
+      uint32 ipv4_ip = ReadBE32(wg_processor_->tun_addr().addr);
+      char buf[kSizeOfAddress];
+      RINFO("Connection established. IP %s", print_ip(buf, ipv4_ip));
+      is_connected_ = true;
     }
   }
-  virtual void OnDisconnected() {
-    MyProcessorDelegate::OnConnected(0);
+  virtual void OnConnectionRetry(uint32 attempts) override {
+    if (is_connected_ && attempts >= 3) {
+      is_connected_ = false;
+      RINFO("Reconnecting...");
+    }
   }
+
+  WireguardProcessor *wg_processor_;
+  bool is_connected_;
 };
 
 int main(int argc, char **argv) {
-  bool exit_flag = false;
-
   InitCpuFeatures();
 
   if (argc == 2 && strcmp(argv[1], "--benchmark") == 0) {
@@ -739,9 +751,12 @@ int main(int argc, char **argv) {
   MyProcessorDelegate my_procdel;
   TunsafeBackendBsd *socket_loop = CreateTunsafeBackendBsd();
   WireguardProcessor wg(socket_loop, socket_loop, &my_procdel);
+
+  my_procdel.wg_processor_ = &wg;
   socket_loop->SetProcessor(&wg);
 
-  if (!ParseWireGuardConfigFile(&wg, argv[1], &exit_flag)) return 1;
+  DnsResolver dns_resolver(NULL);
+  if (!ParseWireGuardConfigFile(&wg, argv[1], &dns_resolver)) return 1;
   if (!wg.Start()) return 1;
 
   socket_loop->RunLoop();

@@ -70,6 +70,7 @@
 #define ReadBE32Aligned(pt) ToBE32(*(uint32*)(pt))
 #define WriteBE32Aligned(ct, st) (*(uint32*)(ct) = ToBE32(st))
 
+// todo: these need to support unaligned pointers
 #define ReadBE16(pt) ToBE16(*(uint16*)(pt))
 #define WriteBE16(ct, st) (*(uint16*)(ct) = ToBE16(st))
 #define ReadBE32(pt) ToBE32(*(uint32*)(pt))

@@ -6,44 +6,115 @@
 #include "tunsafe_types.h"
 #include "wireguard.h"
 
-struct NetworkStats {
-  bool reset_stats;
-  CRITICAL_SECTION  mutex;
-  ProcessorStats packet_stats;
-};
+#include <functional>
 
-class TunsafeBackendWin32 {
+struct StatsCollector {
 public:
-  TunsafeBackendWin32();
-  ~TunsafeBackendWin32();
-
-  void Start(ProcessorDelegate *procdel, const char *config_file);
-  void Stop();
-
-  ProcessorStats GetStats();
-  void ResetStats() { stats_.reset_stats = true; }
-
-  bool is_started() const { return worker_thread_ != NULL; }
-
+  enum {
+    CHANNELS = 2,
+    TIMEVALS = 4,
+  };
+  StatsCollector() { Init(); }
+  void AddSamples(float data[CHANNELS]);
+  struct TimeSeries {
+    float *data;
+    int size;
+    int shift;
+  };
+  const TimeSeries *GetTimeSeries(int channel, int timeval) { return &accum_[channel][timeval].data; }
 private:
-  static DWORD WINAPI WorkerThread(void *x);
-
-  NetworkStats stats_;
-  HANDLE worker_thread_;
-  bool exit_flag_;
-
-  ProcessorDelegate *procdel_;
-  char *config_file_;
+  struct Accumulator {
+    float acc;
+    int acc_count;
+    int acc_max;
+    bool dirty;
+    TimeSeries data;
+  };
+  void Init();
+  static void AddToGraphDataSource(StatsCollector::TimeSeries *ts, float value);
+  static void AddToAccumulators(StatsCollector::Accumulator *acc, float rval);
+  Accumulator accum_[CHANNELS][TIMEVALS];
 };
 
+struct LinearizedGraph {
+  uint32 total_size;
+  uint32 graph_type;
+  uint8 num_charts;
+  uint8 reserved[7];
+};
 
+class TunsafeBackend {
+public:
+  // All codes < 0 are permanent errors
+  enum StatusCode {
+    kStatusStopped = 0,
+    kStatusInitializing = 1,
+    kStatusConnecting = 2,
+    kStatusConnected = 3,
+    kStatusReconnecting = 4,
+    kStatusTunRetrying = 10,
 
-InternetBlockState GetInternetBlockState(bool *is_activated);
+    kErrorInitialize = -1,
+    kErrorTunPermanent = -2,
+    kErrorServiceLost = -3,
+  };
 
-// Returns if reconnect is needed
-void SetInternetBlockState(InternetBlockState s);
+  static bool IsPermanentError(StatusCode status) {
+    return (int32)status < 0;
+  }
 
+  class Delegate {
+  public:
+    virtual ~Delegate();
+    virtual void OnGetStats(const WgProcessorStats &stats) = 0;
+    virtual void OnGraphAvailable() = 0;
+    virtual void OnStateChanged() = 0;
+    virtual void OnClearLog() = 0;
+    virtual void OnLogLine(const char **s) = 0;
+    virtual void OnStatusCode(TunsafeBackend::StatusCode status) = 0;
+    // This function is needed for CreateTunsafeBackendDelegateThreaded,
+    // It's expected to be called on the main thread and then all callbacks will arrive
+    // on the right thread.
+    virtual void DoWork();
+  };
 
+  TunsafeBackend();
+  virtual ~TunsafeBackend();
+
+  // Setup/teardown the connection to the local service (if any)
+  virtual bool Initialize() = 0;
+  virtual void Teardown() = 0;
+
+  virtual void Start(const char *config_file) = 0;
+  virtual void Stop() = 0;
+  virtual void RequestStats(bool enable) = 0;
+  virtual void ResetStats() = 0;
+
+  virtual InternetBlockState GetInternetBlockState(bool *is_activated) = 0;
+  virtual void SetInternetBlockState(InternetBlockState s) = 0;
+  virtual void SetServiceStartupFlags(uint32 flags) = 0;
+
+  virtual std::string GetConfigFileName() = 0;
+
+  virtual LinearizedGraph *GetGraph(int type) = 0;
+
+  bool is_started() { return is_started_; }
+  bool is_remote() { return is_remote_; }
+  const uint8 *public_key() { return public_key_; }
+
+  StatusCode status() { return status_; }
+  uint32 GetIP() { return ipv4_ip_; }
+
+protected:
+  bool is_started_;
+  bool is_remote_;
+  StatusCode status_;
+  uint32 ipv4_ip_;
+  uint8 public_key_[32];
+};
+
+TunsafeBackend *CreateNativeTunsafeBackend(TunsafeBackend::Delegate *delegate);
+TunsafeBackend::Delegate *CreateTunsafeBackendDelegateThreaded(TunsafeBackend::Delegate *delegate, const std::function<void(void)> &callback);
 
 extern int tpq_last_qsize;
 extern int g_tun_reads, g_tun_writes;

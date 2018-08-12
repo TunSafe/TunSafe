@@ -23,8 +23,9 @@
 #include <atlbase.h>
 #include <algorithm>
 #include "crypto/curve25519-donna.h"
+#include "service_win32.h"
+#include "util_win32.h"
 
-#undef min
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "rpcrt4.lib")
 #pragma comment(lib,"comctl32.lib")
@@ -34,119 +35,103 @@ void InitCpuFeatures();
 void PrintCpuFeatures();
 void Benchmark();
 static const char *GetCurrentConfigTitle(char *buf, size_t max_size);
+static char *PrintMB(char *buf, int64 bytes);
+static void LoadConfigFile(const char *filename, bool save, bool force_start);
+static void SetCurrentConfigFilename(const char *filename);
+static void CreateLocalOrRemoteBackend(bool remote);
+static void UpdateGraphReq();
 
 #pragma warning(disable: 4200)
 
-static void MyPostMessage(int msg, WPARAM wparam, LPARAM lparam);
-
+static bool g_is_connected_to_server;
+static bool g_notified_connected_server;
 static HWND g_ui_window;
-static in_addr_t g_ui_ip;
 static HICON g_icons[2];
 static bool g_minimize_on_connect;
 
 static bool g_ui_visible;
 static char *g_current_filename;
-static HKEY g_reg_key;
 static HINSTANCE g_hinstance;
-static TunsafeBackendWin32 *g_backend;
-static bool g_last_popup_is_tray;
+static TunsafeBackend *g_backend;
+static TunsafeBackend::Delegate *g_backend_delegate;
+static const char *g_cmdline_filename;
+static bool g_first_state_msg;
+static bool g_is_limited_uac_account;
+static bool g_is_tunsafe_service_running;
+static bool g_disable_connect_on_start;
+static bool g_not_first_status_msg; 
+static HANDLE g_runonce_mutex;
+static int g_startup_flags;
+static HKEY g_reg_key;
+static HKEY g_hklm_reg_key;
+static HKEY g_hklm_readonly_reg_key;
+static HWND hwndPaintBox, hwndStatus, hwndGraphBox, hwndTab, hwndAdvancedBox, hwndEdit;
+static WgProcessorStats g_processor_stats;
+static int g_large_fonts;
+static TunsafeBackend::StatusCode g_status_code;
+static UINT g_message_taskbar_created;
+static int g_current_tab;
+static bool wm_dropfiles_recursive;
+static bool g_has_icon;
+static int g_selected_graph_type;
+static RECT comborect;
+static HBITMAP arrowbitmap;
+static uint32 g_timestamp_of_exit_menuloop;
+enum UpdateIconWhy {
+  UIW_NONE = 0,
+  UIW_STOPPED_WORKING_FAIL = 1,
+  UIW_START = 2,
+};
+static void UpdateIcon(UpdateIconWhy error);
 
-int RegReadInt(const char *key, int def) {
-  DWORD value = def, n = sizeof(value);
-  RegQueryValueEx(g_reg_key, key, NULL, NULL, (BYTE*)&value, &n);
-  return value;
+
+int RescaleDpi(int size) {
+  return (g_large_fonts == 96) ? size : size * g_large_fonts / 96;
 }
 
-void RegWriteInt(const char *key, int value) {
-  RegSetValueEx(g_reg_key, key, NULL, REG_DWORD, (BYTE*)&value, sizeof(value));
-}
-
-char *RegReadStr(const char *key, const char *def) {
-  char buf[1024];
-  DWORD n = sizeof(buf) - 1;
-  DWORD type = 0;
-  if (RegQueryValueEx(g_reg_key, key, NULL, &type, (BYTE*)buf, &n) != ERROR_SUCCESS || type != REG_SZ)
-    return def ? _strdup(def) : NULL;
-  if (n && buf[n - 1] == 0)
-    n--;
-  buf[n] = 0;
-  return _strdup(buf);
-}
-
-void RegWriteStr(const char *key, const char *v) {
-  RegSetValueEx(g_reg_key, key, NULL, REG_SZ, (BYTE*)v, (DWORD)strlen(v) + 1);
-}
-
-void str_set(char **x, const char *s) {
-  free(*x);
-  *x = _strdup(s);
-}
-
-char *str_cat_alloc(const char *a, const char *b) {
-  size_t al = strlen(a);
-  size_t bl = strlen(b);
-  char *r = (char *)malloc(al + bl + 1);
-  memcpy(r, a, al);
-  r[al + bl] = 0;
-  memcpy(r + al, b, bl);
-  return r;
-}
-
-static const char *FindLastFolderSep(const char *s) {
-  size_t len = strlen(s);
-  for (;;) {
-    if (len == 0)
-      return NULL;
-    len--;
-    if (s[len] == '\\' || s[len] == '/')
-      break;
+RECT RescaleDpiRect(const RECT &r) {
+  RECT rr = r;
+  if (g_large_fonts != 96) {
+    rr.left = rr.left * g_large_fonts / 96;
+    rr.top = rr.top * g_large_fonts / 96;
+    rr.right = rr.right * g_large_fonts / 96;
+    rr.bottom = rr.bottom * g_large_fonts / 96;
   }
-  return s + len;
+  return rr;
 }
 
+static void SetUiVisibility(bool visible) {
+  g_ui_visible = visible;
+  ShowWindow(g_ui_window, visible ? SW_SHOW : SW_HIDE);
+  g_backend->RequestStats(visible);
+  UpdateGraphReq();
+}
 
 static bool GetConfigFullName(const char *basename, char *fullname, size_t fullname_size) {
   size_t len = strlen(basename);
 
-  if (FindLastFolderSep(basename)) {
+  if (FindFilenameComponent(basename)[0]) {
     if (len >= fullname_size)
       return false;
     memcpy(fullname, basename, len + 1);
     return true;
   }
-  if (!GetModuleFileName(NULL, fullname, (DWORD)fullname_size))
+  size_t clen = GetConfigPath(fullname, fullname_size);
+  if (clen == 0 || clen + len >= fullname_size)
     return false;
-  char *last = (char *)FindLastFolderSep(fullname);
-  if (!last || last + len + 8 >= fullname + fullname_size)
-    return false;
-  memcpy(last + 1, "Config\\", 7 * sizeof(last[0]));
-  memcpy(last + 8, basename, (len + 1) * sizeof(last[0]));
+  memcpy(fullname + clen, basename, (len + 1) * sizeof(fullname[0]));
   return true;
 }
 
 
-enum UpdateIconWhy {
-  UIW_NONE = 0,
-  UIW_STOPPED_WORKING_FAIL = 1,
-  UIW_STOPPED_WORKING_RETRY = 2,
-  UIW_EXITING = 3,
-};
-static void UpdateIcon(UpdateIconWhy error);
-static void UpdateButtons();
-
-
-void StopService(UpdateIconWhy error) {
+void StopTunsafeBackend(UpdateIconWhy why) {
   if (g_backend->is_started()) {
     g_backend->Stop();
-
-    g_ui_ip = 0;
-
-    if (error != UIW_EXITING) {
-      UpdateIcon(error);
-      RINFO("Disconnecting");
-      UpdateButtons();
-      RegWriteInt("IsConnected", 0);
-    }
+    if (g_is_connected_to_server)
+      RINFO("Disconnected");
+    g_is_connected_to_server = false;
+    UpdateIcon(why);
+    RegWriteInt(g_reg_key, "IsConnected", 0);
   }
 }
 
@@ -155,44 +140,146 @@ const char *print_ip(char buf[kSizeOfAddress], in_addr_t ip) {
   return buf;
 }
 
-class MyProcessorDelegate : public ProcessorDelegate {
-public:
-  virtual void OnConnected(in_addr_t my_ip) {
-    if (my_ip != g_ui_ip) {
+void StartTunsafeBackend(UpdateIconWhy reason) {
+  if (!*g_current_filename)
+    return;
 
-      if (my_ip) {
-        char buf[kSizeOfAddress];
-        print_ip(buf, my_ip);
-        RINFO("Connection established. IP %s", buf);
+  // recreate service connection
+  if (g_backend->status() == TunsafeBackend::kErrorServiceLost)
+    CreateLocalOrRemoteBackend(g_backend->is_remote());
+
+  if (g_backend->is_remote() && !EnsureValidConfigPath(g_current_filename)) {
+    RERROR("The config file needs to be in the Config-directory. Maybe the TunSafe\r\n   process doesn't match with the running service. Try selecting 'Don't Use a Service'.");
+    StopTunsafeBackend(UIW_NONE);
+    return;
+  }
+  g_notified_connected_server = false;
+  g_is_connected_to_server = false;
+  g_backend->Start(g_current_filename);
+  RegWriteInt(g_reg_key, "IsConnected", 1);
+}
+
+static void InvalidatePaintbox() {
+  InvalidateRect(hwndPaintBox, NULL, FALSE);
+}
+
+class MyBackendDelegate : public TunsafeBackend::Delegate {
+public:
+  virtual void OnGraphAvailable() {
+    InvalidateRect(hwndGraphBox, NULL, FALSE);
+  }
+
+  virtual void OnGetStats(const WgProcessorStats &stats) {
+    g_processor_stats = stats;
+    InvalidatePaintbox();
+
+    char buf[64];
+    uint32 mbs_in = (uint32)(stats.tun_bytes_out_per_second * (1.0 / 1250));
+    uint32 gb_in = (uint32)(stats.tun_bytes_out * (1.0 / (1024 * 1024 * 1024 / 100)));
+
+    snprintf(buf, ARRAYSIZE(buf), "D: %d.%.2d Mbps (%d.%.2d GB)", mbs_in / 100, mbs_in % 100, gb_in / 100, gb_in % 100);
+    SendMessage(hwndStatus, SB_SETTEXT, 1, (LPARAM)buf);
+
+    uint32 mbs_out = (uint32)(stats.tun_bytes_in_per_second * (1.0 / 1250));
+    uint32 gb_out = (uint32)(stats.tun_bytes_in * (1.0 / (1024 * 1024 * 1024 / 100)));
+
+    snprintf(buf, ARRAYSIZE(buf), "U: %d.%.2d Mbps (%d.%.2d GB)", mbs_out / 100, mbs_out % 100, gb_out / 100, gb_out % 100);
+    SendMessage(hwndStatus, SB_SETTEXT, 2, (LPARAM)buf);
+
+    InvalidateRect(hwndAdvancedBox, NULL, FALSE);
+  }
+
+  virtual void OnLogLine(const char **s) {
+    CHARRANGE cr;
+    cr.cpMin = -1;
+    cr.cpMax = -1;
+    // hwnd = rich edit hwnd
+    SendMessage(hwndEdit, EM_EXSETSEL, 0, (LPARAM)&cr);
+    SendMessage(hwndEdit, EM_REPLACESEL, 0, (LPARAM)*s);
+  }
+
+  virtual void OnStateChanged() {
+    if (!g_first_state_msg) {
+      g_first_state_msg = true;
+      char fullname[1024];
+
+      const char *filename = g_cmdline_filename;
+      if (filename) {
+        if (GetConfigFullName(filename, fullname, sizeof(fullname)))
+          SetCurrentConfigFilename(fullname);
+      } else {
+        std::string currconfig = g_backend->GetConfigFileName();
+        if (currconfig.empty()) {
+          char *conf = RegReadStr(g_reg_key, "ConfigFile", "TunSafe.conf");
+          if (GetConfigFullName(conf, fullname, sizeof(fullname)))
+            SetCurrentConfigFilename(fullname);
+          free(conf);
+        } else {
+          SetCurrentConfigFilename(currconfig.c_str());
+        }
       }
-      g_ui_ip = my_ip;
-      MyPostMessage(WM_USER + 2, 0, 0);
+
+      if (filename != NULL || !(g_startup_flags & kStartupFlag_BackgroundService) && !g_disable_connect_on_start && RegReadInt(g_reg_key, "IsConnected", 0)) {
+        StartTunsafeBackend(UIW_START);
+      } else {
+        if (!g_backend->is_started())
+          RINFO("Press Connect to initiate a connection to the WireGuard server.");
+      }
+    }
+
+    bool running = g_backend->is_started();
+    SetDlgItemText(g_ui_window, ID_START, running ? "Re&connect" : "&Connect");
+    InvalidatePaintbox();
+    EnableWindow(GetDlgItem(g_ui_window, ID_STOP), running);
+  }
+
+  virtual void OnStatusCode(TunsafeBackend::StatusCode status) override {
+    g_status_code = status;
+    if (TunsafeBackend::IsPermanentError(status)) {
+      UpdateIcon(g_is_connected_to_server ? UIW_STOPPED_WORKING_FAIL : UIW_NONE);
+      InvalidatePaintbox();
+      return;
+    }
+    bool is_connected = (status == TunsafeBackend::kStatusConnected);
+    if (is_connected && g_minimize_on_connect) {
+      g_minimize_on_connect = false;
+      SetUiVisibility(false);
+    }
+
+    bool not_first = g_not_first_status_msg;
+    g_not_first_status_msg = true;
+
+    if (is_connected != g_is_connected_to_server) {
+      g_is_connected_to_server = is_connected;
+      // avoid showing a notice if service is already connected
+      if (is_connected > not_first && (g_startup_flags & kStartupFlag_BackgroundService))
+        g_notified_connected_server = true;
+      UpdateIcon(UIW_NONE);
+      InvalidatePaintbox();
     }
   }
-  virtual void OnDisconnected() {
-    MyProcessorDelegate::OnConnected(0);
+
+  virtual void OnClearLog() override {
+    SetWindowText(hwndEdit, "");
   }
 };
 
-static MyProcessorDelegate my_procdel;
+static MyBackendDelegate my_procdel;
 
-void StartService(bool skip_clear = false) {
-  char buf[1024];
-  if (!GetConfigFullName(g_current_filename, buf, ARRAYSIZE(buf)))
-    return;
-  
-  if (!g_backend->is_started()) {
-    if (!skip_clear)
-      PostMessage(g_ui_window, WM_USER + 6, NULL, NULL);
-   
-    g_backend->Start(&my_procdel, buf);
+static void CreateLocalOrRemoteBackend(bool remote) {
+  delete g_backend;
 
-    UpdateButtons();
-    RegWriteInt("IsConnected", 1);
+  g_first_state_msg = false;
+
+  if (!remote) {
+    g_backend = CreateNativeTunsafeBackend(g_backend_delegate);
+  } else {
+    RINFO("Connecting to the TunSafe Service...");
+    g_backend = CreateTunsafeServiceClient(g_backend_delegate);
   }
-}
 
-static bool g_has_icon;
+  g_backend->RequestStats(g_ui_visible);
+}
 
 static char *PrintMB(char *buf, int64 bytes) {
   char *bo = buf;
@@ -215,55 +302,7 @@ static char *PrintMB(char *buf, int64 bytes) {
   return bo;
 }
 
-static void UpdateStats() {
-  ProcessorStats stats = g_backend->GetStats();
-
-  char tmp[64], tmp2[64];
-  char buf[512];
-  snprintf(buf, 512, "%s received (%lld packets), %s sent (%lld packets)",
-    PrintMB(tmp, stats.udp_bytes_in), stats.udp_packets_in,
-    PrintMB(tmp2, stats.udp_bytes_out), stats.udp_packets_out/*, udp_qsize2 - udp_qsize1, g_tun_reads*/);
-  SetDlgItemText(g_ui_window, IDTXT_UDP, buf);
-
-  snprintf(buf, 512, "%s received (%lld packets), %s sent (%lld packets)",
-    PrintMB(tmp, stats.tun_bytes_in), stats.tun_packets_in,
-    PrintMB(tmp2, stats.tun_bytes_out), stats.tun_packets_out/*,
-          tpq_last_qsize, g_tun_writes*/);
-  SetDlgItemText(g_ui_window, IDTXT_TUN, buf);
-
-  char *d = buf;
-  if (stats.last_complete_handskake_timestamp) {
-    uint32 ago = (uint32)((OsGetMilliseconds() - stats.last_complete_handskake_timestamp) / 1000);
-    uint32 hours = ago / 3600;
-    uint32 minutes = (ago - hours * 3600) / 60;
-    uint32 seconds = (ago - hours * 3600 - minutes * 60);
-
-    if (hours)
-      d += snprintf(d, 32, hours == 1 ? "%d hour, " : "%d hours, ", hours);
-    if (minutes)
-      d += snprintf(d, 32, minutes == 1 ? "%d minute, " : "%d minutes, ", minutes);
-    if (d == buf || seconds)
-      d += snprintf(d, 32, seconds == 1 ? "%d second, " : "%d seconds, ", seconds);
-    memcpy(d - 2, " ago", 5);
-  } else {
-    memcpy(buf, "(never)", 8);
-  }
-  SetDlgItemText(g_ui_window, IDTXT_HANDSHAKE, buf);
-}
-
-void UpdatePublicKey(char *s) {
-  SetDlgItemText(g_ui_window, IDC_PUBLIC_KEY, s);
-  free(s);
-}
-
-static void UpdateButtons() {
-  bool running = g_backend->is_started();
-  SetDlgItemText(g_ui_window, ID_START, running ? "Re&connect" : "&Connect");
-  EnableWindow(GetDlgItem(g_ui_window, ID_STOP), running);
-}
-
 static void UpdateIcon(UpdateIconWhy why) {
-  in_addr_t ip = g_ui_ip;
   NOTIFYICONDATA nid;
   memset(&nid, 0, sizeof(nid));
   nid.cbSize = sizeof(nid);
@@ -272,18 +311,22 @@ static void UpdateIcon(UpdateIconWhy why) {
   nid.uVersion = NOTIFYICON_VERSION;
   nid.uCallbackMessage = WM_USER + 1;
   nid.uFlags = NIF_MESSAGE | NIF_TIP | NIF_ICON;
-  nid.hIcon = g_icons[ip ? 0 : 1];
+  nid.hIcon = g_icons[g_is_connected_to_server ? 0 : 1];
   
   char buf[kSizeOfAddress];
-  char namebuf[64];
-  if (ip != 0) {
-    snprintf(nid.szTip, sizeof(nid.szTip), "TunSafe [%s - %s]", GetCurrentConfigTitle(namebuf, sizeof(namebuf)), print_ip(buf, ip));
-    nid.uFlags |= NIF_INFO;
-    snprintf(nid.szInfoTitle, sizeof(nid.szInfoTitle), "Connected to: %s", namebuf);
-    snprintf(nid.szInfo, sizeof(nid.szInfo), "IP: %s", buf);
-    nid.uTimeout = 5000;
-    nid.dwInfoFlags = NIIF_INFO;
+  char namebuf[128];
+  if (g_is_connected_to_server) {
+    snprintf(nid.szTip, sizeof(nid.szTip), "TunSafe [%s - %s]", GetCurrentConfigTitle(namebuf, sizeof(namebuf)), print_ip(buf, g_backend->GetIP()));
+    if (!g_notified_connected_server) {
+      g_notified_connected_server = true;
+      nid.uFlags |= NIF_INFO;
+      snprintf(nid.szInfoTitle, sizeof(nid.szInfoTitle), "Connected to: %s", namebuf);
+      snprintf(nid.szInfo, sizeof(nid.szInfo), "IP: %s", buf);
+      nid.uTimeout = 5000;
+      nid.dwInfoFlags = NIIF_INFO;
+    }
   } else {
+    g_notified_connected_server = false;
     snprintf(nid.szTip, sizeof(nid.szTip), "TunSafe [%s]", "Disconnected");
 
     if (why == UIW_STOPPED_WORKING_FAIL) {
@@ -296,7 +339,7 @@ static void UpdateIcon(UpdateIconWhy why) {
   }
   Shell_NotifyIcon(g_has_icon ? NIM_MODIFY : NIM_ADD, &nid);
 
-  SendMessage(g_ui_window, WM_SETICON, ICON_SMALL, (LPARAM)g_icons[ip ? 0 : 1]);
+  SendMessage(g_ui_window, WM_SETICON, ICON_SMALL, (LPARAM)g_icons[g_is_connected_to_server ? 0 : 1]);
 
   g_has_icon = true;
 }
@@ -312,16 +355,10 @@ static void RemoveIcon() {
   }
 }
 
-#define MAX_CONFIG_FILES 100
+#define MAX_CONFIG_FILES 1024
 #define ID_POPUP_CONFIG_FILE 10000
 char *config_filenames[MAX_CONFIG_FILES];
-
-static void RestartService(UpdateIconWhy why, bool only_if_active) {
-  if (!only_if_active || g_backend->is_started()) {
-    StopService(why);
-    StartService(why != UIW_NONE);
-  }
-}
+uint8 config_filenames_indent[MAX_CONFIG_FILES];
 
 static char *StripConfExtension(const char *src, char *target, size_t size) {
   size_t len = strlen(src);
@@ -335,65 +372,121 @@ static char *StripConfExtension(const char *src, char *target, size_t size) {
 }
 
 static const char *GetCurrentConfigTitle(char *target, size_t size) {
-  const char *ll = FindLastFolderSep(g_current_filename);
-  return StripConfExtension(ll ? ll + 1 : g_current_filename, target, size);
+  const char *ll = FindFilenameComponent(g_current_filename);
+  return StripConfExtension(ll, target, size);
 }
 
-static void LoadConfigFile(const char *filename, bool save, bool force_start) {
+static void SetCurrentConfigFilename(const char *filename) {
   str_set(&g_current_filename, filename);
   char namebuf[64];
-  char *f = str_cat_alloc("TunSafe VPN Client - ", GetCurrentConfigTitle(namebuf, sizeof(namebuf)));
+  char *f = str_cat_alloc("TunSafe - ", GetCurrentConfigTitle(namebuf, sizeof(namebuf)));
   SetWindowText(g_ui_window, f);
   free(f);
-  RestartService(UIW_NONE, !force_start);
-  if (save)
-    RegWriteStr("ConfigFile", filename);
+
+  InvalidateRect(hwndPaintBox, NULL, FALSE);
 }
 
-static void AddToAvailableFilesPopup(HMENU menu, int max_num_items, bool is_settings) {
-  char buf[1024];
-  int nfiles = 0;
-  if (!GetConfigFullName("*.*", buf, ARRAYSIZE(buf)))
+
+static void LoadConfigFile(const char *filename, bool save, bool force_start) {
+  SetCurrentConfigFilename(filename);
+
+  if (force_start || g_backend->is_started())
+    StartTunsafeBackend(UIW_START);
+
+  if (save)
+    RegWriteStr(g_reg_key, "ConfigFile", filename);
+}
+
+class ConfigMenuBuilder {
+public:
+  ConfigMenuBuilder();
+ 
+  void Recurse();
+
+  int depth_;
+  int nfiles_;
+  size_t bufpos_;
+  WIN32_FIND_DATA wfd_;
+  char buf_[1024];
+};
+
+ConfigMenuBuilder::ConfigMenuBuilder() 
+    : nfiles_(0), depth_(0) {
+  if (!GetConfigFullName("", buf_, sizeof(buf_)))
+    bufpos_ = sizeof(buf_);
+  else
+    bufpos_ = strlen(buf_);
+}
+
+void ConfigMenuBuilder::Recurse() {
+  if (bufpos_ >= sizeof(buf_) - 4)
     return;
-    
-  int selected_item = -1;
-  WIN32_FIND_DATA wfd;
-  HANDLE handle = FindFirstFile(buf, &wfd);
+  memcpy(buf_ + bufpos_, "*.*", 4);
+  HANDLE handle = FindFirstFile(buf_, &wfd_);
   if (handle != INVALID_HANDLE_VALUE) {
     do {
-      if (wfd.cFileName[0] == '.')
+      if (wfd_.cFileName[0] == '.')
         continue;
 
-      if (strcmp(g_current_filename, wfd.cFileName) == 0)
-        selected_item = nfiles;
-
-      str_set(&config_filenames[nfiles], wfd.cFileName);
-      
-      nfiles++;
-      if (nfiles == MAX_CONFIG_FILES)
+      size_t len = strlen(wfd_.cFileName);
+      if (bufpos_ + len >= sizeof(buf_) - 1)
+        continue;
+      size_t old_bufpos = bufpos_;
+      memcpy(buf_ + bufpos_, wfd_.cFileName, len + 1);
+      bufpos_ = bufpos_ + len + 1;
+      config_filenames_indent[nfiles_] = depth_ + !!(wfd_.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY);
+      str_set(&config_filenames[nfiles_], buf_);
+      nfiles_++;
+      if (nfiles_ == MAX_CONFIG_FILES)
         break;
-    } while (FindNextFile(handle, &wfd));
+      if (wfd_.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        buf_[bufpos_ - 1] = '\\';
+        depth_++;
+        if (depth_ < 16)
+          Recurse();
+        depth_--;
+        if (nfiles_ == MAX_CONFIG_FILES)
+          break;
+      }
+      bufpos_ = old_bufpos;
+    } while (FindNextFile(handle, &wfd_));
     FindClose(handle);
   }
+}
 
-  HMENU where;
+
+static int AddToAvailableFilesPopup(HMENU menu, int max_num_items, bool is_settings) {
+  ConfigMenuBuilder menu_builder;
+  HMENU where[16] = {0};
+
+  menu_builder.Recurse();
 
   bool is_connected = g_backend->is_started();
+  uint32 last_indent = 0;
+  where[0] = menu;
 
-  where = menu;
-  for (int i = 0; i < nfiles; i++) {
-    if (i == max_num_items) {
-      where = CreatePopupMenu();
-      AppendMenu(menu, MF_POPUP, (UINT_PTR)where, "&More");
+  for (int i = 0; i < menu_builder.nfiles_; i++) {
+    uint32 indent = config_filenames_indent[i];
+    if (indent > last_indent) {
+      HMENU n = CreatePopupMenu();
+      where[indent] = n;
+      AppendMenu(where[last_indent], MF_POPUP, (UINT_PTR)n, FindFilenameComponent(config_filenames[i]));
+    } else {
+      bool selected_item = (strcmp(g_current_filename, config_filenames[i]) == 0);
+      AppendMenu(where[indent], (selected_item && is_connected) ?
+          MF_CHECKED : 0, ID_POPUP_CONFIG_FILE + i,
+          StripConfExtension(
+            FindFilenameComponent(config_filenames[i]), menu_builder.buf_, sizeof(menu_builder.buf_)));
+      if (selected_item)
+        SetMenuDefaultItem(where[indent], ID_POPUP_CONFIG_FILE + i, MF_BYCOMMAND);
     }
-
-    AppendMenu(where, (i == selected_item && is_connected) ? MF_CHECKED : 0, ID_POPUP_CONFIG_FILE + i, StripConfExtension(config_filenames[i], buf, sizeof(buf)));
-
-    if (i == selected_item)
-      SetMenuDefaultItem(where, ID_POPUP_CONFIG_FILE + i, MF_BYCOMMAND);
+    last_indent = indent;
   }
-  if (nfiles)
-    AppendMenu(menu, MF_SEPARATOR, 0, 0);
+
+  if (menu_builder.nfiles_ == 0)
+    AppendMenu(menu, MF_GRAYED | MF_DISABLED, 0, "(no config files found)");
+
+  return menu_builder.nfiles_;
 }
 
 static void ShowSettingsMenu(HWND wnd) {
@@ -401,102 +494,64 @@ static void ShowSettingsMenu(HWND wnd) {
 
   AddToAvailableFilesPopup(menu, 10, true);
 
-  AppendMenu(menu, 0, IDSETT_OPEN_FILE, "&Import File...");
-  AppendMenu(menu, 0, IDSETT_BROWSE_FILES, "&Browse in Explorer");
+  //POINT pt;
+  //GetCursorPos(&pt);
 
-  AppendMenu(menu, MF_SEPARATOR, 0, 0);
-  AppendMenu(menu, 0, IDSETT_KEYPAIR, "Generate &Key Pair...");
-  AppendMenu(menu, MF_SEPARATOR, 0, 0);
+  RECT r = GetParentRect(GetDlgItem(g_ui_window, ID_START));
 
-  HMENU blockinternet = CreatePopupMenu();
-  AppendMenu(blockinternet, 0, IDSETT_BLOCKINTERNET_OFF, "Off");
-  AppendMenu(blockinternet, MF_SEPARATOR, 0, 0);
-  AppendMenu(blockinternet, 0, IDSETT_BLOCKINTERNET_ROUTE, "Yes, with Routing Rules");
-  AppendMenu(blockinternet, 0, IDSETT_BLOCKINTERNET_FIREWALL, "Yes, with Firewall Rules");
-  AppendMenu(blockinternet, 0, IDSETT_BLOCKINTERNET_BOTH, "Yes, Both Methods");
-  bool is_activated = false;
-  int value = GetInternetBlockState(&is_activated);
-  CheckMenuRadioItem(blockinternet, IDSETT_BLOCKINTERNET_OFF, IDSETT_BLOCKINTERNET_BOTH, IDSETT_BLOCKINTERNET_OFF + value, MF_BYCOMMAND);
-  AppendMenu(menu, MF_POPUP + is_activated * MF_CHECKED, (UINT_PTR)blockinternet, "Block &All Internet Traffic");
-  
-  if (g_allow_pre_post || GetAsyncKeyState(VK_SHIFT) < 0) {
-    AppendMenu(menu, g_allow_pre_post ? MF_CHECKED : 0, IDSETT_PREPOST, "&Allow Pre/Post commands");
-  }
+  RECT r2 = GetParentRect(hwndPaintBox);
 
-  AppendMenu(menu, MF_SEPARATOR, 0, 0);
-  AppendMenu(menu, 0, IDSETT_WEB_PAGE, "Go to &Web Page");
-  AppendMenu(menu, 0, IDSETT_OPENSOURCE, "See Open Source Licenses");
-  AppendMenu(menu, 0, IDSETT_ABOUT, "&About TunSafe...");
-  
-  POINT pt;
-  GetCursorPos(&pt);
+  POINT pt = {r2.left, r.bottom};
 
-  g_last_popup_is_tray = false;
+  ClientToScreen(g_ui_window, &pt);
+
+
+
+
   int rv = TrackPopupMenu(menu, 0, pt.x, pt.y, 0, wnd, NULL);
   DestroyMenu(menu);
 }
 
-void FindDesktopFolderView(REFIID riid, void **ppv) {
-  CComPtr<IShellWindows> spShellWindows;
-  spShellWindows.CoCreateInstance(CLSID_ShellWindows);
-
-  CComVariant vtLoc(CSIDL_DESKTOP);
-  CComVariant vtEmpty;
-  long lhwnd;
-  CComPtr<IDispatch> spdisp;
-  spShellWindows->FindWindowSW(
-    &vtLoc, &vtEmpty,
-    SWC_DESKTOP, &lhwnd, SWFO_NEEDDISPATCH, &spdisp);
-
-  CComPtr<IShellBrowser> spBrowser;
-  CComQIPtr<IServiceProvider>(spdisp)->
-    QueryService(SID_STopLevelBrowser,
-                 IID_PPV_ARGS(&spBrowser));
-
-  CComPtr<IShellView> spView;
-  spBrowser->QueryActiveShellView(&spView);
-
-  spView->QueryInterface(riid, ppv);
-}
-
-void GetDesktopAutomationObject(REFIID riid, void **ppv) {
-  CComPtr<IShellView> spsv;
-  FindDesktopFolderView(IID_PPV_ARGS(&spsv));
-  CComPtr<IDispatch> spdispView;
-  spsv->GetItemObject(SVGIO_BACKGROUND, IID_PPV_ARGS(&spdispView));
-  spdispView->QueryInterface(riid, ppv);
-}
-
-void ShellExecuteFromExplorer(
-  PCSTR pszFile,
-  PCSTR pszParameters = nullptr,
-  PCSTR pszDirectory = nullptr,
-  PCSTR pszOperation = nullptr,
-  int nShowCmd = SW_SHOWNORMAL) {
-  CComPtr<IShellFolderViewDual> spFolderView;
-  GetDesktopAutomationObject(IID_PPV_ARGS(&spFolderView));
-  CComPtr<IDispatch> spdispShell;
-  spFolderView->get_Application(&spdispShell);
-
-  CComQIPtr<IShellDispatch2>(spdispShell)
-    ->ShellExecute(CComBSTR(pszFile),
-                   CComVariant(pszParameters ? pszParameters : ""),
-                   CComVariant(pszDirectory ? pszDirectory : ""),
-                   CComVariant(pszOperation ? pszOperation : ""),
-                   CComVariant(nShowCmd));
+static bool HasReadWriteAccess(const char *filename) {
+  HANDLE fileH = CreateFile(filename,
+                            GENERIC_READ | GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE, // For Exclusive access
+                            0,
+                            OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL,
+                            NULL);
+  if (fileH != INVALID_HANDLE_VALUE) {
+    CloseHandle(fileH);
+    return true;
+  }
+  return false;
 }
 
 static void OpenEditor() {
-  char buf[MAX_PATH];
-  if (GetConfigFullName(g_current_filename, buf, ARRAYSIZE(buf))) {
-    SHELLEXECUTEINFO shinfo = {0};
-    shinfo.cbSize = sizeof(shinfo);
-    shinfo.fMask = SEE_MASK_CLASSNAME;
-    shinfo.lpFile = buf;
-    shinfo.lpParameters = "";
-    shinfo.lpClass = ".txt";
-    shinfo.nShow = SW_SHOWNORMAL;
-    ShellExecuteEx(&shinfo);
+  SHELLEXECUTEINFO shinfo = {0};
+  shinfo.hwnd = g_ui_window;
+  shinfo.cbSize = sizeof(shinfo);
+  shinfo.nShow = SW_SHOWNORMAL;
+
+  if (g_current_filename[0]) {
+    if (!HasReadWriteAccess(g_current_filename)) {
+      // Need to runas admin
+      char buf[1024];
+      if (!ExpandEnvironmentStrings("%windir%\\system32\\notepad.exe", buf, sizeof(buf)))
+        return;
+      shinfo.lpFile = buf;
+      char *filename = str_cat_alloc("\"", g_current_filename, "\"");
+      shinfo.lpParameters = filename;
+      shinfo.lpVerb = "runas";
+      ShellExecuteEx(&shinfo);
+      free(filename);
+    } else {
+      shinfo.fMask = SEE_MASK_CLASSNAME;
+      shinfo.lpFile = g_current_filename;
+      shinfo.lpParameters = "";
+      shinfo.lpClass = ".txt";
+      ShellExecuteEx(&shinfo);
+    }
   }
 }
 
@@ -509,127 +564,62 @@ static void BrowseFiles() {
   }
 }
 
-bool FileExists(const CHAR *fileName) {
-  DWORD fileAttr = GetFileAttributes(fileName);
-  return (0xFFFFFFFF != fileAttr);
-}
-
-__int64 FileSize(const char* name) {
-  WIN32_FILE_ATTRIBUTE_DATA fad;
-  if (!GetFileAttributesEx(name, GetFileExInfoStandard, &fad))
-    return -1; // error condition, could call GetLastError to find out more
-  LARGE_INTEGER size;
-  size.HighPart = fad.nFileSizeHigh;
-  size.LowPart = fad.nFileSizeLow;
-  return size.QuadPart;
-}
-
-static bool is_space(uint8_t c) {
-  return c == ' ' || c == '\r' || c == '\n' || c == '\t';
-}
-
-static bool is_valid(uint8_t c) {
-  return c >= ' ' || c == '\r' || c == '\n' || c == '\t';
-}
-
-bool SanityCheckBuf(uint8 *buf, size_t n) {
-  for (size_t i = 0; i < n; i++) {
-    if (!is_space(buf[i])) {
-      if (buf[i] != '[' && buf[i] != '#')
-        return false;
-      for (; i < n; i++)
-        if (!is_valid(buf[i]))
-          return false;
-      return true;
-    }
-  }
-  return false;
-}
-
-uint8* LoadFileSane(const char *name, size_t *size) {
-  FILE *f = fopen(name, "rb");
-  uint8 *new_file = NULL, *file = NULL;
-  size_t j, i, n;
-  if (!f) return false;
-  fseek(f, 0, SEEK_END);
-  long x = ftell(f);
-  fseek(f, 0, SEEK_SET);
-  if (x < 0 || x >= 65536) goto error;
-  file = (uint8*)malloc(x + 1);
-  if (!file) goto error;
-  n = fread(file, 1, x + 1, f);
-  if (n != x || !SanityCheckBuf(file, n))
-    goto error;
-  // Convert the file to DOS new lines
-  for (i = j = 0; i < n; i++)
-    j += (file[i] == '\n');
-  new_file = (uint8*)malloc(n + 1 + j);
-  if (!new_file) goto error;
-  for (i = j = 0; i < n; i++) {
-    uint8 c = file[i];
-    if (c == '\r')
-      continue;
-    if (c == '\n')
-      new_file[j++] = '\r';
-    new_file[j++] = c;
-  }
-  new_file[j] = 0;
-  *size = j;
-
-error:
-  fclose(f);
-  free(file);
-  return new_file;
-}
-
-bool WriteOutFile(const char *filename, uint8 *filedata, size_t filesize) {
-  FILE *f = fopen(filename, "wb");
-  if (!f) return false;
-  if (fwrite(filedata, 1, filesize, f) != filesize) {
-    fclose(f);
-    return false;
-  }
-  fclose(f);
-  return true;
-}
-
-void ImportFile(const char *s) {
+bool ImportFile(const char *s, bool silent = false) {
   char buf[1024];
   char mesg[1024];
   size_t filesize;
-  const char *last = FindLastFolderSep(s);
-  if (!last || !GetConfigFullName(last + 1, buf, ARRAYSIZE(buf)) || _stricmp(buf, s) == 0)
-    return;
+  const char *last = FindFilenameComponent(s);
+  uint8 *filedata = NULL;
+  bool rv = false;
+  int filerv;
 
-  uint8 *filedata = LoadFileSane(s, &filesize);
-  if (!filedata) goto fail;
+  if (!*last || !GetConfigFullName(last, buf, ARRAYSIZE(buf)) || _stricmp(buf, s) == 0)
+    goto out;
 
-  if (FileExists(buf)) {
-    snprintf(mesg, ARRAYSIZE(mesg), "A file already exists with the name '%s' in the configuration folder. Do you want to overwrite it?", last + 1);
-    if (MessageBoxA(g_ui_window, mesg, "TunSafe", MB_OKCANCEL | MB_ICONEXCLAMATION) != IDOK)
-      goto out;
-  } else {
-    snprintf(mesg, ARRAYSIZE(mesg), "Do you want to import '%s' into TunSafe?", last + 1);
-    if (MessageBoxA(g_ui_window, mesg, "TunSafe", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
-      goto out;
+  filedata = LoadFileSane(s, &filesize);
+  if (!filedata)
+    goto out;
+
+  if (!silent) {
+    if (FileExists(buf)) {
+      snprintf(mesg, ARRAYSIZE(mesg), "A file already exists with the name '%s' in the configuration folder. Do you want to overwrite it?", last);
+      if (MessageBoxA(g_ui_window, mesg, "TunSafe", MB_OKCANCEL | MB_ICONEXCLAMATION) != IDOK)
+        goto out;
+    } else {
+      snprintf(mesg, ARRAYSIZE(mesg), "Do you want to import '%s' into TunSafe?", last);
+      if (MessageBoxA(g_ui_window, mesg, "TunSafe", MB_OKCANCEL | MB_ICONQUESTION) != IDOK)
+        goto out;
+    }
   }
 
-  if (!WriteOutFile(buf, filedata, filesize)) {
+  filerv = WriteOutFile(buf, filedata, filesize);
+  
+  // elevate?
+  if (filerv == kWriteOutFile_AccessError && g_is_limited_uac_account) {
+    char *args = str_cat_alloc("--import \"", s, "\"");
+    rv = RunProcessAsAdminWithArgs(args, true);
+    free(args);
+    return rv;
+  }
+
+  rv = (filerv == kWriteOutFile_Ok);
+  if (!rv)
     DeleteFileA(buf);
-fail:
-    MessageBoxA(g_ui_window, "There was a problem importing the file.", "TunSafe", MB_ICONEXCLAMATION);
-  } else {
-    LoadConfigFile(last + 1, true, false);
-  }
 
 out:
   free(filedata);
+
+  if (!silent) {
+    if (rv)
+      LoadConfigFile(buf, true, false);
+    else
+      MessageBoxA(g_ui_window, "There was a problem importing the file.", "TunSafe", MB_ICONEXCLAMATION);
+  }
+  return !rv;
 }
 
 void ShowUI(HWND hWnd) {
-  g_ui_visible = true;
-  UpdateStats();
-  ShowWindow(hWnd, SW_SHOW);
+  SetUiVisibility(true);
   BringWindowToTop(hWnd);
   SetForegroundWindow(hWnd);
 }
@@ -717,77 +707,280 @@ static INT_PTR WINAPI KeyPairDlgProc(HWND hWnd, UINT message, WPARAM wParam,
   return FALSE;
 }
 
-bool wm_dropfiles_recursive;
-uint64 last_auto_service_restart;
+static void SetStartupFlags(int new_flags) {
+  // Determine whether to autorun or not.
+  bool autorun = (new_flags & kStartupFlag_MinimizeToTrayWhenWindowsStarts) ||
+                 !(new_flags & kStartupFlag_BackgroundService) && (new_flags & kStartupFlag_ConnectWhenWindowsStarts);
+
+  // Update the autorun key.
+  HKEY hkey;
+  LSTATUS result;
+  result = RegOpenKeyEx(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\CurrentVersion\\Run", 0, KEY_WRITE, &hkey);
+  if (result == 0) {
+    if (autorun) {
+      wchar_t buf[512 + 32];
+      buf[0] = '"';
+      DWORD len = GetModuleFileNameW(NULL, buf + 1, 512);
+      if (len < 512) {
+        memcpy(buf + len + 1, L"\" --autostart", sizeof(wchar_t) * 14);
+        result = RegSetValueExW(hkey, L"TunSafe", NULL, REG_SZ, (BYTE*)buf, (DWORD)(len + 15) * sizeof(wchar_t));
+      }
+    } else {
+      RegDeleteValueW(hkey, L"TunSafe");
+    }
+    RegCloseKey(hkey);
+  }
+  RegWriteInt(g_reg_key, "StartupFlags", new_flags);
+
+  bool was_started = g_backend && g_backend->is_started();
+  bool recreate_backend = false;
+
+  if (!!(new_flags & (kStartupFlag_BackgroundService | kStartupFlag_ForegroundService))) {
+    // Want to run as a service - make sure service is installed and running.
+    if (!IsTunsafeServiceRunning()) {
+      g_backend->Stop();
+      RINFO("Starting TunSafe service...");
+      InstallTunSafeWindowsService();
+      recreate_backend = true;
+    }
+} else {
+    if (IsTunSafeServiceInstalled()) {
+      g_backend->Stop();
+      g_backend->Teardown();
+
+      RINFO("Removing TunSafe service...");
+      // Don't want to run as a service - Make sure we delete the service.
+      if (g_is_limited_uac_account) {
+        // Need to stop this early so service process is able to open.
+        CloseHandle(g_runonce_mutex);
+        if (!RunProcessAsAdminWithArgs("--delete-service-and-start", false)) {
+          RINFO("Unable to stop and remove service");
+          uint32 m = kStartupFlag_BackgroundService | kStartupFlag_ForegroundService;
+          new_flags = (g_startup_flags & m) | (new_flags & ~m);
+        } else {
+          PostQuitMessage(0);
+          return;
+        }
+      } else {
+        if (!UninstallTunSafeWindowsService()) {
+          RINFO("Unable to stop and remove service");
+          uint32 m = kStartupFlag_BackgroundService | kStartupFlag_ForegroundService;
+          new_flags = (g_startup_flags & m) | (new_flags & ~m);
+        }
+      }
+      recreate_backend = true;
+    }
+  }
+  if (recreate_backend) {
+    CreateLocalOrRemoteBackend(!!(new_flags & (kStartupFlag_BackgroundService | kStartupFlag_ForegroundService)));
+    if (was_started)
+      StartTunsafeBackend(UIW_START);
+  }
+  g_startup_flags = new_flags;
+  g_backend->SetServiceStartupFlags(g_startup_flags);
+}
+
+enum {
+  kTab_Logs = 0,
+  kTab_Charts = 1,
+  kTab_Advanced = 2,
+};
+
+static void UpdateGraphReq() {
+  if (g_backend && (g_current_tab != 1 || !g_ui_visible))
+    g_backend->GetGraph(0);
+}
+
+static void UpdateTabSelection() {
+  int tab = TabCtrl_GetCurSel(hwndTab);
+  HWND wnd = g_ui_window;
+  g_current_tab = tab;
+  ShowWindow(hwndEdit, (tab == kTab_Logs) ? SW_SHOW : SW_HIDE);
+  ShowWindow(hwndGraphBox, (tab == kTab_Charts) ? SW_SHOW : SW_HIDE);
+  ShowWindow(hwndAdvancedBox, (tab == kTab_Advanced) ? SW_SHOW : SW_HIDE);
+  UpdateGraphReq();
+}
+
+struct WindowSizingItem {
+  uint16 id;
+  uint16 edges;
+};
+
+enum {
+  WSI_LEFT = 1,
+  WSI_RIGHT = 2,
+  WSI_TOP = 4,
+  WSI_BOTTOM = 8,
+};
+
+static const WindowSizingItem kWindowSizing[] = {
+  {ID_START,WSI_LEFT | WSI_RIGHT},
+  {ID_STOP,WSI_LEFT | WSI_RIGHT},
+  {ID_EDITCONF,WSI_LEFT | WSI_RIGHT},
+  {IDC_PAINTBOX,WSI_RIGHT},
+  {IDC_TAB, WSI_RIGHT | WSI_BOTTOM},
+};
+
+static void HandleWindowSizing() {
+  RECT wr;
+
+  GetClientRect(g_ui_window, &wr);
+
+  static int g_orig_w, g_orig_h;
+  static RECT g_orig_rects[ARRAYSIZE(kWindowSizing)];
+
+  if (g_orig_w == 0) {
+    g_orig_w = wr.right;
+    g_orig_h = wr.bottom;
+    for (size_t i = 0; i < ARRAYSIZE(kWindowSizing); i++) {
+      const WindowSizingItem *it = &kWindowSizing[i];
+      g_orig_rects[i] = GetParentRect(GetDlgItem(g_ui_window, it->id));
+    }
+  }
+
+  int dx = wr.right - g_orig_w;
+  int dy = wr.bottom - g_orig_h;
+
+  if (dx|dy) {
+    HDWP dwp = BeginDeferWindowPos(10), dwp_next;
+    for (size_t i = 0; i < ARRAYSIZE(kWindowSizing); i++) {
+      const WindowSizingItem *it = &kWindowSizing[i];
+      HWND wnd = GetDlgItem(g_ui_window, it->id);
+      RECT r = g_orig_rects[i];
+      if (it->edges & WSI_LEFT) r.left += dx;
+      if (it->edges & WSI_RIGHT) r.right += dx;
+      if (it->edges & WSI_TOP) r.top += dy;
+      if (it->edges & WSI_BOTTOM) r.bottom += dy;
+      if (r.right < r.left) r.right = r.left;
+      if (r.bottom < r.top) r.bottom = r.top;
+      dwp_next = DeferWindowPos(dwp, wnd, NULL, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOREPOSITION | SWP_NOACTIVATE);
+      dwp = dwp_next ? dwp_next : dwp;
+    }
+    EndDeferWindowPos(dwp);
+  }
+
+  RECT rect = GetParentRect(hwndTab);
+  TabCtrl_AdjustRect(hwndTab, false, &rect);
+  MoveWindow(hwndEdit, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
+  MoveWindow(hwndGraphBox, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
+  MoveWindow(hwndAdvancedBox, rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, TRUE);
+
+  int parts[3] = {
+    (int)(wr.right * 0.2f),
+    (int)(wr.right * 0.6f),
+    (int)-1,
+  };
+
+  SendMessage(hwndStatus, SB_SETPARTS, 3, (LPARAM)parts);
+  SendMessage(hwndStatus, WM_SIZE, 0, 0);
+  InvalidateRect(hwndStatus, NULL, TRUE);
+}
+
+static void HandleClickedItem(HWND hWnd, int wParam) {
+  if (wParam >= ID_POPUP_CONFIG_FILE && wParam < ID_POPUP_CONFIG_FILE + MAX_CONFIG_FILES) {
+    const char *new_conf = config_filenames[wParam - ID_POPUP_CONFIG_FILE];
+    if (!new_conf)
+      return;
+
+    if (strcmp(new_conf, g_current_filename) == 0 && g_backend->is_started()) {
+      StopTunsafeBackend(UIW_NONE);
+    } else {
+      LoadConfigFile(new_conf, true, GetAsyncKeyState(VK_SHIFT) >= 0);
+    }
+
+    return;
+  }
+  switch (wParam) {
+  case ID_START: StartTunsafeBackend(UIW_START); break;
+  case ID_STOP:  StopTunsafeBackend(UIW_NONE); break;
+  case ID_EXIT:  PostQuitMessage(0); break;
+  case ID_MORE_BUTTON: ShowSettingsMenu(hWnd); break;
+  case IDSETT_WEB_PAGE: ShellExecute(g_ui_window, NULL, "https://tunsafe.com/", NULL, NULL, 0); break;
+  case IDSETT_OPENSOURCE: ShellExecute(g_ui_window, NULL, "https://tunsafe.com/open-source", NULL, NULL, 0); break;
+  case ID_EDITCONF: OpenEditor(); break;
+  case IDSETT_BROWSE_FILES:BrowseFiles(); break;
+  case IDSETT_OPEN_FILE: BrowseFile(hWnd); break;
+  case IDSETT_ABOUT:
+    MessageBoxA(g_ui_window, TUNSAFE_VERSION_STRING "\r\n\r\nCopyright © 2018, Ludvig Strigeus\r\n\r\nThanks for choosing TunSafe!\r\n\r\nThis version was built on " __DATE__ " " __TIME__, "About TunSafe", MB_ICONINFORMATION);
+    break;
+  case IDSETT_KEYPAIR:
+    DialogBox(g_hinstance, MAKEINTRESOURCE(IDD_DIALOG2), hWnd, &KeyPairDlgProc);
+    break;
+  case IDSETT_BLOCKINTERNET_OFF:
+  case IDSETT_BLOCKINTERNET_ROUTE:
+  case IDSETT_BLOCKINTERNET_FIREWALL:
+  case IDSETT_BLOCKINTERNET_BOTH:
+  {
+    InternetBlockState old_state = g_backend->GetInternetBlockState(NULL);
+    InternetBlockState new_state = (InternetBlockState)(wParam - IDSETT_BLOCKINTERNET_OFF);
+
+    if (old_state == kBlockInternet_Off && new_state != kBlockInternet_Off) {
+      if (MessageBoxA(g_ui_window, "Warning! All Internet traffic will be blocked until you restart your computer. Only traffic through TunSafe will be allowed.\r\n\r\nThe blocking is activated the next time you connect to a VPN server.\r\n\r\nDo you want to continue?", "TunSafe", MB_ICONWARNING | MB_OKCANCEL) == IDCANCEL)
+        return;
+    }
+
+    g_backend->SetInternetBlockState(new_state);
+
+    if ((~old_state & new_state) && g_backend->is_started())
+      StartTunsafeBackend(UIW_START);
+    return;
+  }
+  case IDSETT_SERVICE_OFF:
+  case IDSETT_SERVICE_FOREGROUND:
+  case IDSETT_SERVICE_BACKGROUND:
+    SetStartupFlags((int)((g_startup_flags & ~3) + wParam - IDSETT_SERVICE_OFF));
+    break;
+  case IDSETT_SERVICE_CONNECT_AUTO:
+    SetStartupFlags(g_startup_flags ^ kStartupFlag_ConnectWhenWindowsStarts);
+    break;
+  case IDSETT_SERVICE_MINIMIZE_AUTO:
+    SetStartupFlags(g_startup_flags ^ kStartupFlag_MinimizeToTrayWhenWindowsStarts);
+    break;
+
+  case IDSETT_PREPOST:
+  {
+    if (!g_hklm_reg_key) {
+      if (!RunProcessAsAdminWithArgs(g_allow_pre_post ? "--set-allow-pre-post 0" : "--set-allow-pre-post 1", true))
+        MessageBox(g_ui_window, "You need to run TunSafe as an Administrator to be able to change this setting.", "TunSafe", MB_ICONWARNING);
+      g_allow_pre_post = RegReadInt(g_hklm_readonly_reg_key, "AllowPrePost", 0) != 0;
+      return;
+    }
+    g_allow_pre_post = !g_allow_pre_post;
+    RegWriteInt(g_hklm_reg_key, "AllowPrePost", g_allow_pre_post);
+    return;
+  }
+  }
+}
+
 static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
                                 LPARAM lParam) {
-  switch(message) {
+
+  switch (message) {
   case WM_INITDIALOG:
+    SetMenu(hWnd, LoadMenu(g_hinstance, MAKEINTRESOURCE(IDR_MENU1)));
     return TRUE;
   case WM_CLOSE:
-    g_ui_visible = false;
-    ShowWindow(hWnd, SW_HIDE);
+    SetUiVisibility(false);
     return TRUE;
-  case WM_COMMAND:
-    if (wParam >= ID_POPUP_CONFIG_FILE && wParam < ID_POPUP_CONFIG_FILE + MAX_CONFIG_FILES) {
-      const char *new_conf = config_filenames[wParam - ID_POPUP_CONFIG_FILE];
-      if (!new_conf)
+  case WM_NOTIFY: {
+    UINT idFrom = (UINT)((NMHDR*)lParam)->idFrom;
+    switch (((NMHDR*)lParam)->code) {
+    case TCN_SELCHANGE:
+      switch (idFrom) {
+      case IDC_TAB:
+        UpdateTabSelection();
         return TRUE;
-
-      if (g_last_popup_is_tray && strcmp(new_conf, g_current_filename) == 0 && g_backend->is_started()) {
-        StopService(UIW_NONE);
-      } else {
-        LoadConfigFile(new_conf, true, g_last_popup_is_tray);
       }
 
-
-      return TRUE;
-    }
-    switch(wParam) {
-    case ID_START: 
-      StopService(UIW_NONE);
-      StartService();
       break;
-    case ID_STOP:  StopService(UIW_NONE); break;
-    case ID_EXIT:  PostQuitMessage(0); break;
-    case ID_RESET: g_backend->ResetStats(); break;
-    case ID_MORE_BUTTON: ShowSettingsMenu(hWnd); break;
-    case IDSETT_WEB_PAGE: ShellExecute(NULL, NULL, "https://tunsafe.com/", NULL, NULL, 0); break;
-    case IDSETT_OPENSOURCE: ShellExecute(NULL, NULL, "https://tunsafe.com/open-source", NULL, NULL, 0); break;
-    case ID_EDITCONF: OpenEditor(); break;
-    case IDSETT_BROWSE_FILES:BrowseFiles(); break;
-    case IDSETT_OPEN_FILE: BrowseFile(hWnd); break;
-    case IDSETT_ABOUT:
-      MessageBoxA(g_ui_window, TUNSAFE_VERSION_STRING "\r\n\r\nCopyright © 2018, Ludvig Strigeus\r\n\r\nThanks for choosing TunSafe!\r\n\r\nThis version was built on " __DATE__ " " __TIME__, "About TunSafe", MB_ICONINFORMATION);
-      break;
-    case IDSETT_KEYPAIR:
-      DialogBox(g_hinstance, MAKEINTRESOURCE(IDD_DIALOG2), hWnd, &KeyPairDlgProc);
-      break;
-    case IDSETT_BLOCKINTERNET_OFF:
-    case IDSETT_BLOCKINTERNET_ROUTE:
-    case IDSETT_BLOCKINTERNET_FIREWALL: 
-    case IDSETT_BLOCKINTERNET_BOTH: {
-      InternetBlockState old_state = GetInternetBlockState(NULL);
-      InternetBlockState new_state = (InternetBlockState)(wParam - IDSETT_BLOCKINTERNET_OFF);
-
-      if (old_state == kBlockInternet_Off && new_state != kBlockInternet_Off) {
-        if (MessageBoxA(g_ui_window, "Warning! All Internet traffic will be blocked until you restart your computer. Only traffic through TunSafe will be allowed.\r\n\r\nThe blocking is activated the next time you connect to a VPN server.\r\n\r\nDo you want to continue?", "TunSafe", MB_ICONWARNING | MB_OKCANCEL) == IDCANCEL)
-          return TRUE;
-      }
-
-      SetInternetBlockState(new_state);
-
-      if ((~old_state & new_state) && g_backend->is_started()) {
-        StopService(UIW_NONE);
-        StartService();
-      }
-      return TRUE;
     }
-    case IDSETT_PREPOST: {
-      g_allow_pre_post = !g_allow_pre_post;
-      RegWriteInt("AllowPrePost", g_allow_pre_post);
-      return TRUE;
-    }
+    break;
+  }
+  case WM_COMMAND:
+    switch (HIWORD(wParam)) {
+    case 0:
+      HandleClickedItem(hWnd, (int)wParam);
+      break;
     }
     break;
   case WM_DROPFILES:
@@ -800,7 +993,8 @@ static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
   case WM_USER + 1:
     if (lParam == WM_RBUTTONUP) {
       HMENU menu = CreatePopupMenu();
-      AddToAvailableFilesPopup(menu, 10, false);
+      if (AddToAvailableFilesPopup(menu, 10, false))
+        AppendMenu(menu, MF_SEPARATOR, 0, 0);
 
       bool active = g_backend->is_started();
       AppendMenu(menu, 0, ID_START, active ? "Re&connect" : "&Connect");
@@ -812,149 +1006,55 @@ static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
 
       SetForegroundWindow(hWnd);
 
-      g_last_popup_is_tray = true;
-
-      int rv = TrackPopupMenu(menu, 0, pt.x, pt.y, 0, hWnd, NULL);      
+      int rv = TrackPopupMenu(menu, 0, pt.x, pt.y, 0, hWnd, NULL);
       DestroyMenu(menu);
     } else if (lParam == WM_LBUTTONDBLCLK) {
       if (IsWindowVisible(hWnd)) {
-        g_ui_visible = false;
-        ShowWindow(hWnd, SW_HIDE);
+        SetUiVisibility(false);
       } else {
         ShowUI(hWnd);
       }
     }
     return TRUE;
   case WM_USER + 2:
-    if (g_ui_ip != 0 && g_minimize_on_connect) {
-      g_minimize_on_connect = false;
-      g_ui_visible = false;
-      ShowWindow(hWnd, SW_HIDE);
-    }
-    UpdateIcon(UIW_NONE);
-    return TRUE;
-  case WM_USER + 3: {
-    CHARRANGE cr;
-    cr.cpMin = -1;
-    cr.cpMax = -1;
-    // hwnd = rich edit hwnd
-    SendDlgItemMessage(hWnd, IDC_RICHEDIT21, EM_EXSETSEL, 0, (LPARAM)&cr);
-    SendDlgItemMessage(hWnd, IDC_RICHEDIT21, EM_REPLACESEL, 0, (LPARAM)lParam);
-    free( (void*) lParam);
+    g_backend_delegate->DoWork();
     return true;
+
+  case WM_INITMENU: {
+    HMENU menu = GetMenu(g_ui_window);
+
+    CheckMenuItem(menu, IDSETT_SERVICE_CONNECT_AUTO, MF_CHECKED * !!(g_startup_flags & kStartupFlag_ConnectWhenWindowsStarts));
+    CheckMenuItem(menu, IDSETT_SERVICE_MINIMIZE_AUTO, MF_CHECKED * !!(g_startup_flags & kStartupFlag_MinimizeToTrayWhenWindowsStarts));
+    CheckMenuItem(menu, IDSETT_PREPOST, g_allow_pre_post ? MF_CHECKED : 0);
+
+    bool is_activated = false;
+    int value = g_backend->GetInternetBlockState(&is_activated);
+    CheckMenuRadioItem(menu, IDSETT_BLOCKINTERNET_OFF, IDSETT_BLOCKINTERNET_BOTH, IDSETT_BLOCKINTERNET_OFF + value, MF_BYCOMMAND);
+    CheckMenuRadioItem(menu, IDSETT_SERVICE_OFF, IDSETT_SERVICE_BACKGROUND, IDSETT_SERVICE_OFF + (g_startup_flags & 3), MF_BYCOMMAND);
+
+    break;
   }
-  case WM_USER + 6:
-    SetDlgItemText(hWnd, IDC_RICHEDIT21, "");
-    return true;
-  case WM_USER + 5:
-    UpdatePublicKey((char*)lParam);
-    return true;
-  case WM_USER + 4: {
-    UpdateStats();
-    return true;
-  }                      
-  case WM_USER + 10:
+
+  case WM_SIZE:
+    if (wParam == SIZE_MAXIMIZED || wParam == SIZE_RESTORED) {
+      if (g_ui_window)
+        HandleWindowSizing();
+    }
     break;
 
-  case WM_USER + 11: {
-    uint64 now = GetTickCount64();
-    if (now < last_auto_service_restart + 5000) {
-      RERROR("Too many automatic restarts...");
-      StopService(UIW_STOPPED_WORKING_FAIL);
-    } else {
-      last_auto_service_restart = now;
-      RestartService(UIW_STOPPED_WORKING_RETRY, true);
+  case WM_EXITMENULOOP:
+    g_timestamp_of_exit_menuloop = GetTickCount();
+    break;
+
+  default:
+    if (message == g_message_taskbar_created) {
+      g_has_icon = false;
+      UpdateIcon(UIW_NONE);
     }
     break;
-  }
   }
   return FALSE;
 }
-
-struct PostMsg {
-  int msg;
-  WPARAM wparam;
-  LPARAM lparam;
-  PostMsg(int a, WPARAM b, LPARAM c) : msg(a), wparam(b), lparam(c) {}
-};
-
-static HANDLE msg_event;
-static CRITICAL_SECTION msg_section;
-static std::vector<PostMsg> msgvect;
-
-static DWORD WINAPI MessageThread(void *x) {
-  std::vector<PostMsg> proc;
-  for(;;) {
-    WaitForSingleObject(msg_event, INFINITE);
-    proc.clear();
-    EnterCriticalSection(&msg_section);
-    std::swap(proc, msgvect);
-    LeaveCriticalSection(&msg_section);
-    for(size_t i = 0; i != proc.size(); i++)
-      PostMessage(g_ui_window, proc[i].msg, proc[i].wparam, proc[i].lparam);
-  }
-}
-
-static void MyPostMessage(int msg, WPARAM wparam, LPARAM lparam) {
-  size_t count;
-  EnterCriticalSection(&msg_section);
-  count = msgvect.size();
-  msgvect.emplace_back(msg, wparam, lparam);
-  LeaveCriticalSection(&msg_section);
-  if (count == 0) SetEvent(msg_event);
-}
-
-static void InitMyPostMessage() {
-  msg_event = CreateEvent(NULL, FALSE, FALSE, NULL);
-  InitializeCriticalSection(&msg_section);
-  DWORD thread_id;
-  CloseHandle(CreateThread(NULL, 0, &MessageThread, NULL, 0, &thread_id));
-}
-
-
-void OsGetRandomBytes(uint8 *data, size_t data_size) {
-#if defined(OS_WIN)
-  static BOOLEAN(APIENTRY *pfn)(void*, ULONG);
-  static bool resolved;
-  if (!resolved) {
-    pfn = (BOOLEAN(APIENTRY *)(void*, ULONG))GetProcAddress(LoadLibrary("ADVAPI32.DLL"), "SystemFunction036");
-    resolved = true;
-  }
-  if (pfn && pfn(data, (ULONG)data_size))
-    return;
-  int r = 0;
-#else
-  int fd = open("/dev/urandom", O_RDONLY);
-  int r = read(fd, data, data_size);
-  if (r < 0) r = 0;
-  close(fd);
-#endif
-  for (; r < data_size; r++)
-    data[r] = rand() >> 6;
-}
-
-void OsInterruptibleSleep(int millis) {
-  SleepEx(millis, TRUE);
-}
-
-
-uint64 OsGetMilliseconds() {
-  return GetTickCount64();
-}
-
-void OsGetTimestampTAI64N(uint8 dst[12]) {
-  SYSTEMTIME systime;
-  uint64 file_time_uint64 = 0;
-  GetSystemTime(&systime);
-  SystemTimeToFileTime(&systime, (FILETIME*)&file_time_uint64);
-  uint64 time_since_epoch_100ns = (file_time_uint64 - 116444736000000000);
-  uint64 secs_since_epoch = time_since_epoch_100ns / 10000000 + 0x400000000000000a;
-  uint32 nanos = (uint32)(time_since_epoch_100ns % 10000000) * 100;
-  WriteBE64(dst, secs_since_epoch);
-  WriteBE32(dst + 8, nanos);
-}
-
-
 
 void PushLine(const char *s) {
   size_t l = strlen(s);
@@ -973,7 +1073,8 @@ void PushLine(const char *s) {
   x[l + tl] = '\r';
   x[l + tl + 1] = '\n';
   x[l + tl + 2] = '\0';
-  MyPostMessage(WM_USER + 3, 0, (LPARAM)x);
+  g_backend_delegate->OnLogLine((const char**)&x);
+  free(x);
 }
 
 void EnsureConfigDirCreated() {
@@ -985,7 +1086,6 @@ void EnsureConfigDirCreated() {
 void EnableControl(int wnd, bool b) {
   EnableWindow(GetDlgItem(g_ui_window, wnd), b);
 }
-
 
 LRESULT CALLBACK NotifyWndProc(HWND  hwnd, UINT  uMsg, WPARAM wParam, LPARAM lParam) {
   switch (uMsg) {
@@ -1012,27 +1112,649 @@ void CreateNotificationWindow() {
   CreateWindow("TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90", "TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90", 0, 0, 0, 0, 0, 0, 0, g_hinstance, NULL);
 }
 
-
-void CallbackUpdateUI() {
-  if (g_ui_visible)
-    MyPostMessage(WM_USER + 4, NULL, NULL);
+HFONT CreateBoldUiFont() {
+  LOGFONT lf;
+  HFONT ffont = (HFONT)SendMessage(g_ui_window, WM_GETFONT, 0, 0);
+  GetObject(ffont, sizeof(lf), &lf);
+  lf.lfWeight = FW_BOLD;
+  HFONT font = CreateFontIndirect(&lf);
+  return font;
 }
 
-void CallbackTriggerReconnect() {
-  PostMessage(g_ui_window, WM_USER + 11, 0, 0);
+void FillRectColor(HDC dc, const RECT &r, COLORREF color) {
+  COLORREF old = ::SetBkColor(dc, color);
+  ExtTextOut(dc, 0, 0, ETO_OPAQUE, &r, NULL, 0, NULL);
+  ::SetBkColor(dc, old);
 }
 
-void CallbackSetPublicKey(const uint8 public_key[32]) {
-  char *str = (char*)base64_encode(public_key, 32, NULL);
-  PostMessage(g_ui_window, WM_USER + 5, NULL, (LPARAM)str);
+void DrawRectOutline(HDC dc, const RECT &r) {
+  POINT points[5] = {
+    {r.left, r.top},
+    {r.right, r.top},
+    {r.right, r.bottom},
+    {r.left, r.bottom},
+    {r.left, r.top}
+  };
+  Polyline(dc, points, 5);
 }
 
-int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
+static HFONT CreateFontHelper(int size, byte flags, const char *face, int angle = 0) {
+  return CreateFontA(-RescaleDpi(size), 0, angle, angle, flags & 1 ? FW_BOLD : 0, FALSE, flags & 2 ? 1 : 0, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                     CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, face);
+}
+
+static const char *StatusCodeToString(TunsafeBackend::StatusCode code) {
+  switch (code) {
+  case TunsafeBackend::kErrorInitialize:    return "Configuration Error";
+  case TunsafeBackend::kErrorTunPermanent:  return "TUN Adapter Error";
+  case TunsafeBackend::kErrorServiceLost:   return "Service Lost";
+  case TunsafeBackend::kStatusStopped:      return "Disconnected";
+  case TunsafeBackend::kStatusInitializing: return "Initializing";
+  case TunsafeBackend::kStatusConnecting:   return "Connecting...";
+  case TunsafeBackend::kStatusReconnecting: return "Reconnecting...";
+  case TunsafeBackend::kStatusConnected:    return "Connected";
+  case TunsafeBackend::kStatusTunRetrying:  return "TUN Adapter Error, retrying...";
+  default:
+    return "Unknown";
+  }
+}
+
+static void DrawInPaintBox(HDC hdc, int w, int h) {
+  RECT rect = {0, 0, w, h};
+  FillRect(hdc, &rect, (HBRUSH)(COLOR_3DFACE + 1));
+  
+  HFONT font = CreateBoldUiFont();
+
+  char namebuf[128];
+  GetCurrentConfigTitle(namebuf, sizeof(namebuf));
+
+  RECT btrect = GetParentRect(GetDlgItem(g_ui_window, ID_START));
+
+  HPEN pen = CreatePen(PS_SOLID, 0, GetSysColor(COLOR_3DSHADOW));
+  HBRUSH brush = GetSysColorBrush(COLOR_WINDOW);
+
+  SelectObject(hdc, pen);
+  SelectObject(hdc, brush);
+
+  comborect = MakeRect(0, btrect.top + 1, w, btrect.bottom - 1);
+  Rectangle(hdc, 0, btrect.top + 1, w, btrect.bottom - 1);
+
+  if (arrowbitmap == NULL)
+    arrowbitmap = LoadBitmap(g_hinstance, MAKEINTRESOURCE(IDB_DOWNARROW));
+
+  int bw = RescaleDpi(6);
+
+  HDC memdc = CreateCompatibleDC(hdc);
+  SelectObject(memdc, arrowbitmap);
+  StretchBlt(hdc, w - 1 - bw - 5, btrect.top + 1 + ((btrect.bottom - btrect.top - bw) >> 1), 
+    bw, bw, memdc, 0, 0, 6, 6, SRCCOPY);
+
+  int th = RescaleDpi(20);
+
+  SelectObject(hdc, font);
+  SetBkColor(hdc, GetSysColor(COLOR_WINDOW));
+  TextOut(hdc, RescaleDpi(4), btrect.top + RescaleDpi(4), namebuf, (int)strlen(namebuf));
+
+  int y = btrect.bottom + RescaleDpi(4);
+
+  DeleteObject(pen);
+
+  SelectObject(hdc, (HFONT)SendMessage(g_ui_window, WM_GETFONT, 0, 0));
+  SetBkColor(hdc, GetSysColor(COLOR_3DFACE));
+
+  TunsafeBackend::StatusCode status = g_backend->status();
+  my_strlcpy(namebuf, sizeof(namebuf) - 32, StatusCodeToString(status));
+  if (status == TunsafeBackend::kStatusConnected || status == TunsafeBackend::kStatusReconnecting) {
+    uint64 when = g_processor_stats.first_complete_handshake_timestamp;
+    uint32 seconds = (when != 0) ? (uint32)((OsGetMilliseconds() - when + 500) / 1000) : 0;
+    snprintf(strchr(namebuf, 0), 32, ", %.2d:%.2d:%.2d", seconds / 3600, (seconds / 60) % 60, seconds % 60);
+  }
+ 
+  int img = (status == TunsafeBackend::kStatusConnected) ? 0 :
+            g_backend->is_started() && !TunsafeBackend::IsPermanentError(status) ? 1 : 2;
+
+  static const COLORREF kDotColors[3] = {
+    0x51a600,
+    0x00c0c0,
+    0x0000c0,
+  };
+  SetBkMode(hdc, TRANSPARENT);
+  COLORREF oldcolor = SetTextColor(hdc, kDotColors[img]);
+  HFONT oldfont = (HFONT)SelectObject(hdc, CreateFontHelper(18, 0, "Tahoma"));
+  wchar_t bullet = 0x25CF;
+  TextOutW(hdc, RescaleDpi(2), y - RescaleDpi(7), &bullet, 1);
+  DeleteObject(SelectObject(hdc, oldfont));
+  SetTextColor(hdc, oldcolor);
+
+  TextOut(hdc, RescaleDpi(2 + 14), y, namebuf, (int)strlen(namebuf));
+
+  y += RescaleDpi(18);
+
+  uint32 ip = g_backend->GetIP();
+  if (ip) {
+    print_ip(namebuf, ip);
+    TextOut(hdc, 2, y, namebuf, (int)strlen(namebuf));
+  } 
+  DeleteObject(font);
+  DeleteDC(memdc);
+}
+
+typedef void DrawInPaintBoxFunc(HDC dc, int w, int h);
+static void HandleWmPaintPaintbox(HWND hwnd, DrawInPaintBoxFunc *func) {
+  PAINTSTRUCT ps;
+  BeginPaint(hwnd, &ps);
+
+  RECT r;
+  GetClientRect(hwnd, &r);
+
+  HBITMAP bmp = CreateCompatibleBitmap(ps.hdc, r.right, r.bottom);
+  HDC dc = CreateCompatibleDC(ps.hdc);
+  SelectObject(dc, bmp);
+
+  func(dc, r.right, r.bottom);
+
+  BitBlt(ps.hdc, 0, 0, r.right, r.bottom, dc, 0, 0, SRCCOPY);
+  DeleteDC(dc);
+  DeleteObject(bmp);
+  EndPaint(hwnd, &ps);
+}
+
+static LRESULT CALLBACK PaintBoxWndProc(HWND  hwnd, UINT  uMsg, WPARAM wParam, LPARAM lParam) {
+  switch (uMsg) {
+  case WM_PAINT: {
+    HandleWmPaintPaintbox(hwnd, &DrawInPaintBox);
+    return TRUE;
+  }
+  case WM_LBUTTONDOWN: {
+    POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    if (PtInRect(&comborect, pt)) {
+      // Avoid showing the menu again if clicking to close.
+      if (GetTickCount() - g_timestamp_of_exit_menuloop >= 50u)
+        ShowSettingsMenu(g_ui_window);
+    }
+    return TRUE;
+  }
+  }
+  return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+static void DrawGraph(HDC dc, const RECT *rr, StatsCollector::TimeSeries **sources, const COLORREF *colors, int num_source, const char *xcaption, const char *ycaption) {
+  RECT r = *rr;
+  FillRectColor(dc, r, 0xffffff);
+
+  RECT margins = { 30, 10, -10, -15 };
+  margins = RescaleDpiRect(margins);
+
+  r.left += margins.left;
+  r.top += margins.top;
+  r.right += margins.right;
+  r.bottom += margins.bottom;
+
+  HPEN borderpen = CreatePen(PS_SOLID, 1, 0x808080);
+  SelectObject(dc, borderpen);
+  DrawRectOutline(dc, r);
+
+  static const uint8 bits[4] = {0x70, 0, 0, 0};
+  HBITMAP bmp = CreateBitmap(4, 1, 1, 1, &bits);
+  HBRUSH brush = CreatePatternBrush(bmp);
+  DeleteObject(bmp);
+
+  // Draw horizontal dotted lines
+  {
+    SetTextColor(dc, 0x808080);
+    SetBkColor(dc, 0xffffff);
+    int inc = (r.bottom - r.top) >> 2;
+    RECT r2 = {r.left + 1, r.top + inc * 1, r.right - 1, r.top + inc * 1 + 1};
+    FillRect(dc, &r2, brush);
+    r2.top += inc; r2.bottom += inc;
+    FillRect(dc, &r2, brush);
+    r2.top += inc; r2.bottom += inc;
+    FillRect(dc, &r2, brush);
+  }
+  DeleteObject(brush);
+
+  static const uint8 bits_vertical[16] = {
+    0xff, 0x0, 0xff, 0,
+    0xff, 0x0, 0x0, 0,
+    0xff, 0x0, 0x0, 0,
+    0x0, 0x0, 0x0, 0};
+  bmp = CreateBitmap(1, 4, 1, 1, &bits_vertical);
+  brush = CreatePatternBrush(bmp);
+  DeleteObject(bmp);
+
+  {
+    // Draw vertical dotted lines 
+    for (int i = 1; i < 12; i++) {
+      int x = (r.right - r.left) * i / 12;
+      RECT r2 = {r.left + x, r.top + 1, r.left + x + 1, r.bottom - 1};
+      FillRect(dc, &r2, brush);
+    }
+  }
+
+  {
+    // Draw legend text
+    HFONT font = CreateFontHelper(10, 0, "Tahoma");
+    SelectObject(dc, font);
+    SetTextColor(dc, 0x202020);
+    SetBkMode(dc, TRANSPARENT);
+    RECT r2 = {r.left + 1, r.bottom, r.right - 1, r.bottom + RescaleDpi(15)};
+    DrawText(dc, xcaption, (int)strlen(xcaption), &r2, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    DeleteObject(font);
+  }
+  DeleteObject(brush);
+  DeleteObject(borderpen);
+
+  // Determine the scaling factor
+  float mx = 1;
+  for (size_t j = 0; j != num_source; j++) {
+    const StatsCollector::TimeSeries *src = sources[j];
+    for (size_t i = 0; i != src->size; i++)
+      mx = max(mx, src->data[i]);
+  }
+  int topval = (int)(mx + 0.5f);
+  // round it appropriately
+  if (topval >= 500)
+    topval = (topval + 99) / 100 * 100;
+  else if (topval >= 200)
+    topval = (topval + 49) / 50 * 50;
+  else if (topval >= 50)
+    topval = (topval + 9) / 10 * 10;
+  else if (topval >= 20)
+    topval = (topval + 4) / 5 * 5;
+  if (topval > mx)
+    mx = (float)topval;
+
+  {
+    RECT r2 = {r.left - RescaleDpi(30), r.top - RescaleDpi(2), r.left - RescaleDpi(2), r.bottom};
+    char buf[30];
+    sprintf(buf, "%d", topval);
+    DrawText(dc, buf, (int)strlen(buf), &r2, DT_RIGHT | DT_SINGLELINE);
+    r2.top = r.bottom - RescaleDpi(12);
+    DrawText(dc, "0", 1, &r2, DT_RIGHT | DT_SINGLELINE);
+  }
+
+  float mx_f = (1.0f / mx) * (r.bottom - r.top);
+
+  for (size_t k = 0; k != num_source; k++) {
+    HPEN borderpen = CreatePen(PS_SOLID, 2, colors[k]);
+    SelectObject(dc, borderpen);
+    const StatsCollector::TimeSeries *src = sources[k];
+    POINT *points = new POINT[src->size];
+    for (size_t i = 0, j = src->shift; i != src->size; i++) {
+      points[i].x = (int)(r.left + (r.right - r.left) * i / (src->size - 1));
+      points[i].y = r.bottom - (int)((float)src->data[j] * mx_f);
+      if (++j == src->size) j = 0;
+    }
+    Polyline(dc, points, src->size);
+    delete points;
+    DeleteObject(borderpen);
+  }
+
+  if (ycaption != NULL) {
+    HFONT font = CreateFontHelper(10, 0, "Tahoma", 900);
+    SelectObject(dc, font);
+    TextOut(dc, r.left - RescaleDpi(18), ((r.top + r.bottom) >> 1) + RescaleDpi(12), ycaption, (int)strlen(ycaption));
+    DeleteObject(font);
+  }
+}
+
+static const char * const kGraphStepNames[] = {
+  "1 second step",
+  "5 second step",
+  "30 second step",
+  "5 minute step",
+};
+
+static void DrawInGraphBox(HDC hdc, int w, int h) {
+  RECT r = {0, 0, w, h};
+  
+  static const COLORREF color[4] = {
+    0x00c000,
+    0xc00000,
+  };
+  
+  LinearizedGraph *graph = g_backend->GetGraph(g_selected_graph_type);
+  StatsCollector::TimeSeries *time_series_ptr[4];
+  StatsCollector::TimeSeries time_series[4];
+
+  int num_charts = 0;
+  if (graph && graph->num_charts <= 4) {
+    uint8 *ptr = (uint8*)(graph + 1);
+    for (int i = 0; i < graph->num_charts; i++) {
+      time_series_ptr[i] = &time_series[i];
+      time_series[i].shift = 0;
+      time_series[i].size = *(uint32*)ptr;
+      time_series[i].data = (float*)(ptr + 4);
+      ptr += 4 + *(uint32*)ptr * 4;
+      if (ptr - (uint8*)graph > graph->total_size)
+        break;
+    }
+    num_charts = graph->num_charts;
+  }
+
+  char buf[256];
+  snprintf(buf, sizeof(buf), "Time (%s)", kGraphStepNames[g_selected_graph_type]);
+
+  DrawGraph(hdc, &r, time_series_ptr, color, num_charts, buf, "Mbps");
+
+  free(graph);
+}
+
+static LRESULT CALLBACK GraphBoxWndProc(HWND  hwnd, UINT  uMsg, WPARAM wParam, LPARAM lParam) {
+  switch (uMsg) {
+  case WM_PAINT: {
+    HandleWmPaintPaintbox(hwnd, &DrawInGraphBox);
+    return TRUE;
+  }
+  case WM_RBUTTONDOWN: {
+    HMENU menu = CreatePopupMenu();
+    for(int i = 0; i < ARRAYSIZE(kGraphStepNames); i++)
+      AppendMenu(menu, (i == g_selected_graph_type) * MF_CHECKED, i + 1, kGraphStepNames[i]);
+    POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    ClientToScreen(hwnd, &pt);
+    int rv = TrackPopupMenu(menu, TPM_NONOTIFY | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
+    DestroyMenu(menu);
+    if (rv != 0) {
+      g_selected_graph_type = rv - 1;
+      InvalidateRect(hwnd, NULL, FALSE);
+    }
+    return TRUE;
+  }
+  }
+  return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+struct AdvancedTextInfo {
+  uint16 y;
+  uint8 indent;
+  const char *title;
+};
+
+static const AdvancedTextInfo ADVANCED_TEXT_INFOS[] = {
+#define Y 26
+  {Y + 19 * 0, 66, "Public Key:"},
+  {Y + 19 * 1, 66, "Endpoint:"},
+  {Y + 19 * 2, 66, "Transfer:"},
+  {Y + 19 * 3, 66, "Handshake:"},
+  {Y + 19 * 4, 66, ""},
+  {Y + 19 * 5, 66, "Overhead:"},
+#undef Y
+};
+
+static char *PrintLastHandshakeAt(char buf[256], WgProcessorStats *ps) {
+  char *d = buf;
+  if (ps->last_complete_handshake_timestamp) {
+    uint32 ago = (uint32)((OsGetMilliseconds() - ps->last_complete_handshake_timestamp + 500) / 1000);
+    uint32 hours = ago / 3600;
+    uint32 minutes = (ago - hours * 3600) / 60;
+    uint32 seconds = (ago - hours * 3600 - minutes * 60);
+    if (hours)
+      d += snprintf(d, 32, hours == 1 ? "%d hour, " : "%d hours, ", hours);
+    if (minutes)
+      d += snprintf(d, 32, minutes == 1 ? "%d minute, " : "%d minutes, ", minutes);
+    if (d == buf || seconds)
+      d += snprintf(d, 32, seconds == 1 ? "%d second, " : "%d seconds, ", seconds);
+    memcpy(d - 2, " ago", 5);
+  } else {
+    memcpy(buf, "(never)", 8);
+  }
+  return buf;
+}
+
+static const char *GetAdvancedInfoValue(char buffer[256], int i) {
+  char tmp[64], tmp2[64];
+  WgProcessorStats *ps = &g_processor_stats;
+  switch (i) {
+  case 0: {
+    if (IsOnlyZeros(g_backend->public_key(), 32))
+      return "";
+    char *str = (char*)base64_encode(g_backend->public_key(), 32, NULL);
+    snprintf(buffer, 256, "%s", str);
+    free(str);
+    return buffer;
+  }
+  case 1: {
+    char ip[kSizeOfAddress];
+    if (ps->endpoint.sin.sin_family == 0)
+      return "";
+    PrintIpAddr(ps->endpoint, ip);
+    snprintf(buffer, 256, "%s:%d", ip, htons(ps->endpoint.sin.sin_port));
+    return buffer;
+  }
+    
+  case 2: 
+    snprintf(buffer, 256, "%s in (%lld packets), %s out (%lld packets)",
+             PrintMB(tmp, ps->udp_bytes_in), ps->udp_packets_in,
+             PrintMB(tmp2, ps->udp_bytes_out), ps->udp_packets_out/*, udp_qsize2 - udp_qsize1, g_tun_reads*/);
+    return buffer;
+  case 3: return PrintLastHandshakeAt(buffer, ps);
+  case 4: {
+    snprintf(buffer, 256, "%d handshakes in (%d failed), %d handshakes out (%d failed)",
+             ps->handshakes_in, ps->handshakes_in - ps->handshakes_in_success,
+             ps->handshakes_out, ps->handshakes_out - ps->handshakes_out_success);
+    return buffer;
+  }
+  case 5: {
+    uint64 overhead_in = ps->udp_bytes_in + ps->udp_packets_in * 40 - ps->tun_bytes_out;
+    uint32 overhead_in_pct = ps->tun_bytes_out ? (uint32)(overhead_in * 100000 / ps->tun_bytes_out) : 0;
+
+    uint64 overhead_out = ps->udp_bytes_out + ps->udp_packets_out * 40 - ps->tun_bytes_in;
+    uint32 overhead_out_pct = ps->tun_bytes_in ? (uint32)(overhead_out * 100000 / ps->tun_bytes_in) : 0;
+
+    snprintf(buffer, 256, "%d.%.3d%% in, %d.%.3d%% out", overhead_in_pct / 1000, overhead_in_pct % 1000,
+             overhead_out_pct / 1000, overhead_out_pct % 1000);
+    return buffer;
+  }
+  default: return "";
+  }  
+}
+
+static void DrawInAdvancedBox(HDC dc, int w, int h) {
+  RECT r = {0, 0, w, h};
+
+  FillRectColor(dc, r, 0xffffff);
+
+  SelectObject(dc, (HFONT)SendMessage(g_ui_window, WM_GETFONT, 0, 0));
+  SetTextColor(dc, GetSysColor(COLOR_WINDOWTEXT));
+  SetBkColor(dc, GetSysColor(COLOR_WINDOW));
+
+  const AdvancedTextInfo *tp = ADVANCED_TEXT_INFOS;
+  char buffer[256];
+
+  for (size_t i = 0; i != ARRAYSIZE(ADVANCED_TEXT_INFOS); i++, tp++) {
+    int x = 8;
+
+    RECT r = {x, tp->y, x + tp->indent, tp->y + 19};
+    r = RescaleDpiRect(r);
+    ::ExtTextOut(dc, r.left, r.top, ETO_CLIPPED | ETO_OPAQUE, &r, tp->title, (UINT)strlen(tp->title), NULL);
+
+    const char *s = GetAdvancedInfoValue(buffer, (int)i);
+    r.left = r.right;
+    r.right = w;
+    ::ExtTextOut(dc, r.left, r.top, ETO_CLIPPED | ETO_OPAQUE, &r, s, (UINT)strlen(s), NULL);
+  }
+
+  SetBkColor(dc, GetSysColor(COLOR_3DFACE));
+
+  static const int grouptop[1] = { 
+    2
+  };
+  static const char *grouptext[1] = {
+    "General",
+  };
+
+  HFONT font = CreateFontHelper(12, 1, "Tahoma");
+  SelectObject(dc, font);
+  for (size_t i = 0; i != ARRAYSIZE(grouptext); i++) {
+    RECT r = {RescaleDpi(4), RescaleDpi(grouptop[i]), w - RescaleDpi(4), RescaleDpi(grouptop[i] + 18)};
+    ::ExtTextOut(dc, RescaleDpi(8), r.top + 1, ETO_CLIPPED | ETO_OPAQUE, &r, grouptext[i], (UINT)strlen(grouptext[i]), NULL);
+  }
+  DeleteFont(font);
+}
+
+static LRESULT CALLBACK AdvancedBoxWndProc(HWND  hwnd, UINT  uMsg, WPARAM wParam, LPARAM lParam) {
+  switch (uMsg) {
+  case WM_PAINT: {
+    HandleWmPaintPaintbox(hwnd, &DrawInAdvancedBox);
+    return TRUE;
+  }
+  case WM_ERASEBKGND:
+    return TRUE;
+
+  case WM_RBUTTONDOWN: {
+    int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+    char buffer[256];
+
+    const AdvancedTextInfo *tp = ADVANCED_TEXT_INFOS;
+    for (size_t i = 0; i != ARRAYSIZE(ADVANCED_TEXT_INFOS); i++, tp++) {
+      if (x >= RescaleDpi(tp->indent) && y >= RescaleDpi(tp->y) && y < RescaleDpi(tp->y + 19)) {
+        HMENU menu = CreatePopupMenu();
+        AppendMenu(menu, 0, 1, "Copy");
+        POINT pt = {x, y};
+        ClientToScreen(hwnd, &pt);
+        int rv = TrackPopupMenu(menu, TPM_NONOTIFY | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, NULL);
+        DestroyMenu(menu);
+        if (rv == 1)
+          SetClipboardString(GetAdvancedInfoValue(buffer, (int)i));
+        return TRUE;
+      }
+    }
+    return TRUE;
+  }
+  }
+  return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+void InitializeClass(WNDPROC wndproc, const char *name) {
+  WNDCLASSEX wce = {0};
+  wce.cbSize = sizeof(wce);
+  wce.lpfnWndProc = wndproc;
+  wce.hInstance = g_hinstance;
+  wce.lpszClassName = name;
+  wce.style = CS_HREDRAW | CS_VREDRAW;
+  wce.hCursor = LoadCursor(NULL, IDC_ARROW);
+  RegisterClassEx(&wce);
+}
+
+static bool CreateMainWindow() {
+  LoadLibrary(TEXT("Riched20.dll"));
+  INITCOMMONCONTROLSEX ccx;
+  ccx.dwSize = sizeof(INITCOMMONCONTROLSEX);
+  ccx.dwICC = ICC_TAB_CLASSES;
+  InitCommonControlsEx(&ccx);
+
+  InitializeClass(&PaintBoxWndProc, "PaintBox");
+  InitializeClass(&GraphBoxWndProc, "GraphBox");
+  InitializeClass(&AdvancedBoxWndProc, "AdvancedBox");
+
+  HDC dc = GetDC(0);
+  g_large_fonts = GetDeviceCaps(dc, LOGPIXELSX);
+  ReleaseDC(0, dc);
+
+  g_message_taskbar_created = RegisterWindowMessage(TEXT("TaskbarCreated"));
+
+  g_icons[0] = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_ICON1));
+  g_icons[1] = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_ICON0));
+  g_ui_window = CreateDialog(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_DIALOG1), NULL, &DlgProc);
+
+  if (!g_ui_window)
+    return false;
+  
+  DragAcceptFiles(g_ui_window, TRUE);
+
+  ChangeWindowMessageFilter(WM_DROPFILES, MSGFLT_ADD);
+  ChangeWindowMessageFilter(WM_COPYDATA, MSGFLT_ADD);
+  ChangeWindowMessageFilter(0x0049, MSGFLT_ADD);
+  ChangeWindowMessageFilter(WM_USER + 10, MSGFLT_ADD);
+
+  TCITEM tabitem;
+  HWND hwnd_tab = GetDlgItem(g_ui_window, IDC_TAB);
+  hwndTab = hwnd_tab;
+  tabitem.mask = TCIF_TEXT;
+  tabitem.pszText = "Logs";
+  TabCtrl_InsertItem(hwnd_tab, 0, &tabitem);
+  tabitem.pszText = "Charts";
+  TabCtrl_InsertItem(hwnd_tab, 1, &tabitem);
+  tabitem.pszText = "Advanced";
+  TabCtrl_InsertItem(hwnd_tab, 2, &tabitem);
+  SetWindowLong(hwnd_tab, GWL_EXSTYLE, GetWindowLong(hwnd_tab, GWL_EXSTYLE) | WS_EX_COMPOSITED);
+
+
+
+  hwndEdit = GetDlgItem(g_ui_window, IDC_RICHEDIT21);
+  hwndPaintBox = GetDlgItem(g_ui_window, IDC_PAINTBOX);
+  hwndGraphBox = GetDlgItem(g_ui_window, IDC_GRAPHBOX);
+  hwndAdvancedBox = GetDlgItem(g_ui_window, IDC_ADVANCEDBOX);
+
+  SetWindowLong(hwndEdit, GWL_EXSTYLE, GetWindowLong(hwndEdit, GWL_EXSTYLE) &~ WS_EX_CLIENTEDGE);
+
+  // Create the status bar.
+  hwndStatus = CreateWindowEx(
+      WS_EX_COMPOSITED, STATUSCLASSNAME, NULL,
+      WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_ui_window,
+      (HMENU)IDC_STATUSBAR, g_hinstance, NULL);
+
+  HandleWindowSizing();
+  UpdateTabSelection();
+  return true;
+}
+
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nShowCmd) {
   g_hinstance = hInstance;
   InitCpuFeatures();
 
+  WSADATA wsaData = {0};
+  WSAStartup(MAKEWORD(2, 2), &wsaData);
+
+  bool minimize = false;
+  bool is_autostart = false;
+  const char *filename = NULL;
+
+  for (int i = 1; i < __argc; i++) {
+    const char *arg = __argv[i];
+    if (strcmp(arg, "/minimize") == 0) {
+      minimize = true;
+    } else if (strcmp(arg, "/minimize_on_connect") == 0) {
+      g_minimize_on_connect = true;
+    } else if (strcmp(arg, "/allow_pre_post") == 0) {
+      g_allow_pre_post = true;
+    } else if (strcmp(arg, "--service") == 0) {
+      RunProcessAsTunsafeServiceProcess();
+      return 0;
+    } else if (strcmp(arg, "--delete-service-and-start") == 0) {
+      UninstallTunSafeWindowsService();
+    } else if (strcmp(arg, "--autostart") == 0) {
+      is_autostart = true;
+    } else if (strcmp(arg, "--set-allow-pre-post") == 0) {
+      bool want = i + 1 < __argc && atoi(__argv[i + 1]) != 0;
+      RegCreateKeyEx(HKEY_LOCAL_MACHINE, "Software\\TunSafe", NULL, NULL, 0, KEY_ALL_ACCESS, NULL, &g_hklm_reg_key, NULL);
+      RegWriteInt(g_hklm_reg_key, "AllowPrePost", want);
+      return 0;
+    } else if (strcmp(arg, "--import") == 0) {
+      if (i + 1 >= __argc) return 1;
+      const char *filename = __argv[i + 1];
+      return ImportFile(filename, true);
+    } else {
+      filename = arg;
+      break;
+    }
+  }
+
+  SetProcessDPIAware();
+
+  RegCreateKeyEx(HKEY_CURRENT_USER, "Software\\TunSafe", NULL, NULL, 0, KEY_ALL_ACCESS, NULL, &g_reg_key, NULL);
+  RegCreateKeyEx(HKEY_LOCAL_MACHINE, "Software\\TunSafe", NULL, NULL, 0, KEY_ALL_ACCESS, NULL, &g_hklm_reg_key, NULL);
+  RegOpenKeyEx(HKEY_LOCAL_MACHINE, "Software\\TunSafe", 0, KEY_READ, &g_hklm_readonly_reg_key);
+   
+  g_startup_flags = RegReadInt(g_reg_key, "StartupFlags", 0);
+
+  if (is_autostart) {
+    g_disable_connect_on_start = !(g_startup_flags & kStartupFlag_ConnectWhenWindowsStarts);
+    minimize = !!(g_startup_flags & kStartupFlag_MinimizeToTrayWhenWindowsStarts);
+  }
+
   // Check if the app is already running.
-  CreateMutexA(0, FALSE, "TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90");
+  g_runonce_mutex = CreateMutexA(0, FALSE, "TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90");
   if (GetLastError() == ERROR_ALREADY_EXISTS) {
     HWND window = FindWindow("TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90", NULL);
     DWORD_PTR result;
@@ -1041,103 +1763,64 @@ int WINAPI WinMain (HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLin
     }
     return 1;
   }
+
+  TOKEN_ELEVATION_TYPE toktype;
+  g_is_limited_uac_account = (GetProcessElevationType(&toktype) && toktype == TokenElevationTypeLimited);
+  g_is_tunsafe_service_running = IsTunsafeServiceRunning();
+  bool want_use_service = !!(g_startup_flags & (kStartupFlag_BackgroundService | kStartupFlag_ForegroundService));
+  
+  // Re-launch the process as administrator if the TunSafe service isn't running.
+  if ((!g_is_tunsafe_service_running || !want_use_service) && g_is_limited_uac_account) {
+    CloseHandle(g_runonce_mutex);
+    if (!RestartProcessAsAdministrator())
+      MessageBoxA(0, "TunSafe needs to run as Administrator unless the TunSafe Service is started.", "TunSafe", MB_ICONWARNING);
+    return 0;
+  }
+
   CreateNotificationWindow();
 
-  WSADATA wsaData = {0};
-  if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-    RERROR("WSAStartup failed");
-    return 1;
-  }
-
-  LoadLibrary(TEXT("Riched20.dll"));
-
-  g_backend = new TunsafeBackendWin32();
-
-  InitMyPostMessage();
-  InitCommonControls();
-
-  g_icons[0] = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_ICON1));
-  g_icons[1] = LoadIcon(GetModuleHandle(NULL), MAKEINTRESOURCE(IDI_ICON0));
-  g_ui_window = CreateDialog(GetModuleHandle(NULL), MAKEINTRESOURCE(IDD_DIALOG1), NULL, &DlgProc);
-
-  if (!g_ui_window)
-    return 1;
-
-  RegCreateKeyEx(HKEY_CURRENT_USER, "Software\\TunSafe", NULL, NULL, 0, KEY_ALL_ACCESS, NULL, &g_reg_key, NULL);
-  DragAcceptFiles(g_ui_window, TRUE);
-
-  ChangeWindowMessageFilter(WM_DROPFILES, MSGFLT_ADD);
-  ChangeWindowMessageFilter(WM_COPYDATA, MSGFLT_ADD);
-  ChangeWindowMessageFilter(0x0049, MSGFLT_ADD);
-
-  static const int ctrls[] = {IDTXT_UDP, IDTXT_TUN, IDTXT_HANDSHAKE};
-  for (int i = 0; i < 3; i++) {
-    HWND w = GetDlgItem(g_ui_window, ctrls[i]);
-    SetWindowLong(w, GWL_EXSTYLE, GetWindowLong(w, GWL_EXSTYLE) | WS_EX_COMPOSITED);
-  }
-
-  g_allow_pre_post = RegReadInt("AllowPrePost", 0) != 0;
-
-  bool minimize = false;
-  const char *filename = NULL;
-
-  for (size_t i = 1; i < __argc; i++) {
-    const char *arg = __argv[i];
-
-    if (_stricmp(arg, "/minimize") == 0) {
-      minimize = true;
-    } else if (_stricmp(arg, "/minimize_on_connect") == 0) {
-      g_minimize_on_connect = true;
-    } else if (_stricmp(arg, "/allow_pre_post") == 0) {
-      g_allow_pre_post = true;
-    } else {
-      filename = arg;
-      break;
-    }
-  }
-
-  if (!minimize) {
-    g_ui_visible = true;
-    ShowWindow(g_ui_window, SW_SHOW);
-  }
-
-  UpdateIcon(UIW_NONE);
-
+  g_backend_delegate = CreateTunsafeBackendDelegateThreaded(&my_procdel, []() {
+    if (g_ui_window)
+      PostMessage(g_ui_window, WM_USER + 2, 0, 0);
+  });
   g_logger = &PushLine;
 
+  if (!CreateMainWindow())
+    return 1;
+
+  g_current_filename = _strdup("");
+  g_cmdline_filename = filename;
+
+  if (!g_allow_pre_post && g_hklm_readonly_reg_key)
+    g_allow_pre_post = RegReadInt(g_hklm_readonly_reg_key, "AllowPrePost", 0) != 0;
+
+  // Attempt to start service...
+  if (want_use_service && !g_is_tunsafe_service_running) {
+    RINFO("Starting TunSafe service...");
+    InstallTunSafeWindowsService();
+  }
+
+  CreateLocalOrRemoteBackend(want_use_service);
+
+  if (!minimize) {
+    SetUiVisibility(true);
+  }
+  UpdateIcon(UIW_NONE);
   EnsureConfigDirCreated();
 
-  if (filename) {
-    LoadConfigFile(filename, false, false);
-  } else {
-    char *conf = RegReadStr("ConfigFile", "TunSafe.conf");
-    LoadConfigFile(conf, false, false);
-    free(conf);
-  }
-  
-  //  PrintCpuFeatures();
-
-//  Benchmark();
-
-  if (filename != NULL || RegReadInt("IsConnected", 0)) {
-    StartService();
-  } else {
-    RINFO("Press Connect to initiate a connection to the WireGuard server.");
-  }
-  
   MSG msg;
-
   while (GetMessage(&msg, NULL, 0, 0)) {
     if (!IsDialogMessage(g_ui_window, &msg)) {
       TranslateMessage(&msg);
       DispatchMessage(&msg);
     }
   }
-  StopService(UIW_EXITING);
+
+  if (!g_backend->is_remote())
+    g_backend->Stop();
+
+  delete g_backend;
   RemoveIcon();
 
   return 0;
 }
-
-
-

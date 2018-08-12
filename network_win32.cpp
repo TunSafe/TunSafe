@@ -38,6 +38,8 @@ static SLIST_HEADER freelist_head;
 
 bool g_allow_pre_post;
 
+static InternetBlockState GetInternetBlockState(bool *is_activated);
+
 Packet *AllocPacket() {
   Packet *packet = (Packet*)InterlockedPopEntrySList(&freelist_head);
   if (packet == NULL)
@@ -49,6 +51,40 @@ Packet *AllocPacket() {
 
 void FreePacket(Packet *packet) {
   InterlockedPushEntrySList(&freelist_head, &packet->list_entry);
+}
+
+void OsGetRandomBytes(uint8 *data, size_t data_size) {
+  static BOOLEAN(APIENTRY *pfn)(void*, ULONG);
+  static bool resolved;
+  if (!resolved) {
+    pfn = (BOOLEAN(APIENTRY *)(void*, ULONG))GetProcAddress(LoadLibrary("ADVAPI32.DLL"), "SystemFunction036");
+    resolved = true;
+  }
+  if (pfn && pfn(data, (ULONG)data_size))
+    return;
+  size_t r = 0;
+  for (; r < data_size; r++)
+    data[r] = rand() >> 6;
+}
+
+void OsInterruptibleSleep(int millis) {
+  SleepEx(millis, TRUE);
+}
+
+uint64 OsGetMilliseconds() {
+  return GetTickCount64();
+}
+
+void OsGetTimestampTAI64N(uint8 dst[12]) {
+  SYSTEMTIME systime;
+  uint64 file_time_uint64 = 0;
+  GetSystemTime(&systime);
+  SystemTimeToFileTime(&systime, (FILETIME*)&file_time_uint64);
+  uint64 time_since_epoch_100ns = (file_time_uint64 - 116444736000000000);
+  uint64 secs_since_epoch = time_since_epoch_100ns / 10000000 + 0x400000000000000a;
+  uint32 nanos = (uint32)(time_since_epoch_100ns % 10000000) * 100;
+  WriteBE64(dst, secs_since_epoch);
+  WriteBE32(dst + 8, nanos);
 }
 
 extern "C"
@@ -79,11 +115,6 @@ void InitPacketMutexes() {
     InitializeSListHead(&freelist_head);
   }
 }
-
-
-void CallbackUpdateUI();
-void CallbackTriggerReconnect();
-void CallbackSetPublicKey(const uint8 public_key[32]);
 
 int tpq_last_qsize;
 int g_tun_reads, g_tun_writes;
@@ -200,7 +231,7 @@ static bool GetTapAdapterGuid(char guid[64]) {
 }
 
 // Open the TAP adapter
-static HANDLE OpenTunAdapter(char guid[64], int retry_count, bool *exit_thread, DWORD open_flags) {
+static HANDLE OpenTunAdapter(char guid[64], int retry_count, uint32 *exit_thread, DWORD open_flags) {
   char path[128];
   HANDLE h;
   int retries = 0;
@@ -221,7 +252,16 @@ RETRY:
     if ((error_code == ERROR_FILE_NOT_FOUND || error_code == ERROR_GEN_FAILURE) && retry_count != 0 && !*exit_thread) {
       RERROR("OpenTapAdapter: CreateFile failed: 0x%X... retrying", error_code);
       retry_count--;
-      Sleep(250 * ++retries);
+
+      int sleep_amount = 250 * ++retries;
+      for(;;) {
+        if (*exit_thread)
+          return NULL;
+        if (sleep_amount == 0)
+          break;
+        Sleep(50);
+        sleep_amount -= 50;
+      }
       goto RETRY;
     }
     
@@ -239,7 +279,7 @@ RETRY:
 static bool AddRoute(int family,
                      const void *dest, int dest_prefix,
                      const void *gateway, const NET_LUID *interface_luid,
-                     std::vector<MIB_IPFORWARD_ROW2> *undo_array = NULL) {
+                     std::vector<MIB_IPFORWARD_ROW2> *undo_array) {
   MIB_IPFORWARD_ROW2 row = {0};
   char buf1[kSizeOfAddress], buf2[kSizeOfAddress];
 
@@ -261,11 +301,12 @@ static bool AddRoute(int family,
   row.Metric = 100;
   row.Protocol = MIB_IPPROTO_NETMGMT;
 
-  if (undo_array)
-    undo_array->push_back(row);
-
   DWORD error = CreateIpForwardEntry2(&row);
   if (error == NO_ERROR || error == ERROR_OBJECT_ALREADY_EXISTS) {
+
+    if (undo_array)
+      undo_array->push_back(row);
+
     RINFO("Added Route %s  =>  %s", print_ip_prefix(buf1, family, dest, dest_prefix),
           print_ip_prefix(buf2, family, gateway, -1));
     return true;
@@ -352,7 +393,7 @@ static bool GetDefaultRouteAndDeleteOldRoutes(int family, const NET_LUID *Interf
   for (unsigned i = 0; i < table->NumEntries; i++) {
     MIB_IPFORWARD_ROW2 *row = &table->Table[i];
     if (InterfaceLuid && memcmp(&row->InterfaceLuid, InterfaceLuid, sizeof(NET_LUID)) == 0) {
-      if (row->Protocol == MIB_IPPROTO_NETMGMT)
+      if (row->Protocol == MIB_IPPROTO_NETMGMT && !row->AutoconfigureAddress)
         DeleteRouteOrPrintErr(row);
     } else if (IsRouteOriginatingFromNullRoute(row)) {
       ri->found_null_routes++;
@@ -422,8 +463,6 @@ UdpSocketWin32::UdpSocketWin32() {
   thread_ = NULL;
   socket_ipv6_ = INVALID_SOCKET;
   completion_port_handle_ = NULL;
-
-  InitializeCriticalSectionAndSpinCount(&mutex_, 1024);
 }
 
 UdpSocketWin32::~UdpSocketWin32() {
@@ -432,7 +471,6 @@ UdpSocketWin32::~UdpSocketWin32() {
   closesocket(socket_ipv6_);
   CloseHandle(completion_port_handle_);
   FreePacketList(wqueue_);
-  DeleteCriticalSection(&mutex_);
 }
 
 bool UdpSocketWin32::Initialize(int listen_on_port) {
@@ -613,11 +651,11 @@ restart_read_udp:
       if (!pending_writes) {
         if (!wqueue_)
           break;
-        EnterCriticalSection(&mutex_);
+        mutex_.Acquire();
         pending_writes = wqueue_;
         wqueue_end_ = &wqueue_;
         wqueue_ = NULL;
-        LeaveCriticalSection(&mutex_);
+        mutex_.Release();
         if (!pending_writes)
           break;
       }
@@ -690,11 +728,11 @@ void UdpSocketWin32::WriteUdpPacket(Packet *packet) {
   packet->next = NULL;
   qs.udp_qsize2 += packet->size;
   
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   Packet *was_empty = wqueue_;
   *wqueue_end_ = packet;
   wqueue_end_ = &packet->next;
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
 
   if (was_empty == NULL) {
     // Notify the worker thread that it should attempt more writes
@@ -722,10 +760,9 @@ void UdpSocketWin32::StopThread() {
   thread_ = NULL;
 }
 
-ThreadedPacketQueue::ThreadedPacketQueue(WireguardProcessor *wg, NetworkStats *stats) {
+ThreadedPacketQueue::ThreadedPacketQueue(WireguardProcessor *wg, TunsafeBackendWin32 *backend) {
   wg_ = wg;
-  stats_ = stats;
-  InitializeCriticalSectionAndSpinCount(&mutex_, 1024);
+  backend_ = backend;
   event_ = CreateEvent(NULL, FALSE, FALSE, NULL);
 
   last_ptr_ = &first_;
@@ -743,7 +780,6 @@ ThreadedPacketQueue::~ThreadedPacketQueue() {
   assert(timer_handle_ == NULL);
   first_ = NULL;
   last_ptr_ = &first_;
-  DeleteCriticalSection(&mutex_);
   CloseHandle(event_);
 }
 
@@ -755,23 +791,29 @@ DWORD WINAPI ThreadedPacketQueue::ThreadedPacketQueueLauncher(VOID *x) {
 DWORD ThreadedPacketQueue::ThreadMain() {
   int free_packets_ctr = 0;
   int overload = 0;
+  Packet *packet;
 
-  EnterCriticalSection(&mutex_);
+  wg_->dev().SetCurrentThreadAsMainThread();
+
+  mutex_.Acquire();
   while (!exit_flag_) {
     if (timer_interrupt_) {
       timer_interrupt_ = false;
       need_notify_ = 0;
-      LeaveCriticalSection(&mutex_);
+      mutex_.Release();
       wg_->SecondLoop();
-      EnterCriticalSection(&stats_->mutex);
-      if (stats_->reset_stats) {
-        stats_->reset_stats = false;
-        wg_->ResetStats();
-      }
-      stats_->packet_stats = wg_->GetStats();
-      LeaveCriticalSection(&stats_->mutex);
+      backend_->stats_mutex_.Acquire();
+      backend_->stats_ = wg_->GetStats();
+      float data[2] = {
+        // unit is megabits/second
+        backend_->stats_.tun_bytes_in_per_second * (1.0f / 125000),
+        backend_->stats_.tun_bytes_out_per_second * (1.0f / 125000),
+      };
+      backend_->stats_collector_.AddSamples(data);
+      backend_->stats_mutex_.Release();
 
-      CallbackUpdateUI();
+      backend_->delegate_->OnGraphAvailable();
+      backend_->PushStats();
 
       // Conserve memory every 10s
       if (free_packets_ctr++ == 10) {
@@ -780,46 +822,38 @@ DWORD ThreadedPacketQueue::ThreadMain() {
       }
       if (overload)
         overload -= 1;
-      EnterCriticalSection(&mutex_);
-      continue;
-    }
-
-    // Grab the elements of the queue
-    Packet *packet = first_;
-    if (packet == NULL) {
+    } else if ((packet = first_) == NULL) {
       need_notify_ = 1;
-      LeaveCriticalSection(&mutex_);
+      mutex_.Release();
       WaitForSingleObject(event_, INFINITE);
-      EnterCriticalSection(&mutex_);
+    } else {
+      // Steal the whole work queue
+      first_ = NULL;
+      last_ptr_ = &first_;
+      int packets_in_queue = packets_in_queue_;
+      packets_in_queue_ = 0;
+      need_notify_ = 0;
+      mutex_.Release();
 
-      //SleepConditionVariableCS(&cv_, &mutex, INFINITE);
-      continue;
+      tpq_last_qsize = packets_in_queue;
+      if (packets_in_queue >= 1024)
+        overload = 2;
+      bool is_overload = (overload != 0);
+
+      WireguardProcessor *procint = wg_;
+      do {
+        Packet *next = packet->next;
+        if (packet->post_target == TARGET_PROCESSOR_UDP)
+          procint->HandleUdpPacket(packet, is_overload);
+        else
+          procint->HandleTunPacket(packet);
+        packet = next;
+      } while (packet);
     }
-    // Steal the whole work queue
-    first_ = NULL;
-    last_ptr_ = &first_;
-    int packets_in_queue = packets_in_queue_;
-    packets_in_queue_ = 0;
-    need_notify_ = 0;
-    LeaveCriticalSection(&mutex_);
-
-    tpq_last_qsize = packets_in_queue;
-    if (packets_in_queue >= 1024)
-      overload = 2;
-    bool is_overload = (overload != 0);
-
-    WireguardProcessor *procint = wg_;
-    do {
-      Packet *next = packet->next;
-      if (packet->post_target == TARGET_PROCESSOR_UDP)
-        procint->HandleUdpPacket(packet, is_overload);
-      else
-        procint->HandleTunPacket(packet);
-      packet = next;
-    } while (packet);
-    EnterCriticalSection(&mutex_);
+    wg_->RunAllMainThreadScheduled();
+    mutex_.Acquire();
   }
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
   return 0;
 }
 
@@ -837,9 +871,9 @@ void ThreadedPacketQueue::Start() {
 }
 
 void ThreadedPacketQueue::Stop() {
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   exit_flag_ = true;
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
 
   SetEvent(event_);
 
@@ -859,15 +893,15 @@ void ThreadedPacketQueue::Stop() {
 }
 
 void ThreadedPacketQueue::AbortingDriver() {
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   exit_flag_ = true;
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
 }
 
 void ThreadedPacketQueue::Post(Packet *packet, Packet **end, int count) {
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   if (packets_in_queue_ >= HARD_MAXIMUM_QUEUE_SIZE) {
-    LeaveCriticalSection(&mutex_);
+    mutex_.Release();
     FreePackets(packet, end, count);
     return;
   }
@@ -883,11 +917,11 @@ void ThreadedPacketQueue::Post(Packet *packet, Packet **end, int count) {
   }
   if (need_notify_) {
     need_notify_ = 0;
-    LeaveCriticalSection(&mutex_);
+    mutex_.Release();
     SetEvent(event_);
     return;
   }
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
 }
 
 void CALLBACK ThreadedPacketQueue::TimerRoutine(LPVOID lpArgToCompletionRoutine, DWORD dwTimerLowValue, DWORD dwTimerHighValue) {
@@ -895,15 +929,15 @@ void CALLBACK ThreadedPacketQueue::TimerRoutine(LPVOID lpArgToCompletionRoutine,
 }
 
 void ThreadedPacketQueue::PostTimerInterrupt() {
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   timer_interrupt_ = true;
   if (need_notify_) {
     need_notify_ = 0;
-    LeaveCriticalSection(&mutex_);
+    mutex_.Release();
     SetEvent(event_);
     return;
   }
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
 }
 
 bool GetNetLuidFromGuid(const char *adapter_guid, NET_LUID *luid) {
@@ -1052,64 +1086,28 @@ static void ComputeIpv6DefaultRoute(const uint8 *ipv6_address, uint8 ipv6_cidr, 
 }
 
 
-static bool AddMultipleCatchallRoutes(int inet, int bits, const uint8 *target, const NET_LUID &luid) {
+static bool AddMultipleCatchallRoutes(int inet, int bits, const uint8 *target, const NET_LUID &luid, std::vector<MIB_IPFORWARD_ROW2> *undo_array) {
   uint8 tmp[16] = {0};
   bool success = true;
   for (int i = 0; i < (1 << bits); i++) {
     tmp[0] = i << (8 - bits);
-    success &= AddRoute(inet, tmp, bits, target, &luid);
+    success &= AddRoute(inet, tmp, bits, target, &luid, undo_array);
   }
   return success;
 }
 
-static uint8 GetInternetRouteBlockingState() {
-  if (internet_route_blocking_state == ROUTE_BLOCK_UNKNOWN) {
-    RouteInfo ri;
-    internet_route_blocking_state =
-      (GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, TRUE, NULL, &ri) && ri.found_null_routes == 2) + ROUTE_BLOCK_OFF;
-  }
-  return internet_route_blocking_state;
-}
-
-static void SetInternetRouteBlockingState(bool want) {
-  if (want) {
-    internet_route_blocking_state = ROUTE_BLOCK_PENDING;
-  } else if (internet_route_blocking_state != ROUTE_BLOCK_OFF) {
-    RouteInfo ri;
-    GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, FALSE, NULL, &ri);
-    GetDefaultRouteAndDeleteOldRoutes(AF_INET6, NULL, FALSE, NULL, &ri);
-    internet_route_blocking_state = ROUTE_BLOCK_OFF;
-  }
-}
-
-InternetBlockState GetInternetBlockState(bool *is_activated) {
-  int a = GetInternetRouteBlockingState();
-  int b = GetInternetFwBlockingState();
-
-  if (is_activated)
-    *is_activated = (a == ROUTE_BLOCK_ON || b == IBS_ACTIVE);
-
-  return (InternetBlockState)(
-    (a >= ROUTE_BLOCK_ON) * kBlockInternet_Route +
-    (b >= IBS_ACTIVE) * kBlockInternet_Firewall);
-}
-
-void SetInternetBlockState(InternetBlockState s) {
-  SetInternetRouteBlockingState((s & kBlockInternet_Route) != 0);
-  SetInternetFwBlockingState((s & kBlockInternet_Firewall) != 0);
-}
-
-TunWin32Adapter::TunWin32Adapter() {
+TunWin32Adapter::TunWin32Adapter(DnsBlocker *dns_blocker) {
   handle_ = NULL;
-  current_dns_block_ = NULL;
+  dns_blocker_ = dns_blocker;
 }
 
 TunWin32Adapter::~TunWin32Adapter() {
 
 }
 
-bool TunWin32Adapter::OpenAdapter(bool *exit_thread, DWORD open_flags) {
-  int retry_count = 10;
+bool TunWin32Adapter::OpenAdapter(uint32 *exit_thread, DWORD open_flags) {
+  assert(handle_ == NULL);
+  int retry_count = 20;
   handle_ = OpenTunAdapter(guid_, retry_count, exit_thread, open_flags);
   return (handle_ != NULL);
 }
@@ -1230,7 +1228,7 @@ bool TunWin32Adapter::InitAdapter(const TunInterface::TunConfig &&config, TunInt
 
   if (has_dns_setting && config.block_dns_on_adapters) {
     RINFO("Blocking standard DNS on all adapters");
-    current_dns_block_ = BlockDnsExceptOnAdapter(InterfaceLuid, config.ipv6_cidr != 0);
+    dns_blocker_->BlockDnsExceptOnAdapter(InterfaceLuid, config.ipv6_cidr != 0);
 
     err = SetMetricOnNetworkAdapter(&InterfaceLuid, AF_INET, 2);
     if (err)
@@ -1241,6 +1239,8 @@ bool TunWin32Adapter::InitAdapter(const TunInterface::TunConfig &&config, TunInt
       if (err)
         RERROR("SetMetricOnNetworkAdapter IPv6 failed: %d", err);
     }
+  } else {
+    dns_blocker_->RestoreDns();
   }
 
   uint8 ibs = config.internet_blocking;
@@ -1279,10 +1279,10 @@ bool TunWin32Adapter::InitAdapter(const TunInterface::TunConfig &&config, TunInt
       RERROR("Unable to get localhost luid - while adding route based blocking.");
     } else {
       uint32 dst[4] = {0};
-      if (!AddMultipleCatchallRoutes(AF_INET, 1, (uint8*)&dst, localhost_luid))
+      if (!AddMultipleCatchallRoutes(AF_INET, 1, (uint8*)&dst, localhost_luid, NULL))
         RERROR("Unable to add routes for route based blocking.");
       if (config.ipv6_cidr) {
-        if (!AddMultipleCatchallRoutes(AF_INET6, 1, (uint8*)&dst, localhost_luid))
+        if (!AddMultipleCatchallRoutes(AF_INET6, 1, (uint8*)&dst, localhost_luid, NULL))
           RERROR("Unable to add IPv6 routes for route based blocking.");
       }
     }
@@ -1312,7 +1312,7 @@ bool TunWin32Adapter::InitAdapter(const TunInterface::TunConfig &&config, TunInt
     }
     // Either add 4 routes or 2 routes, depending on if we use route blocking.
     uint32 be = ToBE32(default_route_v4);
-    if (!AddMultipleCatchallRoutes(AF_INET, block_all_traffic_route ? 2 : 1, (uint8*)&be, InterfaceLuid))
+    if (!AddMultipleCatchallRoutes(AF_INET, block_all_traffic_route ? 2 : 1, (uint8*)&be, InterfaceLuid, &routes_to_undo_))
       RERROR("Unable to add new default ipv4 route.");
   }
 
@@ -1331,7 +1331,7 @@ bool TunWin32Adapter::InitAdapter(const TunInterface::TunConfig &&config, TunInt
           return false;
         }
       }
-      if (!AddMultipleCatchallRoutes(AF_INET6, block_all_traffic_route ? 2 : 1, default_route_v6, InterfaceLuid))
+      if (!AddMultipleCatchallRoutes(AF_INET6, block_all_traffic_route ? 2 : 1, default_route_v6, InterfaceLuid, &routes_to_undo_))
         RERROR("Unable to add new default ipv6 route.");
     }
   }
@@ -1340,9 +1340,20 @@ bool TunWin32Adapter::InitAdapter(const TunInterface::TunConfig &&config, TunInt
   for (auto it = config.extra_routes.begin(); it != config.extra_routes.end(); ++it) {
     if (it->size == 32) {
       uint32 be = ToBE32(default_route_v4);
-      AddRoute(AF_INET, it->addr, it->cidr, &be, &InterfaceLuid);
+      AddRoute(AF_INET, it->addr, it->cidr, &be, &InterfaceLuid, &routes_to_undo_);
     } else if (it->size == 128 && config.ipv6_cidr) {
-      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, &InterfaceLuid);
+      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, &InterfaceLuid, &routes_to_undo_);
+    }
+  }
+
+  // Add all the routes that should bypass vpn
+  for (auto it = config.excluded_ips.begin(); it != config.excluded_ips.end(); ++it) {
+    if (it->size == 32) {
+      if (ri.found_default_adapter)
+        AddRoute(AF_INET, it->addr, it->cidr, ri.default_gw, &ri.default_adapter, &routes_to_undo_);
+    } else if (it->size == 128 && config.ipv6_cidr) {
+      if (ri6.found_default_adapter)
+        AddRoute(AF_INET6, it->addr, it->cidr, ri6.default_gw, &ri6.default_adapter, &routes_to_undo_);
     }
   }
 
@@ -1386,9 +1397,9 @@ void TunWin32Adapter::CloseAdapter() {
     DeleteRoute(&*it);
   routes_to_undo_.clear();
 
-  RestoreDnsExceptOnAdapter(current_dns_block_);
-  current_dns_block_ = NULL;
-
+  if (dns_blocker_)
+    dns_blocker_->RestoreDns();
+  
   RunPrePostCommand(post_down_);
 }
 
@@ -1445,7 +1456,7 @@ static bool RunOneCommand(const std::string &cmd) {
         char *nl2 = nl;
         if (nl != buf + bufstart && nl[-1] == '\r')
           nl--;
-        bufstart = nl2 - buf + 1;
+        bufstart = (DWORD)(nl2 - buf + 1);
         RINFO("%.*s", nl - st, st);
       }
       if (bufend - bufstart == sizeof(buf) || foundeof) {
@@ -1496,14 +1507,13 @@ bool TunWin32Adapter::RunPrePostCommand(const std::vector<std::string> &vec) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-TunWin32Iocp::TunWin32Iocp() {
+TunWin32Iocp::TunWin32Iocp(DnsBlocker *blocker, TunsafeBackendWin32 *backend) : adapter_(blocker), backend_(backend) {
   wqueue_end_ = &wqueue_;
   wqueue_ = NULL;
 
   thread_ = NULL;
   completion_port_handle_ = NULL;
   packet_handler_ = NULL;
-  InitializeCriticalSectionAndSpinCount(&mutex_, 1024);
   exit_thread_ = false;
 }
 
@@ -1511,13 +1521,12 @@ TunWin32Iocp::~TunWin32Iocp() {
   //assert(num_reads_ == 0 && num_writes_ == 0);
   assert(thread_ == NULL);
   CloseTun();
-  DeleteCriticalSection(&mutex_);
 }
 
 bool TunWin32Iocp::Initialize(const TunConfig &&config, TunConfigOut *out) {
-  CloseTun();
+  assert(thread_ == NULL);
 
-  if (!adapter_.OpenAdapter(&exit_thread_, FILE_FLAG_OVERLAPPED))
+  if (!adapter_.OpenAdapter(&backend_->stop_mode_, FILE_FLAG_OVERLAPPED))
     return false;
   
   completion_port_handle_ = CreateIoCompletionPort(adapter_.handle(), NULL, NULL, 0);
@@ -1568,13 +1577,13 @@ void TunWin32Iocp::ThreadMain() {
 
         RERROR("TunWin32: ReadFile failed 0x%X", err);
 
-        if (err == ERROR_OPERATION_ABORTED) {
+        if (err == ERROR_OPERATION_ABORTED || err == ERROR_FILE_NOT_FOUND) {
           packet_handler_->AbortingDriver(); 
           RERROR("TAP driver stopped communicating. Attempting to restart.", err);
           // This can happen if we reinstall the TAP driver while there's an active connection. Wait a bit, then attempt to
           // restart.
           Sleep(1000);
-          CallbackTriggerReconnect();
+          backend_->TunAdapterFailed();
           goto EXIT;
         }
       } else {
@@ -1642,11 +1651,11 @@ void TunWin32Iocp::ThreadMain() {
       if (!pending_writes) {
         if (!wqueue_)
           break;
-        EnterCriticalSection(&mutex_);
+        mutex_.Acquire();
         pending_writes = wqueue_;
         wqueue_end_ = &wqueue_;
         wqueue_ = NULL;
-        LeaveCriticalSection(&mutex_);
+        mutex_.Release();
         if (!pending_writes)
           break;
       }
@@ -1711,11 +1720,11 @@ void TunWin32Iocp::StopThread() {
 
 void TunWin32Iocp::WriteTunPacket(Packet *packet) {
   packet->next = NULL;
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   Packet *was_empty = wqueue_;
   *wqueue_end_ = packet;
   wqueue_end_ = &packet->next;
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
   if (was_empty == NULL) {
     // Notify the worker thread that it should attempt more writes
     PostQueuedCompletionStatus(completion_port_handle_, NULL, NULL, NULL);
@@ -1726,7 +1735,7 @@ void TunWin32Iocp::WriteTunPacket(Packet *packet) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-TunWin32Overlapped::TunWin32Overlapped() {
+TunWin32Overlapped::TunWin32Overlapped(DnsBlocker *blocker, TunsafeBackendWin32 *backend) : adapter_(blocker), backend_(backend) {
   wqueue_end_ = &wqueue_;
   wqueue_ = NULL;
 
@@ -1737,13 +1746,11 @@ TunWin32Overlapped::TunWin32Overlapped() {
   wake_event_ = CreateEvent(NULL, FALSE, FALSE, NULL);
   
   packet_handler_ = NULL;
-  InitializeCriticalSectionAndSpinCount(&mutex_, 1024);
   exit_thread_ = false;
 }
 
 TunWin32Overlapped::~TunWin32Overlapped() {
   CloseTun();
-  DeleteCriticalSection(&mutex_);
   CloseHandle(read_event_);
   CloseHandle(write_event_);
   CloseHandle(wake_event_);
@@ -1751,7 +1758,7 @@ TunWin32Overlapped::~TunWin32Overlapped() {
 
 bool TunWin32Overlapped::Initialize(const TunConfig &&config, TunConfigOut *out) {
   CloseTun();
-  return adapter_.OpenAdapter(&exit_thread_, FILE_FLAG_OVERLAPPED) &&
+  return adapter_.OpenAdapter(&backend_->stop_mode_, FILE_FLAG_OVERLAPPED) &&
          adapter_.InitAdapter(std::move(config), out);
 }
 
@@ -1809,11 +1816,11 @@ void TunWin32Overlapped::ThreadMain() {
     
     if (write_packet == NULL) {
       if (!pending_writes) {
-        EnterCriticalSection(&mutex_);
+        mutex_.Acquire();
         pending_writes = wqueue_;
         wqueue_end_ = &wqueue_;
         wqueue_ = NULL;
-        LeaveCriticalSection(&mutex_);
+        mutex_.Release();
       }
       if (pending_writes) {
         // Then issue writes
@@ -1859,98 +1866,427 @@ void TunWin32Overlapped::StopThread() {
 
 void TunWin32Overlapped::WriteTunPacket(Packet *packet) {
   packet->next = NULL;
-  EnterCriticalSection(&mutex_);
+  mutex_.Acquire();
   Packet *was_empty = wqueue_;
   *wqueue_end_ = packet;
   wqueue_end_ = &packet->next;
-  LeaveCriticalSection(&mutex_);
+  mutex_.Release();
   if (was_empty == NULL)
     SetEvent(wake_event_);
 }
 
-
-
-
+void TunsafeBackendWin32::SetPublicKey(const uint8 key[32]) {
+  memcpy(public_key_, key, 32);
+  delegate_->OnStateChanged();
+}
 
 DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
   TunsafeBackendWin32 *backend = (TunsafeBackendWin32*)bk;
+  int stop_mode;
 
-  TunWin32Iocp tun;
-  UdpSocketWin32 udp;
-  WireguardProcessor wg_proc(&udp, &tun, backend->procdel_);
+  for(;;) {
+    TunWin32Iocp tun(&backend->dns_blocker_, backend);
+    UdpSocketWin32 udp;
+    WireguardProcessor wg_proc(&udp, &tun, backend);
 
-  ThreadedPacketQueue queues_for_processor(&wg_proc, &backend->stats_);
+    ThreadedPacketQueue queues_for_processor(&wg_proc, backend);
 
-  qs.udp_qsize1 = qs.udp_qsize2 = 0;
+    qs.udp_qsize1 = qs.udp_qsize2 = 0;
 
-  udp.SetPacketHandler(&queues_for_processor);
-  tun.SetPacketHandler(&queues_for_processor);
+    udp.SetPacketHandler(&queues_for_processor);
+    tun.SetPacketHandler(&queues_for_processor);
 
-  if (!ParseWireGuardConfigFile(&wg_proc, backend->config_file_, &backend->exit_flag_))
-    goto getout;
+    wg_proc.dev().SetCurrentThreadAsMainThread();
 
-  if (!wg_proc.Start())
-    goto getout;
+    if (!ParseWireGuardConfigFile(&wg_proc, backend->config_file_, &backend->dns_resolver_))
+      goto getout_fail;
 
-  queues_for_processor.Start();
-  udp.StartThread();
-  tun.StartThread();
-  
-  CallbackSetPublicKey(wg_proc.dev().public_key());
-   
-  while (!backend->exit_flag_) {
-    SleepEx(INFINITE, TRUE);
+    if (!wg_proc.Start())
+      goto getout_fail;
+
+    // only for use in callbacks from wg
+    backend->wg_processor_ = &wg_proc;
+
+    queues_for_processor.Start();
+    udp.StartThread();
+    tun.StartThread();
+
+    backend->SetPublicKey(wg_proc.dev().public_key());
+
+    while ((stop_mode = InterlockedExchange(&backend->stop_mode_, MODE_NONE)) == MODE_NONE) {
+      SleepEx(INFINITE, TRUE);
+    }
+
+    // Keep DNS alive
+    if (stop_mode != MODE_EXIT)
+      tun.adapter().DisassociateDnsBlocker();
+    else
+      backend->dns_resolver_.ClearCache();
+
+    udp.StopThread();
+    tun.StopThread();
+    queues_for_processor.Stop();
+
+    backend->wg_processor_ = NULL;
+
+    FreeAllPackets();
+
+    if (stop_mode != MODE_TUN_FAILED)
+      return 0;
+    
+    uint32 last_fail = GetTickCount();
+    bool permanent_fail = (last_fail - backend->last_tun_adapter_failed_) < 5000;
+    backend->last_tun_adapter_failed_ = last_fail;
+
+    backend->status_ = permanent_fail ? TunsafeBackend::kErrorTunPermanent : TunsafeBackend::kStatusTunRetrying;
+    backend->delegate_->OnStatusCode(backend->status_);
+    
+    if (permanent_fail) {
+      RERROR("Too many automatic restarts...");
+      goto getout_fail;
+    }
   }
-
-  udp.StopThread();
-  tun.StopThread();
-  queues_for_processor.Stop();
-  
-  FreeAllPackets();
-getout:
+getout_fail:
+  backend->dns_blocker_.RestoreDns();
+  backend->status_ = TunsafeBackend::kErrorInitialize;
+  backend->delegate_->OnStatusCode(TunsafeBackend::kErrorInitialize);
   return 0;
 }
 
 static void WINAPI ExitServiceAPC(ULONG_PTR a) {
-  *(bool*)a = true;
 }
 
-TunsafeBackendWin32::TunsafeBackendWin32() {
+TunsafeBackend::TunsafeBackend() {
+  is_started_ = false;
+  is_remote_ = false;
+  ipv4_ip_ = 0;
+  status_ = kStatusStopped;
+  memset(public_key_, 0, sizeof(public_key_));
+}
+
+TunsafeBackend::~TunsafeBackend() {
+  
+}
+
+
+TunsafeBackendWin32::TunsafeBackendWin32(Delegate *delegate) : delegate_(delegate), dns_resolver_(&dns_blocker_) {
   memset(&stats_, 0, sizeof(stats_));
+  wg_processor_ = NULL;
   InitPacketMutexes();
-  InitializeCriticalSectionAndSpinCount(&stats_.mutex, 1024);
   worker_thread_ = NULL;
+  stop_mode_ = MODE_NONE;
+  last_tun_adapter_failed_ = 0;
+  want_periodic_stats_ = false;
+
+  internet_route_blocking_state = ROUTE_BLOCK_UNKNOWN;
+  ClearInternetFwBlockingStateCache();
+
+  delegate_->OnStateChanged();
 }
 
 TunsafeBackendWin32::~TunsafeBackendWin32() {
-  DeleteCriticalSection(&stats_.mutex);
+  StopInner(false);
 }
 
-ProcessorStats TunsafeBackendWin32::GetStats() {
-  EnterCriticalSection(&stats_.mutex);
-  ProcessorStats stats = stats_.packet_stats;
-  LeaveCriticalSection(&stats_.mutex);
-  return stats;
+bool TunsafeBackendWin32::Initialize() {
+  // it's always initialized
+  
+  return true;
 }
 
-void TunsafeBackendWin32::Start(ProcessorDelegate *procdel, const char *config_file) {
-  Stop();
-  procdel_ = procdel;
-  exit_flag_ = false;
+void TunsafeBackendWin32::Teardown() {
+
+}
+
+
+void TunsafeBackendWin32::RequestStats(bool enable) {
+  want_periodic_stats_ = enable;
+  PushStats();
+}
+
+void TunsafeBackendWin32::PushStats() {
+  if (want_periodic_stats_) {
+    stats_mutex_.Acquire();
+    WgProcessorStats stats = stats_;
+    stats_mutex_.Release();
+    delegate_->OnGetStats(stats);
+  }
+}
+
+void TunsafeBackendWin32::Stop() {
+  StopInner(false);
+  delegate_->OnStatusCode(status_);
+  delegate_->OnStateChanged();
+}
+
+void TunsafeBackendWin32::Start(const char *config_file) {
+  StopInner(true);
+  stop_mode_ = MODE_NONE; // this needs to be here cause it's not reset on config file errors
+  dns_resolver_.SetAbortFlag(false);
+  is_started_ = true;
+  memset(public_key_, 0, sizeof(public_key_));
+  status_ = kStatusInitializing;
+  delegate_->OnStatusCode(kStatusInitializing);
+  delegate_->OnClearLog();
   DWORD thread_id;
   config_file_ = _strdup(config_file);
   worker_thread_ = CreateThread(NULL, 0, &WorkerThread, this, 0, &thread_id);
   SetThreadPriority(worker_thread_, THREAD_PRIORITY_ABOVE_NORMAL);
+  delegate_->OnStateChanged();
 }
 
-void TunsafeBackendWin32::Stop() {
+void TunsafeBackendWin32::TunAdapterFailed() {
+  InterlockedExchange(&stop_mode_, MODE_TUN_FAILED);
+  QueueUserAPC(&ExitServiceAPC, worker_thread_, NULL);
+}
+
+void TunsafeBackendWin32::StopInner(bool is_restart) {
   if (worker_thread_) {
-    QueueUserAPC(&ExitServiceAPC, worker_thread_, (ULONG_PTR)&exit_flag_);
+    ipv4_ip_ = 0;
+    dns_resolver_.SetAbortFlag(true);
+    InterlockedExchange(&stop_mode_, is_restart ? MODE_RESTART : MODE_EXIT);
+    QueueUserAPC(&ExitServiceAPC, worker_thread_, NULL);
     WaitForSingleObject(worker_thread_, INFINITE);
     CloseHandle(worker_thread_);
     worker_thread_ = NULL;
     free(config_file_);
     config_file_ = NULL;
+    is_started_ = false;
+    status_ = kStatusStopped;
   }
+}
+
+void TunsafeBackendWin32::ResetStats() {
+}
+
+LinearizedGraph *TunsafeBackendWin32::GetGraph(int type) {
+  if (type < 0 || type >= 4)
+    return NULL;
+  
+  size_t size = sizeof(LinearizedGraph) + 2 * (sizeof(uint32) + sizeof(float) * 120);
+  LinearizedGraph *graph = (LinearizedGraph *)malloc(size);
+  if (graph) {
+    graph->total_size = (uint32)size;
+    graph->num_charts = 2;
+    graph->graph_type = type;
+    memset(graph->reserved, 0, sizeof(graph->reserved));
+    stats_mutex_.Acquire();
+
+    uint8 *ptr = (uint8*)(graph + 1);
+    for (size_t i = 0; i < 2; i++) {
+      *(uint32*)ptr = 120;
+      ptr += 4;
+      const StatsCollector::TimeSeries *series = stats_collector_.GetTimeSeries((int)i, type);
+      memcpy(postinc(ptr, (series->size - series->shift) * sizeof(float)),
+             series->data + series->shift,
+             (series->size - series->shift) * sizeof(float));
+      memcpy(postinc(ptr, series->shift * sizeof(float)), series->data, series->shift * sizeof(float));
+    }
+    stats_mutex_.Release();
+  }
+  return graph;
+}
+
+
+static uint8 GetInternetRouteBlockingState() {
+  if (internet_route_blocking_state == ROUTE_BLOCK_UNKNOWN) {
+    RouteInfo ri;
+    internet_route_blocking_state =
+      (GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, TRUE, NULL, &ri) && ri.found_null_routes == 2) + ROUTE_BLOCK_OFF;
+  }
+  return internet_route_blocking_state;
+}
+
+static void SetInternetRouteBlockingState(bool want) {
+  if (want) {
+    internet_route_blocking_state = ROUTE_BLOCK_PENDING;
+  } else if (internet_route_blocking_state != ROUTE_BLOCK_OFF) {
+    RouteInfo ri;
+    GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, FALSE, NULL, &ri);
+    GetDefaultRouteAndDeleteOldRoutes(AF_INET6, NULL, FALSE, NULL, &ri);
+    internet_route_blocking_state = ROUTE_BLOCK_OFF;
+  }
+}
+
+static InternetBlockState GetInternetBlockState(bool *is_activated) {
+  int a = GetInternetRouteBlockingState();
+  int b = GetInternetFwBlockingState();
+
+  if (is_activated)
+    *is_activated = (a == ROUTE_BLOCK_ON || b == IBS_ACTIVE);
+
+  return (InternetBlockState)(
+    (a >= ROUTE_BLOCK_ON) * kBlockInternet_Route +
+    (b >= IBS_ACTIVE) * kBlockInternet_Firewall);
+}
+
+InternetBlockState TunsafeBackendWin32::GetInternetBlockState(bool *is_activated) {
+  return ::GetInternetBlockState(is_activated);
+}
+
+void TunsafeBackendWin32::SetInternetBlockState(InternetBlockState s) {
+  SetInternetRouteBlockingState((s & kBlockInternet_Route) != 0);
+  SetInternetFwBlockingState((s & kBlockInternet_Firewall) != 0);
+}
+
+void TunsafeBackendWin32::SetServiceStartupFlags(uint32 flags) {
+  // not used
+}
+
+std::string TunsafeBackendWin32::GetConfigFileName() {
+  return std::string();
+}
+
+void TunsafeBackendWin32::OnConnected() {
+  if (status_ != TunsafeBackend::kStatusConnected) {
+    ipv4_ip_ = ReadBE32(wg_processor_->tun_addr().addr);
+    if (status_ != TunsafeBackend::kStatusReconnecting) {
+      char buf[kSizeOfAddress];
+      RINFO("Connection established. IP %s", print_ip_prefix(buf, AF_INET, wg_processor_->tun_addr().addr, -1));
+    }
+    status_ = TunsafeBackend::kStatusConnected;
+    delegate_->OnStatusCode(TunsafeBackend::kStatusConnected);
+  }
+}
+
+void TunsafeBackendWin32::OnConnectionRetry(uint32 attempts) {
+  if (status_ == TunsafeBackend::kStatusInitializing) {
+    status_ = TunsafeBackend::kStatusConnecting;
+    delegate_->OnStatusCode(TunsafeBackend::kStatusConnecting);
+  } else if (attempts >= 3 && status_ == TunsafeBackend::kStatusConnected) {
+    status_ = TunsafeBackend::kStatusReconnecting;
+    delegate_->OnStatusCode(TunsafeBackend::kStatusReconnecting);
+  }
+}
+
+void TunsafeBackend::Delegate::DoWork() {
+  // implemented by subclasses
+}
+
+TunsafeBackendDelegateThreaded::TunsafeBackendDelegateThreaded(TunsafeBackend::Delegate *delegate, const std::function<void(void)> &callback) {
+  callback_ = callback;
+  delegate_ = delegate;
+}
+
+TunsafeBackendDelegateThreaded::~TunsafeBackendDelegateThreaded() {
+  for (auto it = incoming_entry_.begin(); it != incoming_entry_.end(); ++it)
+    FreeEntry(&*it);
+}
+
+void TunsafeBackendDelegateThreaded::FreeEntry(Entry *e) {
+  if (e->lparam) {
+    free((void*)e->lparam);
+    e->lparam = NULL;
+  }
+}
+
+void TunsafeBackendDelegateThreaded::DoWork() {
+  mutex_.Acquire();
+  std::swap(incoming_entry_, processing_entry_);
+  mutex_.Release();
+  TunsafeBackend::Delegate *delegate = delegate_;
+  for (auto it = processing_entry_.begin(); it != processing_entry_.end(); ++it) {
+    switch (it->which) {
+      case Id_OnGetStats:         delegate->OnGetStats(*(WgProcessorStats*)it->lparam); break;
+      case Id_OnStateChanged:     delegate->OnStateChanged(); break;
+      case Id_OnLogLine:          delegate->OnLogLine((const char**)&it->lparam); break;
+      case Id_OnStatusCode:       delegate->OnStatusCode((TunsafeBackend::StatusCode)it->wparam); break;
+      case Id_OnClearLog:         delegate->OnClearLog(); break;
+      case Id_OnGraphAvailable:   delegate->OnGraphAvailable(); break;
+    }
+    FreeEntry(&*it);
+  } 
+  processing_entry_.clear();
+}
+
+void TunsafeBackendDelegateThreaded::AddEntry(Which which, intptr_t lparam, uint32 wparam) {
+  mutex_.Acquire();
+  bool was_empty = incoming_entry_.empty();
+  incoming_entry_.emplace_back(which, wparam, lparam);
+  mutex_.Release();
+  if (was_empty)
+    callback_();
+}
+
+void TunsafeBackendDelegateThreaded::OnGetStats(const WgProcessorStats &stats) {
+  AddEntry(Id_OnGetStats, (intptr_t)memdup(&stats, sizeof(stats)));
+}
+
+void TunsafeBackendDelegateThreaded::OnGraphAvailable() {
+  AddEntry(Id_OnGraphAvailable);
+}
+
+void TunsafeBackendDelegateThreaded::OnStateChanged() {
+  AddEntry(Id_OnStateChanged);
+}
+
+void TunsafeBackendDelegateThreaded::OnLogLine(const char **s) {
+  const char *ss = *s;
+  *s = NULL;
+  AddEntry(Id_OnLogLine, (intptr_t)ss);
+}
+
+void TunsafeBackendDelegateThreaded::OnStatusCode(TunsafeBackend::StatusCode status) {
+  AddEntry(Id_OnStatusCode, 0, status);
+}
+
+void TunsafeBackendDelegateThreaded::OnClearLog() {
+  AddEntry(Id_OnClearLog);
+}
+
+TunsafeBackend::Delegate::~Delegate() {
+}
+
+TunsafeBackend *CreateNativeTunsafeBackend(TunsafeBackend::Delegate *delegate) {
+  return new TunsafeBackendWin32(delegate);
+}
+ 
+TunsafeBackend::Delegate *CreateTunsafeBackendDelegateThreaded(TunsafeBackend::Delegate *delegate, const std::function<void(void)> &callback) {
+  return new TunsafeBackendDelegateThreaded(delegate, callback);
+}
+
+///////////////////////////////////////////////////
+
+void StatsCollector::Init() {
+  Accumulator *acc = &accum_[0][0];
+  static const int kAccMax[TIMEVALS] = {5, 6, 10, 0};
+
+  // Initialize all stats channels
+  for (uint32 channel = 0; channel != CHANNELS; channel++) {
+    for (uint32 timeval = 0; timeval != TIMEVALS; timeval++, acc++) {
+      acc->acc = 0;
+      acc->dirty = false;
+      acc->acc_count = 0;
+      acc->acc_max = kAccMax[timeval];
+      acc->data.size = 120;
+      acc->data.data = (float*)calloc(sizeof(float), acc->data.size);
+      acc->data.shift = 0;
+    }
+  }
+}
+
+void StatsCollector::AddToGraphDataSource(StatsCollector::TimeSeries *ts, float value) {
+  ts->data[ts->shift] = value;
+  if (++ts->shift == ts->size)
+    ts->shift = 0;
+}
+
+void StatsCollector::AddToAccumulators(StatsCollector::Accumulator *acc, float rval) {
+  for (;;) {
+    AddToGraphDataSource(&acc->data, rval);
+    acc->dirty = true;
+    acc->acc += rval;
+    if (acc->acc_max == 0 || ++acc->acc_count < acc->acc_max)
+      break;
+    rval = acc->acc / (float)acc->acc_count;
+    acc->acc_count = 0;
+    acc->acc = 0.0f;
+    acc++;
+  }
+}
+
+void StatsCollector::AddSamples(float data[CHANNELS]) {
+  for (size_t i = 0; i < CHANNELS; i++)
+    AddToAccumulators(&accum_[i][0], data[i]);
 }
 

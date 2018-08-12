@@ -68,6 +68,6 @@ static inline uint32 rol32(uint32 x, int8_t r) {
 
 void RERROR(const char *msg, ...);
 void RINFO(const char *msg, ...);
-
+void tunsafe_die(const char *msg);
 
 #endif  // TINYVPN_TYPES_H_

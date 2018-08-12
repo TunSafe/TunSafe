@@ -66,11 +66,15 @@ void Benchmark() {
 
   fake_glb = dst;
 
+size_t max_bytes = 1000000000;
+#if defined(ARCH_CPU_ARM_FAMILY)
+  max_bytes = 100000000;
+#endif
   auto RunOneBenchmark = [&](const char *name, const std::function<uint64(size_t)> &ff) {
     uint64 bytes = 0;
     QueryPerformanceCounter((LARGE_INTEGER*)&b);
     size_t i;
-    for (i = 0; bytes < 1000000000; i++)
+    for (i = 0; bytes < max_bytes; i++)
       bytes += ff(i);
     QueryPerformanceCounter((LARGE_INTEGER*)&a);
     RINFO("%s: %f MB/s", name, (double)bytes * 0.000001 / (a - b) * f);

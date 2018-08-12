@@ -5,6 +5,7 @@
 #include "network_win32_dnsblock.h"
 #include <fwpmu.h>
 #include <fwpmtypes.h>
+#include <string.h>
 
 #pragma comment (lib, "Fwpuclnt.lib")
 
@@ -43,11 +44,19 @@ static inline bool FwpmFilterAddCheckedAleConnect(HANDLE handle, FWPM_FILTER0 *f
       return false;
     }
   }
-
   return true;
 }
 
-HANDLE BlockDnsExceptOnAdapter(const NET_LUID &luid, bool also_ipv6) {
+DnsBlocker::DnsBlocker() {
+  also_ipv6_ = false;
+  handle_ = NULL;
+}
+
+DnsBlocker::~DnsBlocker() {
+  RestoreDns();
+}
+
+bool DnsBlocker::BlockDnsExceptOnAdapter(const NET_LUID &luid, bool also_ipv6) {
   FWPM_SUBLAYER0 *sublayer = NULL;
   FWP_BYTE_BLOB *fwp_appid = NULL;
   
@@ -55,6 +64,14 @@ HANDLE BlockDnsExceptOnAdapter(const NET_LUID &luid, bool also_ipv6) {
   FWPM_FILTER_CONDITION0 filter_condition[2];
   DWORD err;
   HANDLE handle = NULL;
+
+  // Check if it already matches
+  if (handle_ != NULL) {
+    if (memcmp(&luid, &luid_, sizeof(luid)) == 0 && also_ipv6_)
+      return true;
+    FwpmEngineClose0(handle_);
+    handle_ = NULL;
+  }
 
   {
     FWPM_SESSION0 session = {0};
@@ -69,7 +86,7 @@ HANDLE BlockDnsExceptOnAdapter(const NET_LUID &luid, bool also_ipv6) {
   {
     FWPM_SUBLAYER0 sublayer = {0};
     sublayer.subLayerKey = TUNSAFE_DNS_SUBLAYER;
-    sublayer.displayData.name = L"TunSafe";
+    sublayer.displayData.name = L"TunSafe DNS Block";
     sublayer.weight = 0x100;
     err = FwpmSubLayerAdd0(handle, &sublayer, NULL);
     if (err != 0) {
@@ -96,7 +113,7 @@ HANDLE BlockDnsExceptOnAdapter(const NET_LUID &luid, bool also_ipv6) {
   filter.filterCondition = filter_condition;
   filter.numFilterConditions = 2;
   filter.subLayerKey = TUNSAFE_DNS_SUBLAYER;
-  filter.displayData.name = L"TunSafe";
+  filter.displayData.name = L"TunSafe DNS Block";
   filter.weight.type = FWP_UINT8;
   filter.weight.uint8 = 15;
   filter.action.type = FWP_ACTION_PERMIT;
@@ -127,14 +144,20 @@ getout:
 success:
   if (fwp_appid)
     FwpmFreeMemory0((void **)&fwp_appid);
-  return handle;
+
+  handle_ = handle;
+  also_ipv6_ = also_ipv6;
+  luid_ = luid;
+  return handle != NULL;
 }
 
-void RestoreDnsExceptOnAdapter(HANDLE h) {
-  if (h)
+void DnsBlocker::RestoreDns() {
+  HANDLE h = handle_;
+  if (h) {
+    handle_ = NULL;
     FwpmEngineClose0(h);
+  }
 }
-
 
 static bool RemovePersistentInternetBlockingInner(HANDLE handle) {
   FWPM_FILTER_ENUM_TEMPLATE0 enum_template = {0};
@@ -335,6 +358,10 @@ getout:
     handle = NULL;
   }
   return false;
+}
+
+void ClearInternetFwBlockingStateCache() {
+  internet_fw_blocking_state = 0;
 }
 
 uint8 GetInternetFwBlockingState() {

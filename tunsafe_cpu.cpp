@@ -10,6 +10,16 @@
 
 #include <string.h>
 
+static char *strcpy_e(char *dst, char *end, const char *copy) {
+  size_t len = strlen(copy);
+  if (len >= (size_t)(end - dst)) return end;
+  memcpy(dst, copy, len + 1);
+  return dst + len;
+}
+
+
+#if defined(ARCH_CPU_X86_FAMILY)
+
 uint32 x86_pcap[3];
 
 #if !defined(COMPILER_MSVC)
@@ -21,6 +31,7 @@ static inline void __cpuid(int info[4], int func) {
   );
 }
 #endif
+
 
 void InitCpuFeatures() {
   unsigned nIds, nExIds;
@@ -45,13 +56,6 @@ void InitCpuFeatures() {
   }
 }
 
-static char *strcpy_e(char *dst, char *end, const char *copy) {
-  size_t len = strlen(copy);
-  if (len >= (size_t)(end - dst)) return end;
-  memcpy(dst, copy, len + 1);
-  return dst + len;
-}
-
 void PrintCpuFeatures() {
   char capbuf[2048], *end = capbuf + 2048, *s = capbuf;
 
@@ -66,3 +70,22 @@ void PrintCpuFeatures() {
 
   RINFO("Using:%s", capbuf);
 }
+
+#endif  // defined(ARCH_CPU_X86_FAMILY)
+
+#if defined(ARCH_CPU_ARM_FAMILY)
+
+uint32 arm_pcap[1];
+
+void InitCpuFeatures() {
+  arm_pcap[0] = 0xffffffff;
+}
+
+void PrintCpuFeatures() {
+  char capbuf[2048], *end = capbuf + 2048, *s = capbuf;
+
+  if (ARM_PCAP_NEON) s = strcpy_e(s, end, " neon");
+
+  RINFO("Using:%s", capbuf);
+}
+#endif  // defined(ARCH_CPU_ARM_FAMILY)

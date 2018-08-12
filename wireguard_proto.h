@@ -4,9 +4,40 @@
 
 #include "tunsafe_types.h"
 #include "netapi.h"
+#include "ipzip2/ipzip2.h"
 #include "tunsafe_config.h"
+#include "tunsafe_threading.h"
+#include "ip_to_peer_map.h"
 #include <vector>
 #include <unordered_map>
+#include <atomic>
+
+// Threading macros that enable locks only in MT builds
+#if WITH_WG_THREADING
+#define WG_SCOPED_LOCK(name) AutoLock scoped_lock(&name)
+#define WG_ACQUIRE_LOCK(name) name.Acquire()
+#define WG_RELEASE_LOCK(name) name.Release()
+#define WG_DECLARE_LOCK(name) Mutex name;
+#define WG_DECLARE_RWLOCK(name) ReaderWriterLock name;
+#define WG_ACQUIRE_RWLOCK_SHARED(name) name.AcquireShared()
+#define WG_RELEASE_RWLOCK_SHARED(name) name.ReleaseShared()
+#define WG_ACQUIRE_RWLOCK_EXCLUSIVE(name) name.AcquireExclusive()
+#define WG_RELEASE_RWLOCK_EXCLUSIVE(name) name.ReleaseExclusive()
+#define WG_SCOPED_RWLOCK_SHARED(name) ScopedLockShared scoped_lock(&name)
+#define WG_SCOPED_RWLOCK_EXCLUSIVE(name) ScopedLockExclusive scoped_lock(&name)
+#else  // WITH_WG_THREADING
+#define WG_SCOPED_LOCK(name) 
+#define WG_ACQUIRE_LOCK(name) 
+#define WG_RELEASE_LOCK(name)
+#define WG_DECLARE_LOCK(name)
+#define WG_DECLARE_RWLOCK(name)
+#define WG_ACQUIRE_RWLOCK_SHARED(name)
+#define WG_RELEASE_RWLOCK_SHARED(name)
+#define WG_ACQUIRE_RWLOCK_EXCLUSIVE(name)
+#define WG_RELEASE_RWLOCK_EXCLUSIVE(name)
+#define WG_SCOPED_RWLOCK_SHARED(name)
+#define WG_SCOPED_RWLOCK_EXCLUSIVE(name)
+#endif  // WITH_WG_THREADING
 
 enum ProtocolTimeouts {
   COOKIE_SECRET_MAX_AGE_MS = 120000,
@@ -17,6 +48,8 @@ enum ProtocolTimeouts {
   REJECT_AFTER_TIME_MS = 180000,
   PERSISTENT_KEEPALIVE_MS = 25000,
   MIN_HANDSHAKE_INTERVAL_MS = 20,
+
+  MAX_SIZE_OF_HANDSHAKE_EXTENSION = 1024,
 };
 
 enum ProtocolLimits {
@@ -26,7 +59,6 @@ enum ProtocolLimits {
   MAX_HANDSHAKE_ATTEMPTS = 20,
   MAX_QUEUED_PACKETS_PER_PEER = 128,
   MESSAGE_MINIMUM_SIZE = 16,
-  MAX_SIZE_OF_HANDSHAKE_EXTENSION = 1024,
 };
 
 enum MessageType {
@@ -61,7 +93,7 @@ enum {
   WG_ACK_HEADER_COUNTER_NONE = 0x00,
   WG_ACK_HEADER_COUNTER_2 = 0x04,
   WG_ACK_HEADER_COUNTER_4 = 0x08,
-  WG_ACK_HEADER_COUNTER_8 = 0x0C,
+  WG_ACK_HEADER_COUNTER_6 = 0x0C,
 
   WG_ACK_HEADER_KEY_MASK = 3,
 };
@@ -166,39 +198,6 @@ STATIC_ASSERT(sizeof(WgPacketCompressionVer01) == 24, WgPacketCompressionVer01_w
 struct WgKeypair;
 class WgPeer;
 
-// Maps CIDR addresses to a peer, always returning the longest match
-class IpToPeerMap {
-public:
-  IpToPeerMap();
-  ~IpToPeerMap();
-
-  // Inserts an IP address of a given CIDR length into the lookup table, pointing to peer.
-  bool InsertV4(const void *addr, int cidr, void *peer);
-  bool InsertV6(const void *addr, int cidr, void *peer);
-
-  // Lookup the peer matching the IP Address
-  void *LookupV4(uint32 ip);
-  void *LookupV6(const void *addr);
-
-  void *LookupV4DefaultPeer();
-  void *LookupV6DefaultPeer();
-
-  // Remove a peer from the table
-  void RemovePeer(void *peer);
-private:
-  struct Entry4 {
-    uint32 ip;
-    uint32 mask;
-    void *peer;
-  };
-  struct Entry6 {
-    uint8 ip[16];
-    uint8 cidr_len;
-    void *peer;
-  };
-  std::vector<Entry4> ipv4_;
-  std::vector<Entry6> ipv6_;
-};
 
 class WgRateLimit {
 public:
@@ -262,7 +261,6 @@ struct ScramblerSiphashKeys {
   uint64 keys[4];
 };
  
-// Implementation of most business logic of Wireguard
 class WgDevice {
   friend class WgPeer;
   friend class WireguardProcessor;
@@ -272,7 +270,8 @@ public:
 
   // Initialize with the private key, precompute all internal keys etc.
   void Initialize(const uint8 private_key[WG_PUBLIC_KEY_LEN]);
-  
+
+  // Create a new peer
   WgPeer *AddPeer();
 
   // Setup header obfuscation
@@ -281,35 +280,26 @@ public:
   // Check whether Mac1 appears to be valid
   bool CheckCookieMac1(Packet *packet);
 
-  // Check whether Mac2 appears to be valid, this also uses
-  // the remote ip address
+  // Check whether Mac2 appears to be valid, this also uses the remote ip address
   bool CheckCookieMac2(Packet *packet);
 
   void CreateCookieMessage(MessageHandshakeCookie *dst, Packet *packet, uint32 remote_key_id);
-
-  void UpdateKeypairAddrEntry(uint64 addr_id, WgKeypair *keypair);
+  void UpdateKeypairAddrEntry_Locked(uint64 addr_id, WgKeypair *keypair);
+  void SecondLoop(uint64 now);
 
   IpToPeerMap &ip_to_peer_map() { return ip_to_peer_map_; }
-  
-  std::unordered_map<uint32, std::pair<WgPeer*, WgKeypair*> > &key_id_lookup() { return key_id_lookup_; }
-
   WgPeer *first_peer() { return peers_; }
-
-  uint64 last_complete_handskake_timestamp() const {
-    return last_complete_handskake_timestamp_;
-  }
-
   const uint8 *public_key() const { return s_pub_; }
-
-  void SecondLoop(uint64 now);
-  
   WgRateLimit *rate_limiter() { return &rate_limiter_; }
-
   std::unordered_map<uint64, WgAddrEntry*> &addr_entry_map() { return addr_entry_lookup_; }
-
-
   WgPacketCompressionVer01 *compression_header() { return &compression_header_; }
+
+  bool IsMainThread() { return CurrentThreadIdEquals(main_thread_id_); }
+  void SetCurrentThreadAsMainThread() { main_thread_id_ = GetCurrentThreadId(); }
 private:
+  std::pair<WgPeer*, WgKeypair*> *LookupPeerInKeyIdLookup(uint32 key_id);
+  WgKeypair *LookupKeypairByKeyId(uint32 key_id);
+  WgKeypair *LookupKeypairInAddrEntryMap(uint64 addr, uint32 slot);
   // Return the peer matching the |public_key| or NULL
   WgPeer *GetPeerFromPublicKey(uint8 public_key[WG_PUBLIC_KEY_LEN]);
   // Create a cookie by inspecting the source address of the |packet|
@@ -319,12 +309,19 @@ private:
   // Get a random number
   uint32 GetRandomNumber();
 
-  void EraseKeypairAddrEntry(WgKeypair *kp);
+  void EraseKeypairAddrEntry_Locked(WgKeypair *kp);
 
   // Maps IP addresses to peers
   IpToPeerMap ip_to_peer_map_;
+
+  // This lock protects |ip_to_peer_map_|.
+  WG_DECLARE_RWLOCK(ip_to_peer_map_lock_);
+   
   // For enumerating all peers
   WgPeer *peers_;
+
+  // Lock that protects key_id_lookup_
+  WG_DECLARE_RWLOCK(key_id_lookup_lock_);
   // Mapping from key-id to either an active keypair (if keypair is non-NULL),
   // or to a handshake.
   std::unordered_map<uint32, std::pair<WgPeer*, WgKeypair*> > key_id_lookup_;
@@ -332,6 +329,7 @@ private:
   // Mapping from IPV4 IP/PORT to WgPeer*, so we can find the peer when a key id is
   // not explicitly included.
   std::unordered_map<uint64, WgAddrEntry*> addr_entry_lookup_;
+  WG_DECLARE_RWLOCK(addr_entry_lookup_lock_);
 
   // Counter for generating new indices in |keypair_lookup_|
   uint8 next_rng_slot_;
@@ -339,7 +337,7 @@ private:
   // Whether packet obfuscation is enabled
   bool header_obfuscation_;
 
-  uint64 last_complete_handskake_timestamp_;
+  ThreadId main_thread_id_;
 
   uint64 low_resolution_timestamp_;
 
@@ -360,9 +358,12 @@ private:
   WgRateLimit rate_limiter_;
 
   WgPacketCompressionVer01 compression_header_;
+
+  // For defering deletes until all worker threads are guaranteed not to use an object.
+  MultithreadedDelayedDelete delayed_delete_;
 };
 
-// State for Noise handshake
+// State for peer
 class WgPeer {
   friend class WgDevice;
   friend class WireguardProcessor;
@@ -387,10 +388,10 @@ public:
   static WgPeer *ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packet);
   static void ParseMessageHandshakeCookie(WgDevice *dev, const MessageHandshakeCookie *src);
   void CreateMessageHandshakeInitiation(Packet *packet);
-  bool CheckSwitchToNextKey(WgKeypair *keypair);
-  void ClearKeys();
-  void ClearHandshake();
-  void ClearPacketQueue();
+  bool CheckSwitchToNextKey_Locked(WgKeypair *keypair);
+  void ClearKeys_Locked();
+  void ClearHandshake_Locked();
+  void ClearPacketQueue_Locked();
   bool CheckHandshakeRateLimit();
 
   // Timer notifications
@@ -408,23 +409,32 @@ public:
   };
   uint32 CheckTimeouts(uint64 now);
 
+  void AddPacketToPeerQueue(Packet *packet);
+
+#if WITH_WG_THREADING
+  bool IsPeerLocked() { return mutex_.IsLocked(); }
+#else  // WITH_WG_THREADING
+  bool IsPeerLocked() { return true; }
+#endif  // WITH_WG_THREADING
+
 private:
-  WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id, const uint8 *extfield, size_t extfield_size);
+  static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id, const uint8 *extfield, size_t extfield_size);
   void WriteMacToPacket(const uint8 *data, MessageMacs *mac);
   void DeleteKeypair(WgKeypair **kp);
   void CheckAndUpdateTimeOfNextKeyEvent(uint64 now);
-  static void CopyEndpointToPeer(WgKeypair *keypair, const IpAddr *addr);
+  static void CopyEndpointToPeer_Locked(WgKeypair *keypair, const IpAddr *addr);
   size_t WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair);
-  void InsertKeypairInPeer(WgKeypair *keypair);
+  void InsertKeypairInPeer_Locked(WgKeypair *keypair);
 
   WgDevice *dev_;
   WgPeer *next_peer_;
 
   // Keypairs, |curr_keypair_| is the used one, the other ones are
   // the old ones and the next one.
-  WgKeypair *curr_keypair_;
-  WgKeypair *prev_keypair_;
-  WgKeypair *next_keypair_;
+  WgKeypair *curr_keypair_, *prev_keypair_, *next_keypair_;
+
+  // Protects shared variables of the WgPeer
+  WG_DECLARE_LOCK(mutex_);
 
   // Timestamp when the next key related event is going to occur.
   uint64 time_of_next_key_event_;
@@ -433,23 +443,38 @@ private:
   uint32 timers_;
   uint32 timer_value_[5];
 
-  // Holds the entry into the key id table during handshake
+  // Holds the entry into the key id table during handshake - mt only.
   uint32 local_key_id_during_hs_;
+
+  // Address of peer
   IpAddr endpoint_;
+
+  enum {
+    kMainThreadScheduled_ScheduleHandshake = 1,
+  };
+  std::atomic<uint32> main_thread_scheduled_;
+  WgPeer *main_thread_scheduled_next_;
 
   // The broadcast address of the IPv4 network, used to block broadcast traffic
   // from being sent out over the VPN link.
   uint32 ipv4_broadcast_addr_;
 
+  // Whether the tunsafe specific handshake extensions are supported
   bool supports_handshake_extensions_;
 
+  // Whether any data was sent since the keepalive timer was set
   bool pending_keepalive_;
+
+  // Whether to change the endpoint on incoming packets.
+  bool allow_endpoint_change_;
+
+  // Whether we've sent a mac to the peer so we may expect a cookie reply back.
   bool expect_cookie_reply_;
 
   // Whether we want to route incoming multicast/broadcast traffic to this peer.
   bool allow_multicast_through_peer_;
 
-  // Whether 
+  // Whether |mac2_cookie_| is valid.
   bool has_mac2_cookie_;
 
   // Number of handshakes made so far, when this gets too high we stop connecting.
@@ -462,11 +487,18 @@ private:
   uint8 num_queued_packets_;
   Packet *first_queued_packet_, **last_queued_packet_ptr_;
   
+  // For statistics
   uint64 last_handshake_init_timestamp_;
   uint64 last_complete_handskake_timestamp_;
-  uint64 last_handshake_init_recv_timestamp_;
 
-  enum { MAX_CIPHERS = 16 };
+  // Timestamp to detect flooding of handshakes
+  uint64 last_handshake_init_recv_timestamp_;  // main thread only
+
+  // Number of handshake attempts since last successful handshake
+  uint32 total_handshake_attempts_;
+
+  // For dynamic ciphers, holds the list of supported ciphers.
+  enum { MAX_CIPHERS = 4 };
   uint8 cipher_prio_;
   uint8 num_ciphers_;
   uint8 ciphers_[MAX_CIPHERS];
@@ -482,19 +514,19 @@ private:
     uint8 e_priv[WG_PUBLIC_KEY_LEN];
   };
   HandshakeState hs_;
-  // Remote's static public key - Written only by Init
+  // Remote's static public key - init only.
   uint8 s_remote_[WG_PUBLIC_KEY_LEN];
-  // Remote's preshared key - Written only by Init
+  // Remote's preshared key - init only.
   uint8 preshared_key_[WG_SYMMETRIC_KEY_LEN];
-  // Precomputed DH(spriv_local, spub_remote).
+  // Precomputed DH(spriv_local, spub_remote) - init only.
   uint8 s_priv_pub_[WG_PUBLIC_KEY_LEN];
-  // The most recent seen timestamp, only accept higher timestamps.
-  uint8 last_timestamp_[WG_TIMESTAMP_LEN];
-  // Precomputed key for decrypting cookies from the peer.
+  // The most recent seen timestamp, only accept higher timestamps - mt only.
+  uint8 last_timestamp_[WG_TIMESTAMP_LEN]; 
+  // Precomputed key for decrypting cookies from the peer - init only.
   uint8 precomputed_cookie_key_[WG_SYMMETRIC_KEY_LEN];
-  // Precomputed key for sending MACs to the peer.
+  // Precomputed key for sending MACs to the peer - init only.
   uint8 precomputed_mac1_key_[WG_SYMMETRIC_KEY_LEN];
-  // The last mac value sent, required to make cookies
+  // The last mac value sent, required to make cookies - mt only.
   uint8 sent_mac1_[WG_COOKIE_LEN];
   // The mac2 cookie that gets appended to outgoing packets
   uint8 mac2_cookie_[WG_COOKIE_LEN];
@@ -520,10 +552,10 @@ public:
     BITMAP_MASK = BITMAP_SIZE - 1,
   };
 
-  uint64 expected_seq_nr() const { return expected_seq_nr_; }
+  const uint64 expected_seq_nr() const { return expected_seq_nr_; }
 
 private:
-  uint64 expected_seq_nr_;
+  std::atomic<uint64> expected_seq_nr_;
   uint32 bitmap_[BITMAP_SIZE];
 };
 
@@ -574,7 +606,7 @@ struct WgKeypair {
   // Used so we know when to send out ack packets.
   uint32 incoming_packet_count;
 
-  // Id of the key in my map
+  // Id of the key in my map. (MainThread)
   uint32 local_key_id;
   // Id of the key in their map
   uint32 remote_key_id;
@@ -602,7 +634,6 @@ struct WgKeypair {
   // State for packet compressor
   IpzipState ipzip_state_;
 #endif  // WITH_HANDSHAKE_EXT
-
 };
 
 void WgKeypairEncryptPayload(uint8 *dst, const size_t src_len,

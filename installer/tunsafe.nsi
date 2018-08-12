@@ -9,6 +9,7 @@ SetCompressor /SOLID lzma
 !include "x64.nsh"
 !define MULTIUSER_EXECUTIONLEVEL Admin
 !include "MultiUser.nsh"
+!include "servicelib.nsh"
 !insertmacro GetParameters
 !insertmacro GetOptions
 
@@ -130,6 +131,7 @@ again:
 		Sleep 500
 		Goto again
 	done:
+	!insertmacro SERVICE stop TunSafeService ""
 FunctionEnd
 
 Function .onInit
@@ -198,6 +200,10 @@ Function un.onInit
 FunctionEnd
 
 Section "Uninstall"
+	!insertmacro SERVICE stop "TunSafeService" ""
+	!insertmacro SERVICE delete "TunSafeService" ""
+
+
 	Delete "$INSTDIR\TunSafe.exe"
 	Delete "$INSTDIR\License.txt"
 	Delete "$INSTDIR\ChangeLog.txt"

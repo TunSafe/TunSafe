@@ -20,12 +20,27 @@
 #include <netdb.h>
 #endif
 
+#if defined(OS_WIN)
+#include "network_win32_dnsblock.h"
+#endif
+
 const char *print_ip_prefix(char buf[kSizeOfAddress], int family, const void *ip, int prefixlen) {
   if (!inet_ntop(family, ip, buf, kSizeOfAddress - 8)) {
     memcpy(buf, "unknown", 8);
   }
   if (prefixlen >= 0)
     snprintf(buf + strlen(buf), 8, "/%d", prefixlen);
+  return buf;
+}
+
+char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]) {
+  if (addr.sin.sin_family == AF_INET) {
+    print_ip_prefix(buf, addr.sin.sin_family, &addr.sin.sin_addr, -1);
+  } else if (addr.sin.sin_family == AF_INET) {
+    print_ip_prefix(buf, addr.sin.sin_family, &addr.sin6.sin6_addr, -1);
+  } else {
+    buf[0] = 0;
+  }
   return buf;
 }
 
@@ -58,19 +73,71 @@ static bool ParseCidrAddr(char *s, WgCidrAddr *out) {
   return false;
 }
 
-struct hostent *gethostbyname_retry_on_failure(const char * name, bool *exit_flag) {
+DnsResolver::DnsResolver(DnsBlocker *dns_blocker) {
+  dns_blocker_ = dns_blocker;
+  abort_flag_ = false;
+}
+
+DnsResolver::~DnsResolver() {
+}
+
+void DnsResolver::ClearCache() {
+  cache_.clear();
+}
+
+bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
   int attempt = 0;
-  static const uint8 retry_delays[] = {1, 2, 3, 5, 10, 20, 40, 60};
+  static const uint8 retry_delays[] = {1, 2, 3, 5, 10};
+  char buf[kSizeOfAddress];
+
+  memset(result, 0, sizeof(IpAddr));
+  if (inet_pton(AF_INET6, hostname, &result->sin6.sin6_addr) == 1) {
+    result->sin.sin_family = AF_INET6;
+    return true;
+  }
+
+  if (inet_pton(AF_INET, hostname, &result->sin.sin_addr) == 1) {
+    result->sin.sin_family = AF_INET;
+    return true;
+  }
+
+  // First check cache
+  for (auto it = cache_.begin(); it != cache_.end(); ++it) {
+    if (it->name == hostname) {
+
+      *result = it->ip;
+      RINFO("Resolved %s to %s%s", hostname, PrintIpAddr(*result, buf), " (cached)");
+      return true;
+    }
+  }
+
+#if defined(OS_WIN)
+  // Then disable dns blocker (otherwise the windows dns client service can't resolve)
+  if (dns_blocker_ && dns_blocker_->IsActive()) {
+    RINFO("Disabling DNS blocker to resolve %s", hostname);
+    dns_blocker_->RestoreDns();
+  }
+#endif  // defined(OS_WIN)
 
   for (;;) {
-    hostent *he = gethostbyname(name);
-    if (he || exit_flag == NULL || *exit_flag)
-      return he;
+    hostent *he = gethostbyname(hostname);
+    if (abort_flag_)
+      return false;
 
-    RINFO("Unable to resolve %s. Trying again in %d second(s)", name, retry_delays[attempt]);
+    if (he) {
+      result->sin.sin_family = AF_INET;
+      result->sin.sin_port = 0;
+      memcpy(&result->sin.sin_addr, he->h_addr_list[0], 4);
+      // add to cache
+      cache_.emplace_back(hostname, *result);
+      RINFO("Resolved %s to %s%s", hostname, PrintIpAddr(*result, buf), "");
+      return true;
+    }
+
+    RINFO("Unable to resolve %s. Trying again in %d second(s)", hostname, retry_delays[attempt]);
     OsInterruptibleSleep(retry_delays[attempt] * 1000);
-    if (*exit_flag)
-      return NULL;
+    if (abort_flag_)
+      return false;
 
     if (attempt != ARRAY_SIZE(retry_delays) - 1)
       attempt++;
@@ -78,7 +145,9 @@ struct hostent *gethostbyname_retry_on_failure(const char * name, bool *exit_fla
 }
 
 
-static bool ParseSockaddrInWithPort(char *s, IpAddr *sin, bool *exit_flag) {
+
+
+static bool ParseSockaddrInWithPort(char *s, IpAddr *sin, DnsResolver *resolver) {
   memset(sin, 0, sizeof(IpAddr));
   if (*s == '[') {
     char *end = strchr(s, ']');
@@ -97,30 +166,20 @@ static bool ParseSockaddrInWithPort(char *s, IpAddr *sin, bool *exit_flag) {
   char *x = strchr(s, ':');
   if (!x) return false;
   *x = 0;
-  hostent *he = gethostbyname_retry_on_failure(s, exit_flag);
-  if (!he) {
+
+  if (!resolver->Resolve(s, sin)) {
     RERROR("Unable to resolve %s", s);
     return false;
   }
-  sin->sin.sin_family = AF_INET;
   sin->sin.sin_port = htons(atoi(x + 1));
-  memcpy(&sin->sin.sin_addr, he->h_addr_list[0], 4);
   return true;
 }
 
-static bool ParseSockaddrInWithoutPort(char *s, IpAddr *sin, bool *exit_flag) {
-  memset(sin, 0, sizeof(IpAddr));
-  if (inet_pton(AF_INET6, s, &sin->sin6.sin6_addr) == 1) {
-    sin->sin.sin_family = AF_INET6;
-    return true;
-  }
-  hostent *he = gethostbyname_retry_on_failure(s, exit_flag);
-  if (!he) {
+static bool ParseSockaddrInWithoutPort(char *s, IpAddr *sin, DnsResolver *resolver) {
+  if (!resolver->Resolve(s, sin)) {
     RERROR("Unable to resolve %s", s);
     return false;
   }
-  sin->sin.sin_family = AF_INET;
-  memcpy(&sin->sin.sin_addr, he->h_addr_list[0], 4);
   return true;
 }
 
@@ -131,7 +190,7 @@ static bool ParseBase64Key(const char *s, uint8 key[32]) {
 
 class WgFileParser {
 public:
-  WgFileParser(WireguardProcessor *wg, bool *exit_flag) : wg_(wg), exit_flag_(exit_flag) {}
+  WgFileParser(WireguardProcessor *wg, DnsResolver *resolver) : wg_(wg), dns_resolver_(resolver) {}
   bool ParseFlag(const char *group, const char *key, char *value);
   WireguardProcessor *wg_;
 
@@ -142,7 +201,7 @@ public:
   };
   Peer pi_;
   WgPeer *peer_ = NULL;
-  bool *exit_flag_;
+  DnsResolver *dns_resolver_;
   bool had_interface_ = false;
 };
 
@@ -271,7 +330,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
     } else if (strcmp(key, "DNS") == 0) {
       SplitString(value, ',', &ss);
       for (size_t i = 0; i < ss.size(); i++) {
-        if (!ParseSockaddrInWithoutPort(ss[i], &sin, exit_flag_))
+        if (!ParseSockaddrInWithoutPort(ss[i], &sin, dns_resolver_))
           return false;
         if (!wg_->AddDnsServer(sin)) {
           RERROR("Multiple DNS not allowed.");
@@ -315,6 +374,13 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       wg_->prepost().pre_up.emplace_back(value);
     } else if (strcmp(key, "PreDown") == 0) {
       wg_->prepost().pre_down.emplace_back(value);
+    } else if (strcmp(key, "ExcludedIPs") == 0) {
+      SplitString(value, ',', &ss);
+      for (size_t i = 0; i < ss.size(); i++) {
+        if (!ParseCidrAddr(ss[i], &addr))
+          return false;
+        wg_->AddExcludedIp(addr);
+      }
     } else {
       goto err;
     }
@@ -344,7 +410,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
           return false;
       }
     } else if (strcmp(key, "Endpoint") == 0) {
-      if (!ParseSockaddrInWithPort(value, &sin, exit_flag_))
+      if (!ParseSockaddrInWithPort(value, &sin, dns_resolver_))
         return false;
       peer_->SetEndpoint(sin);
     } else if (strcmp(key, "PersistentKeepalive") == 0) {
@@ -384,11 +450,20 @@ err:
   return true;
 }
 
-bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, bool *exit_flag) {
+static bool ContainsNonAsciiCharacter(const char *buf, size_t size) {
+  for (size_t i = 0; i < size; i++) {
+    uint8 c = buf[i];
+    if (c < 32 && ((1 << c) & (1 << '\n' | 1 << '\r' | 1 << '\t')) == 0)
+      return true;
+  }
+  return false;
+}
+
+bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsResolver *dns_resolver) {
   char buf[1024];
   char group[32] = {0};
 
-  WgFileParser file_parser(wg, exit_flag);
+  WgFileParser file_parser(wg, dns_resolver);
 
   RINFO("Loading file: %s", filename);
 
@@ -400,6 +475,13 @@ bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, bool
 
   while (fgets(buf, sizeof(buf), f)) {
     size_t l = strlen(buf);
+
+    if (ContainsNonAsciiCharacter(buf, l)) {
+      RERROR("File is not a config file: %s", filename);
+      return false;
+    }
+
+
     while (l && is_space(buf[l - 1]))
       buf[--l] = 0;
     if (buf[0] == '#' || buf[0] == '\0')

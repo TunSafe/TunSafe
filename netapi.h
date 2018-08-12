@@ -121,6 +121,9 @@ public:
     // This holds all cidr addresses to add as additional routing entries
     std::vector<WgCidrAddr> extra_routes;
 
+    // This holds all the ips to exclude
+    std::vector<WgCidrAddr> excluded_ips;
+
     // This holds the pre/post commands
     PrePostCommands pre_post_commands;
   };

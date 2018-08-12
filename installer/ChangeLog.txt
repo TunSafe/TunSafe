@@ -1,3 +1,26 @@
+2018-08-11 - TunSafe v1.4-rc1
+1.Subfolders in the Config/ directory now show up as submenus.
+2.Added a way to run TunSafe as a Windows Service.
+  Foreground Mode: The service will disconnect when TunSafe closes.
+  Background Mode: The service will stay connected in the background.
+  No longer required to run the TunSafe client as Admin as long as
+  the service is running.
+3.New config setting [Interface].ExcludedIPs to configure IPs that
+  should not be routed through TunSafe.
+4.Can now automatically start TunSafe when Windows starts
+5.New UI with tabs and graphs
+6.Cache DNS queries to ensure DNS will succeed if connection fails
+7.Recreate tray icon when explorer.exe restarts
+8.Renamed window title to TunSafe instead of TunSafe VPN Client
+9.Main window is now resizable
+10.Disallow roaming endpoint when using AllowedIPs=0.0.0.0/0
+   Only the original endpoint is added in the routing table so
+   this would result in an endless loop of packets.
+11.Display approximate Wireguard framing overhead in stats
+12.Preparations for protocol handling with multiple threads
+13.Delete the routes we made when disconnecting
+14.Fix error message about unable to delete a route when connecting
+
 2018-06-20 - TunSafe v1.3-rc3
 
 Changes:

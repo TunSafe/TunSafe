@@ -53,6 +53,9 @@
     <ClInclude Include="netapi.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="ipzip2\ipzip2.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
     <ClInclude Include="crypto\siphash.h">
       <Filter>crypto</Filter>
     </ClInclude>
@@ -70,6 +73,21 @@
     </ClInclude>
     <ClInclude Include="tunsafe_config.h">
       <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="service_win32_api.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
+    <ClInclude Include="service_win32.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_threading.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ip_to_peer_map.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="util_win32.h">
+      <Filter>Source Files\Win32</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -109,6 +127,9 @@
     <ClCompile Include="wireguard_config.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="ipzip2\ipzip2.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="crypto\siphash.cpp">
       <Filter>crypto</Filter>
     </ClCompile>
@@ -121,6 +142,18 @@
     <ClCompile Include="tunsafe_cpu.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="service_win32.cpp">
+      <Filter>Source Files\Win32</Filter>
+    </ClCompile>
+    <ClCompile Include="util_win32.cpp">
+      <Filter>Source Files\Win32</Filter>
+    </ClCompile>
+    <ClCompile Include="tunsafe_threading.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="ip_to_peer_map.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TunSafe.rc" />
@@ -128,8 +161,8 @@
   <ItemGroup>
     <Image Include="icons\neutral-icon.ico" />
     <Image Include="icons\green-icon.ico" />
-    <Image Include="icons\red-icon.ico" />
     <Image Include="icons\green-bg-icon.ico" />
+    <Image Include="downarrow.bmp" />
   </ItemGroup>
   <ItemGroup>
     <NASM Include="crypto\chacha20_x64.asm">

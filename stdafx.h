@@ -21,7 +21,7 @@
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
 #include <mstcpip.h>
-
+#include <Windowsx.h>
 
 #include <tchar.h>
 #else
@@ -30,4 +30,6 @@
 
 #include <stdio.h>
 #include <stddef.h>
+
+#undef min
 

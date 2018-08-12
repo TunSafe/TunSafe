@@ -11,7 +11,7 @@
 #include "util.h"
 #include "crypto_ops.h"
 #include "bit_ops.h"
-#include  "tunsafe_cpu.h"
+#include "tunsafe_cpu.h"
 #include <algorithm>
 #include <assert.h>
 #include <stdlib.h>
@@ -23,97 +23,6 @@ static const uint8 kWgInitHash[WG_HASH_LEN] = {0x22,0x11,0xb3,0x61,0x08,0x1a,0xc
 static const uint8 kWgInitChainingKey[WG_HASH_LEN] = {0x60,0xe2,0x6d,0xae,0xf3,0x27,0xef,0xc0,0x2e,0xc3,0x35,0xe2,0xa0,0x25,0xd2,0xd0,0x16,0xeb,0x42,0x06,0xf8,0x72,0x77,0xf5,0x2d,0x38,0xd1,0x98,0x8b,0x78,0xcd,0x36};
 static const uint8 kCurve25519Basepoint[32] = {9};
 
-IpToPeerMap::IpToPeerMap() {
-
-}
-
-IpToPeerMap::~IpToPeerMap() {
-}
-
-bool IpToPeerMap::InsertV4(const void *addr, int cidr, void *peer) {
-  uint32 mask = cidr == 32 ? 0xffffffff : ~(0xffffffff >> cidr);
-  Entry4 e = {ReadBE32(addr) & mask, mask, peer};
-  ipv4_.push_back(e);
-  return true;
-}
-
-bool IpToPeerMap::InsertV6(const void *addr, int cidr, void *peer) {
-  Entry6 e;
-  e.cidr_len = cidr;
-  e.peer = peer;
-  memcpy(e.ip, addr, 16);
-  ipv6_.push_back(e);
-  return true;
-}
-
-void *IpToPeerMap::LookupV4(uint32 ip) {
-  uint32 best_mask = 0;
-  void *best_peer = NULL;
-  for (auto it = ipv4_.begin(); it != ipv4_.end(); ++it) {
-    if (it->ip == (ip & it->mask) && it->mask >= best_mask) {
-      best_mask = it->mask;
-      best_peer = it->peer;
-    }
-  }
-  return best_peer;
-}
-
-void *IpToPeerMap::LookupV4DefaultPeer() {
-  for (auto it = ipv4_.begin(); it != ipv4_.end(); ++it) {
-    if (it->mask == 0)
-      return it->peer;
-  }
-  return NULL;
-}
-
-void *IpToPeerMap::LookupV6DefaultPeer() {
-  for (auto it = ipv6_.begin(); it != ipv6_.end(); ++it) {
-    if (it->cidr_len == 0)
-      return it->peer;
-  }
-  return NULL;
-}
-
-static int CalculateIPv6CommonPrefix(const uint8 *a, const uint8 *b) {
-  uint64 x = ToBE64(*(uint64*)&a[0] ^ *(uint64*)&b[0]);
-  uint64 y = ToBE64(*(uint64*)&a[8] ^ *(uint64*)&b[8]);
-  return x ? 64 - FindHighestSetBit64(x) : 128 - FindHighestSetBit64(y);
-}
-
-void *IpToPeerMap::LookupV6(const void *addr) {
-  int best_len = 0;
-  void *best_peer = NULL;
-  for (auto it = ipv6_.begin(); it != ipv6_.end(); ++it) {
-    int len = CalculateIPv6CommonPrefix((const uint8*)addr, it->ip);
-    if (len >= it->cidr_len && len >= best_len) {
-      best_len = len;
-      best_peer = it->peer;
-    }
-  }
-  return best_peer;
-}
-
-void IpToPeerMap::RemovePeer(void *peer) {
-  {
-    size_t n = ipv4_.size();
-    Entry4 *r = &ipv4_[0], *w = r;
-    for (size_t i = 0; i != n; i++, r++) {
-      if (r->peer != peer)
-        *w++ = *r;
-    }
-    ipv4_.resize(w - &ipv4_[0]);
-  }
-  {
-    size_t n = ipv6_.size();
-    Entry6 *r = &ipv6_[0], *w = r;
-    for (size_t i = 0; i != n; i++, r++) {
-      if (r->peer != peer)
-        *w++ = *r;
-    }
-    ipv6_.resize(w - &ipv6_[0]);
-  }
-}
-
 ReplayDetector::ReplayDetector() {
   expected_seq_nr_ = 0;
   memset(bitmap_, 0, sizeof(bitmap_));
@@ -124,8 +33,9 @@ ReplayDetector::~ReplayDetector() {
 
 bool ReplayDetector::CheckReplay(uint64 seq_nr) {
   uint64 slot = seq_nr / BITS_PER_ENTRY;
-  if (seq_nr >= expected_seq_nr_) {
-    uint64 prev_slot = (expected_seq_nr_ + BITS_PER_ENTRY - 1) / BITS_PER_ENTRY - 1, n;
+  uint64 expected_seq_nr = expected_seq_nr_;
+  if (seq_nr >= expected_seq_nr) {
+    uint64 prev_slot = (expected_seq_nr + BITS_PER_ENTRY - 1) / BITS_PER_ENTRY - 1, n;
     if ((n = slot - prev_slot) != 0) {
       size_t nn = (size_t)std::min<uint64>(n, BITMAP_SIZE);
       do {
@@ -133,7 +43,7 @@ bool ReplayDetector::CheckReplay(uint64 seq_nr) {
       } while (--nn);
     }
     expected_seq_nr_ = seq_nr + 1;
-  } else if (seq_nr + WINDOW_SIZE <= expected_seq_nr_) {
+  } else if (seq_nr + WINDOW_SIZE <= expected_seq_nr) {
     return false;
   }
   uint32 mask = 1 << (seq_nr & (BITS_PER_ENTRY - 1)), prev;
@@ -146,21 +56,21 @@ WgDevice::WgDevice() {
   peers_ = NULL;
   header_obfuscation_ = false;
   next_rng_slot_ = 0;
-  last_complete_handskake_timestamp_ = 0;
   memset(&compression_header_, 0, sizeof(compression_header_));
 
   low_resolution_timestamp_ = cookie_secret_timestamp_ = OsGetMilliseconds();
   OsGetRandomBytes(cookie_secret_, sizeof(cookie_secret_));
   OsGetRandomBytes((uint8*)random_number_input_, sizeof(random_number_input_));
-
+  SetCurrentThreadAsMainThread();
 }
 
 WgDevice::~WgDevice() {
 }
 
 void WgDevice::SecondLoop(uint64 now) {
-  low_resolution_timestamp_ = now;
+  assert(IsMainThread());
 
+  low_resolution_timestamp_ = now;
   if (rate_limiter_.is_used()) {
     uint32 k[5];
     for (size_t i = 0; i < ARRAY_SIZE(k); i++)
@@ -170,11 +80,16 @@ void WgDevice::SecondLoop(uint64 now) {
 }
 
 uint32 WgDevice::InsertInKeyIdLookup(WgPeer *peer, WgKeypair *kp) {
+  assert(IsMainThread());
   assert(peer);
   for (;;) {
     uint32 v = GetRandomNumber();
     if (v == 0)
       continue;
+
+    // Take the exclusive lock since we're modifying it.
+    WG_SCOPED_RWLOCK_EXCLUSIVE(key_id_lookup_lock_);
+
     std::pair<WgPeer*, WgKeypair*> &peer_and_keypair = key_id_lookup_[v];
     if (peer_and_keypair.first == NULL) {
       peer_and_keypair = std::make_pair(peer, kp);
@@ -188,7 +103,24 @@ uint32 WgDevice::InsertInKeyIdLookup(WgPeer *peer, WgKeypair *kp) {
   }
 }
 
+std::pair<WgPeer*, WgKeypair*> *WgDevice::LookupPeerInKeyIdLookup(uint32 key_id) {
+  // This function is only ever called by the main thread, so no need to lock,
+  // since the main thread is the only mutator.
+  assert(IsMainThread());
+  auto it = key_id_lookup_.find(key_id);
+  return (it != key_id_lookup_.end() && it->second.second == NULL) ? &it->second : NULL;
+}
+
+WgKeypair *WgDevice::LookupKeypairByKeyId(uint32 key_id) {
+  // This function can be called from any thread, so make sure to 
+  // lock using the shared lock.
+  WG_SCOPED_RWLOCK_SHARED(key_id_lookup_lock_);
+  auto it = key_id_lookup_.find(key_id);
+  return (it != key_id_lookup_.end()) ? it->second.second : NULL;
+}
+
 uint32 WgDevice::GetRandomNumber() {
+  assert(IsMainThread());
   size_t slot;
   if ((slot = next_rng_slot_) == 0) {
     blake2s(random_number_output_, sizeof(random_number_output_), random_number_input_, sizeof(random_number_input_), NULL,  0);
@@ -232,6 +164,7 @@ void WgDevice::Initialize(const uint8 private_key[WG_PUBLIC_KEY_LEN]) {
 }
 
 WgPeer *WgDevice::AddPeer() {
+  assert(IsMainThread());
   WgPeer *peer = new WgPeer(this);
   WgPeer **pp = &peers_;
   while (*pp) 
@@ -241,6 +174,8 @@ WgPeer *WgDevice::AddPeer() {
 }
 
 WgPeer *WgDevice::GetPeerFromPublicKey(uint8 public_key[WG_PUBLIC_KEY_LEN]) {
+  assert(IsMainThread());
+  // todo: add O(1) lookup
   for (WgPeer *peer = peers_; peer; peer = peer->next_peer_) {
     if (memcmp(peer->s_remote_, public_key, WG_PUBLIC_KEY_LEN) == 0)
       return peer;
@@ -249,15 +184,16 @@ WgPeer *WgDevice::GetPeerFromPublicKey(uint8 public_key[WG_PUBLIC_KEY_LEN]) {
 }
 
 bool WgDevice::CheckCookieMac1(Packet *packet) {
+  assert(IsMainThread());
   uint8 mac[WG_COOKIE_LEN];
   const uint8 *data = packet->data;
   size_t data_size = packet->size;
-
   blake2s(mac, sizeof(mac), data, data_size - WG_COOKIE_LEN * 2, precomputed_mac1_key_, sizeof(precomputed_mac1_key_));
   return !memcmp_crypto(mac, data + data_size - WG_COOKIE_LEN * 2, WG_COOKIE_LEN);
 }
 
 void WgDevice::MakeCookie(uint8 cookie[WG_COOKIE_LEN], Packet *packet) {
+  assert(IsMainThread());
   blake2s_state b2s;
   uint64 now = OsGetMilliseconds();
   if (now - cookie_secret_timestamp_ >= COOKIE_SECRET_MAX_AGE_MS) {
@@ -274,6 +210,7 @@ void WgDevice::MakeCookie(uint8 cookie[WG_COOKIE_LEN], Packet *packet) {
 }
 
 bool WgDevice::CheckCookieMac2(Packet *packet) {
+  assert(IsMainThread());
   uint8 cookie[WG_COOKIE_LEN];
   uint8 mac[WG_COOKIE_LEN];
   MakeCookie(cookie, packet);
@@ -282,6 +219,7 @@ bool WgDevice::CheckCookieMac2(Packet *packet) {
 }
 
 void WgDevice::CreateCookieMessage(MessageHandshakeCookie *dst, Packet *packet, uint32 remote_key_id) {
+  assert(IsMainThread());
   dst->type = MESSAGE_HANDSHAKE_COOKIE;
   dst->receiver_key_id = remote_key_id;
   MakeCookie(dst->cookie_enc, packet);
@@ -290,7 +228,7 @@ void WgDevice::CreateCookieMessage(MessageHandshakeCookie *dst, Packet *packet, 
   xchacha20poly1305_encrypt(dst->cookie_enc, dst->cookie_enc, WG_COOKIE_LEN, mac->mac1, WG_COOKIE_LEN, dst->nonce, precomputed_cookie_key_);
 }
 
-void WgDevice::EraseKeypairAddrEntry(WgKeypair *kp) {
+void WgDevice::EraseKeypairAddrEntry_Locked(WgKeypair *kp) {
   WgAddrEntry *ae = kp->addr_entry;
 
   assert(ae->ref_count >= 1);
@@ -308,14 +246,28 @@ void WgDevice::EraseKeypairAddrEntry(WgKeypair *kp) {
   }
 }
 
-void WgDevice::UpdateKeypairAddrEntry(uint64 addr_id, WgKeypair *keypair) {
-  if (keypair->addr_entry != NULL && keypair->addr_entry->addr_entry_id == addr_id) {
-    keypair->broadcast_short_key = 1;
-    return;
+WgKeypair *WgDevice::LookupKeypairInAddrEntryMap(uint64 addr, uint32 slot) {
+  WG_SCOPED_RWLOCK_SHARED(addr_entry_lookup_lock_);
+  auto it = addr_entry_lookup_.find(addr);
+  if (it == addr_entry_lookup_.end())
+    return NULL;
+  WgAddrEntry *addr_entry = it->second;
+  return addr_entry->keys[slot];
+}
+
+void WgDevice::UpdateKeypairAddrEntry_Locked(uint64 addr_id, WgKeypair *keypair) {
+  assert(keypair->peer->IsPeerLocked());
+  {
+    WG_SCOPED_RWLOCK_SHARED(addr_entry_lookup_lock_);
+    if (keypair->addr_entry != NULL && keypair->addr_entry->addr_entry_id == addr_id) {
+      keypair->broadcast_short_key = 1;
+      return;
+    }
   }
 
+  WG_SCOPED_RWLOCK_EXCLUSIVE(addr_entry_lookup_lock_);
   if (keypair->addr_entry != NULL)
-    EraseKeypairAddrEntry(keypair);
+    EraseKeypairAddrEntry_Locked(keypair);
 
   WgAddrEntry **aep = &addr_entry_lookup_[addr_id], *ae;
 
@@ -362,13 +314,16 @@ void WgDevice::SetHeaderObfuscation(const char *key) {
 
 
 WgPeer::WgPeer(WgDevice *dev) {
+  assert(dev->IsMainThread());
   dev_ = dev;
   endpoint_.sin.sin_family = 0;
   next_peer_ = NULL;
   curr_keypair_ = next_keypair_ = prev_keypair_ = NULL;
   expect_cookie_reply_ = false;
   has_mac2_cookie_ = false;
+  pending_keepalive_ = false;
   allow_multicast_through_peer_ = false;
+  allow_endpoint_change_ = true;
   supports_handshake_extensions_ = true;
   local_key_id_during_hs_ = 0;
   last_handshake_init_timestamp_ = -1000000ll;
@@ -380,20 +335,43 @@ WgPeer::WgPeer(WgDevice *dev) {
   last_queued_packet_ptr_ = &first_queued_packet_;
   num_queued_packets_ = 0;
   handshake_attempts_ = 0;
+  total_handshake_attempts_ = 0;
   num_ciphers_ = 0;
   cipher_prio_ = 0;
+  main_thread_scheduled_ = 0;
   memset(last_timestamp_, 0, sizeof(last_timestamp_));
   ipv4_broadcast_addr_ = 0xffffffff;
   memset(features_, 0, sizeof(features_));
 }
 
 WgPeer::~WgPeer() {
-  ClearKeys();
-  ClearHandshake();
-  ClearPacketQueue();
+  assert(dev_->IsMainThread());
+  WG_ACQUIRE_LOCK(mutex_);
+  ClearKeys_Locked();
+  ClearHandshake_Locked();
+  ClearPacketQueue_Locked();
+  WG_RELEASE_LOCK(mutex_);
 }
 
-void WgPeer::ClearPacketQueue() {
+void WgPeer::ClearKeys_Locked() {
+  assert(dev_->IsMainThread() && IsPeerLocked());
+  DeleteKeypair(&curr_keypair_);
+  DeleteKeypair(&next_keypair_);
+  DeleteKeypair(&prev_keypair_);
+}
+
+void WgPeer::ClearHandshake_Locked() {
+  assert(dev_->IsMainThread() && IsPeerLocked());
+  uint32 v = local_key_id_during_hs_;
+  if (v != 0) {
+    local_key_id_during_hs_ = 0;
+    WG_SCOPED_RWLOCK_EXCLUSIVE(dev_->key_id_lookup_lock_);
+    dev_->key_id_lookup_.erase(v);
+  }
+}
+
+void WgPeer::ClearPacketQueue_Locked() {
+  assert(dev_->IsMainThread() && IsPeerLocked());
   Packet *packet;
   while ((packet = first_queued_packet_) != NULL) {
     first_queued_packet_ = packet->next;
@@ -422,6 +400,8 @@ void WgPeer::Initialize(const uint8 spub[WG_PUBLIC_KEY_LEN], const uint8 preshar
 
 // run on the client
 void WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
+  assert(dev_->IsMainThread());
+
   uint8 k[WG_SYMMETRIC_KEY_LEN];
   MessageHandshakeInitiation *dst = (MessageHandshakeInitiation *)packet->data;
 
@@ -463,7 +443,6 @@ void WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
 
   packet->size = (unsigned)(sizeof(MessageHandshakeInitiation) + extfield_size);
 
-  // Insert a pointer to this object, 
   dst->sender_key_id = dev_->InsertInKeyIdLookup(this, NULL);
   dst->type = MESSAGE_HANDSHAKE_INITIATION;
   memzero_crypto(k, sizeof(k));
@@ -472,6 +451,7 @@ void WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
 
 // Parsed by server
 WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) { // const MessageHandshakeInitiation *src, MessageHandshakeResponse *dst) {
+  assert(dev->IsMainThread());
   // Copy values into handshake once we've validated it all.
   uint8 ci[WG_HASH_LEN];
   uint8 hi[WG_HASH_LEN];
@@ -562,9 +542,14 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
   BlakeMix(hi, t, sizeof(t));
 
   dst->receiver_key_id = remote_key_id;
-  keypair = peer->CreateNewKeypair(false, ci, remote_key_id, extbuf + WG_TIMESTAMP_LEN, extfield_size);
+  keypair = WgPeer::CreateNewKeypair(false, ci, remote_key_id, extbuf + WG_TIMESTAMP_LEN, extfield_size);
   if (keypair) {
-    peer->InsertKeypairInPeer(keypair);
+
+    WG_ACQUIRE_LOCK(peer->mutex_);
+    peer->InsertKeypairInPeer_Locked(keypair);
+    peer->OnHandshakeAuthComplete();
+    WG_RELEASE_LOCK(peer->mutex_);
+
     dst->sender_key_id = dev->InsertInKeyIdLookup(peer, keypair);
 
     size_t extfield_out_size = 0;
@@ -593,15 +578,15 @@ getout:
 }
 
 WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packet) {
+  assert(dev->IsMainThread());
   MessageHandshakeResponse *src = (MessageHandshakeResponse *)packet->data;
   uint8 t[WG_HASH_LEN];
   uint8 k[WG_SYMMETRIC_KEY_LEN];
   WgKeypair *keypair;
-  auto it = dev->key_id_lookup().find(src->receiver_key_id);
-  if (it == dev->key_id_lookup().end() || it->second.second != NULL)
+  auto peer_and_keypair = dev->LookupPeerInKeyIdLookup(src->receiver_key_id);
+  if (peer_and_keypair == NULL)
     return NULL;
-  WgPeer *peer = it->second.first;
-
+  WgPeer *peer = peer_and_keypair->first;
   assert(src->receiver_key_id == peer->local_key_id_during_hs_);
 
   HandshakeState hs = peer->hs_;
@@ -626,16 +611,18 @@ WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packe
   if (!chacha20poly1305_decrypt(src->empty_enc, src->empty_enc, extfield_size + sizeof(src->empty_enc), hs.hi, sizeof(hs.hi), 0, k))
     goto getout;
 
-  keypair = peer->CreateNewKeypair(true, hs.ci, src->sender_key_id, src->empty_enc, extfield_size);
+  keypair = WgPeer::CreateNewKeypair(true, hs.ci, src->sender_key_id, src->empty_enc, extfield_size);
   if (!keypair)
     goto getout;
-
-  peer->InsertKeypairInPeer(keypair);
 
   // Re-map the entry in the id table so it points at this keypair instead.
   keypair->local_key_id = peer->local_key_id_during_hs_;
   peer->local_key_id_during_hs_ = 0;
-  it->second.second = keypair;
+  peer_and_keypair->second = keypair;
+
+  WG_ACQUIRE_LOCK(peer->mutex_);
+  peer->InsertKeypairInPeer_Locked(keypair);
+  WG_RELEASE_LOCK(peer->mutex_);
 
   if (0) {
 getout:
@@ -650,11 +637,12 @@ getout:
 
 // This is parsed by the initiator, when it needs to re-send the handshake message with a better mac.
 void WgPeer::ParseMessageHandshakeCookie(WgDevice *dev, const MessageHandshakeCookie *src) {
+  assert(dev->IsMainThread());
   uint8 cookie[WG_COOKIE_LEN];
-  auto it = dev->key_id_lookup().find(src->receiver_key_id);
-  if (it == dev->key_id_lookup().end() || it->second.second != NULL)
+  auto peer_and_keypair = dev->LookupPeerInKeyIdLookup(src->receiver_key_id);
+  if (!peer_and_keypair)
     return;
-  WgPeer *peer = it->second.first;
+  WgPeer *peer = peer_and_keypair->first;
   if (!peer->expect_cookie_reply_)
     return;
   if (!xchacha20poly1305_decrypt(cookie, src->cookie_enc, sizeof(src->cookie_enc), 
@@ -756,6 +744,7 @@ void WgKeypairSetupCompressionExtension(WgKeypair *keypair, const WgPacketCompre
   state->server_addr_v4_subnet_bytes = (remotec->flags & 3);
   WriteLE32(&state->server_addr_v4_netmask, 0xffffffff >> ((remotec->flags & 3) * 8));
 }
+
 bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size) {
   bool did_setup_compression = false;
 
@@ -804,33 +793,29 @@ bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size
 
 #endif  // WITH_HANDSHAKE_EXT
 
-void WgPeer::ClearKeys() {
-  DeleteKeypair(&curr_keypair_);
-  DeleteKeypair(&next_keypair_);
-  DeleteKeypair(&prev_keypair_);
-}
-
-void WgPeer::ClearHandshake() {
-  uint32 v = local_key_id_during_hs_;
-  if (v != 0) {
-    local_key_id_during_hs_ = 0;
-    dev_->key_id_lookup_.erase(v);
-  }
+static void ActualFreeKeypair(void *x) {
+  WgKeypair *t = (WgKeypair*)x;
+  if (t->aes_gcm128_context_)
+    free(t->aes_gcm128_context_);
+  delete t;
 }
 
 void WgPeer::DeleteKeypair(WgKeypair **kp) {
   WgKeypair *t = *kp;
   *kp = NULL;
   if (t) {
-    if (t->addr_entry)
-      dev_->EraseKeypairAddrEntry(t);
-
-    if (t->local_key_id)
+    assert(t->peer->IsPeerLocked());
+    if (t->addr_entry) {
+      WG_SCOPED_RWLOCK_EXCLUSIVE(dev_->addr_entry_lookup_lock_);
+      dev_->EraseKeypairAddrEntry_Locked(t);
+    }
+    if (t->local_key_id) {
+      WG_SCOPED_RWLOCK_EXCLUSIVE(dev_->key_id_lookup_lock_);
       dev_->key_id_lookup_.erase(t->local_key_id);
-
-    if (t->aes_gcm128_context_)
-      free(t->aes_gcm128_context_);
-    delete t;
+      t->local_key_id = 0;
+    }
+    t->recv_key_state = WgKeypair::KEY_INVALID;
+    dev_->delayed_delete_.Add(&ActualFreeKeypair, t);
   }
 }
 
@@ -840,21 +825,24 @@ WgKeypair *WgPeer::CreateNewKeypair(bool is_initiator, const uint8 chaining_key[
   if (!kp)
     return NULL;
   memset(kp, 0, offsetof(WgKeypair, replay_detector));
-  kp->peer = this;
   kp->is_initiator = is_initiator;
   kp->remote_key_id = remote_key_id;
   kp->auth_tag_length = CHACHA20POLY1305_AUTHTAGLEN;
   
 #if WITH_HANDSHAKE_EXT
-  if (!WgKeypairParseExtendedHandshake(kp, extfield, extfield_size))
-    goto fail;
+  if (!WgKeypairParseExtendedHandshake(kp, extfield, extfield_size)) {
+fail:
+    delete kp;
+    return NULL;
+  }
 #endif  // WITH_HANDSHAKE_EXT
 
   first_key = kp->send_key, second_key = kp->recv_key;
   if (!is_initiator)
     std::swap(first_key, second_key);
   blake2s_hkdf(first_key, sizeof(kp->send_key), second_key, sizeof(kp->recv_key), 
-               kp->auth_tag_length != CHACHA20POLY1305_AUTHTAGLEN ? (uint8*)kp->compress_mac_keys : NULL, 32, NULL, 0, chaining_key, WG_HASH_LEN);
+               kp->auth_tag_length != CHACHA20POLY1305_AUTHTAGLEN ? (uint8*)kp->compress_mac_keys : NULL, 32, 
+               NULL, 0, chaining_key, WG_HASH_LEN);
 
   if (!is_initiator) {
     std::swap(kp->compress_mac_keys[0][0], kp->compress_mac_keys[1][0]);
@@ -870,25 +858,22 @@ WgKeypair *WgPeer::CreateNewKeypair(bool is_initiator, const uint8 chaining_key[
     int key_size = (kp->cipher_suite == EXT_CIPHER_SUITE_AES128_GCM) ? 128 : 256;
     CRYPTO_gcm128_init(&kp->aes_gcm128_context_[0], kp->send_key, key_size);
     CRYPTO_gcm128_init(&kp->aes_gcm128_context_[1], kp->recv_key, key_size);
-#else
+#else  // WITH_AESGCM
     goto fail;
-#endif
+#endif  // WITH_AESGCM
   }
 #endif  // WITH_HANDSHAKE_EXT
 
   kp->send_key_state = kp->recv_key_state = WgKeypair::KEY_VALID;
-  time_of_next_key_event_ = 0;
   kp->key_timestamp = OsGetMilliseconds();
-
   return kp;
-
-fail:
-  delete kp;
-  return NULL;
 }
 
-void WgPeer::InsertKeypairInPeer(WgKeypair *kp) {
-  assert(kp->peer == this);
+void WgPeer::InsertKeypairInPeer_Locked(WgKeypair *kp) {
+  assert(dev_->IsMainThread() && IsPeerLocked());
+  assert(kp->peer == NULL);
+  kp->peer = this;
+  time_of_next_key_event_ = 0;
   DeleteKeypair(&prev_keypair_);
   if (kp->is_initiator) {
     // When we're the initator then we got the handshake and we can
@@ -908,7 +893,8 @@ void WgPeer::InsertKeypairInPeer(WgKeypair *kp) {
   }
 }
 
-bool WgPeer::CheckSwitchToNextKey(WgKeypair *keypair) {
+bool WgPeer::CheckSwitchToNextKey_Locked(WgKeypair *keypair) {
+  assert(IsPeerLocked());
   if (keypair != next_keypair_)
     return false;
   DeleteKeypair(&prev_keypair_);
@@ -920,6 +906,7 @@ bool WgPeer::CheckSwitchToNextKey(WgKeypair *keypair) {
 }
 
 bool WgPeer::CheckHandshakeRateLimit() {
+  assert(dev_->IsMainThread());
   uint64 now = OsGetMilliseconds();
   if (now - last_handshake_init_timestamp_ < REKEY_TIMEOUT_MS)
     return false;
@@ -928,6 +915,7 @@ bool WgPeer::CheckHandshakeRateLimit() {
 }
 
 void WgPeer::WriteMacToPacket(const uint8 *data, MessageMacs *dst) {
+  assert(dev_->IsMainThread());
   expect_cookie_reply_ = true;
   blake2s(dst->mac1, sizeof(dst->mac1), data, (uint8*)dst->mac1 - data, precomputed_mac1_key_, sizeof(precomputed_mac1_key_));
   memcpy(sent_mac1_, dst->mac1, sizeof(sent_mac1_));
@@ -964,6 +952,7 @@ enum {
 #define WgSetTimer(x) (timers_ |= (32 << (x)))
 
 void WgPeer::OnDataSent() {
+  assert(IsPeerLocked());
   WgClearTimer(TIMER_SEND_KEEPALIVE);
   if (!WgIsTimerActive(TIMER_NEW_HANDSHAKE))
     WgSetTimer(TIMER_NEW_HANDSHAKE);
@@ -971,10 +960,12 @@ void WgPeer::OnDataSent() {
 }
 
 void WgPeer::OnKeepaliveSent() {
+  assert(IsPeerLocked());
   WgSetTimer(TIMER_PERSISTENT_KEEPALIVE);
 }
 
 void WgPeer::OnDataReceived() {
+  assert(IsPeerLocked());
   WgClearTimer(TIMER_NEW_HANDSHAKE);
   if (!WgIsTimerActive(TIMER_SEND_KEEPALIVE))
     WgSetTimer(TIMER_SEND_KEEPALIVE);
@@ -984,16 +975,19 @@ void WgPeer::OnDataReceived() {
 }
 
 void WgPeer::OnKeepaliveReceived() {
+  assert(IsPeerLocked());
   WgClearTimer(TIMER_NEW_HANDSHAKE);
   WgSetTimer(TIMER_PERSISTENT_KEEPALIVE);
 }
 
 void WgPeer::OnHandshakeInitSent() {
+  assert(IsPeerLocked());
   WgClearTimer(TIMER_SEND_KEEPALIVE);
   WgSetTimer(TIMER_RETRANSMIT_HANDSHAKE);
 }
 
 void WgPeer::OnHandshakeAuthComplete() {
+  assert(IsPeerLocked());
   WgClearTimer(TIMER_NEW_HANDSHAKE);
   WgSetTimer(TIMER_ZERO_KEYS);
   WgSetTimer(TIMER_PERSISTENT_KEEPALIVE);
@@ -1007,8 +1001,11 @@ static const char * const kCipherSuites[] = {
 };
 
 void WgPeer::OnHandshakeFullyComplete() {
+  assert(IsPeerLocked());
   WgClearTimer(TIMER_RETRANSMIT_HANDSHAKE);
-  handshake_attempts_ = 0;
+  total_handshake_attempts_ = handshake_attempts_ = 0;
+
+  uint64 now = OsGetMilliseconds();
 
   if (last_complete_handskake_timestamp_ == 0) {
     bool any_feature = false;
@@ -1022,17 +1019,15 @@ void WgPeer::OnHandshakeFullyComplete() {
             curr_keypair_->enabled_features[4] ? "skip_keyid_in" : "",
             curr_keypair_->enabled_features[5] ? "skip_keyid_out" : "");
     }
-
-
   }
-
-  last_complete_handskake_timestamp_ = OsGetMilliseconds();
-  dev_->last_complete_handskake_timestamp_ = last_complete_handskake_timestamp_;
+  last_complete_handskake_timestamp_ = now;
 //  RINFO("Connection established.");
 }
 
 // Check if any of the timeouts have expired
 uint32 WgPeer::CheckTimeouts(uint64 now) {
+  assert(IsPeerLocked());
+
   uint32 t, rv = 0;
 
   if (now >= time_of_next_key_event_)
@@ -1056,11 +1051,9 @@ uint32 WgPeer::CheckTimeouts(uint64 now) {
     if ((t & (1 << TIMER_RETRANSMIT_HANDSHAKE)) && (now32 - timer_value_[TIMER_RETRANSMIT_HANDSHAKE]) >= REKEY_TIMEOUT_MS) {
       t ^= (1 << TIMER_RETRANSMIT_HANDSHAKE);
       if (handshake_attempts_ > MAX_HANDSHAKE_ATTEMPTS) {
-        RINFO("Too many handshake attempts. Stopping.");
         t &= ~(1 << TIMER_SEND_KEEPALIVE);
-        ClearPacketQueue();
+        ClearPacketQueue_Locked();
       } else {
-        RINFO("Retrying handshake, attempt %d...", handshake_attempts_ + 2);
         handshake_attempts_++;
         rv |= ACTION_SEND_HANDSHAKE;
       }
@@ -1085,13 +1078,12 @@ uint32 WgPeer::CheckTimeouts(uint64 now) {
       t &= ~(1 << TIMER_NEW_HANDSHAKE);
       handshake_attempts_ = 0;
       rv |= ACTION_SEND_HANDSHAKE;
-      RINFO("Retrying handshake with peer");
     }
     if ((t & (1 << TIMER_ZERO_KEYS)) && (now32 - timer_value_[TIMER_ZERO_KEYS]) >= REJECT_AFTER_TIME_MS * 3) {
       RINFO("Expiring all keys for peer");
       t &= ~(1 << TIMER_ZERO_KEYS);
-      ClearKeys();
-      ClearHandshake();
+      ClearKeys_Locked();
+      ClearHandshake_Locked();
     }
   }
   timers_ = t;
@@ -1100,6 +1092,7 @@ uint32 WgPeer::CheckTimeouts(uint64 now) {
 
 // Check all key stuff here to avoid calling possibly expensive timestamp routines in the packet handler
 void WgPeer::CheckAndUpdateTimeOfNextKeyEvent(uint64 now) {
+  assert(IsPeerLocked());
   uint64 next_time = UINT64_MAX;
   uint32 rv = 0;
 
@@ -1110,8 +1103,7 @@ void WgPeer::CheckAndUpdateTimeOfNextKeyEvent(uint64 now) {
       // if a peer is the initiator of a current secure session, WireGuard will send a handshake initiation
       // message to begin a new secure session if, after transmitting a transport data message, the current secure session
       // is REKEY_AFTER_TIME_MS old, or if after receiving a transport data message, the current secure session is
-      // (REKEY_AFTER_TIME_MS - KEEPALIVE_TIMEOUT_MS - REKEY_TIMEOUT_MS) seconds old and it has not yet acted upon
-      // this event.
+      // (REKEY_AFTER_TIME_MS - KEEPALIVE_TIMEOUT_MS - REKEY_TIMEOUT_MS) seconds old and it has not yet acted upon it.
       if (now >= curr_keypair_->key_timestamp + (REJECT_AFTER_TIME_MS - KEEPALIVE_TIMEOUT_MS - REKEY_TIMEOUT_MS)) {
         next_time = curr_keypair_->key_timestamp + REJECT_AFTER_TIME_MS;
         if (curr_keypair_->recv_key_state == WgKeypair::KEY_VALID)
@@ -1153,16 +1145,22 @@ void WgPeer::SetPersistentKeepalive(int persistent_keepalive_secs) {
 }
 
 bool WgPeer::AddIp(const WgCidrAddr &cidr_addr) {
+  assert(dev_->IsMainThread());
+
   if (cidr_addr.size == 32) {
     if (cidr_addr.cidr > 32)
       return false;
+    WG_ACQUIRE_RWLOCK_EXCLUSIVE(dev_->ip_to_peer_map_lock_);
     dev_->ip_to_peer_map_.InsertV4(cidr_addr.addr, cidr_addr.cidr, this);
+    WG_RELEASE_RWLOCK_EXCLUSIVE(dev_->ip_to_peer_map_lock_);
     allowed_ips_.push_back(cidr_addr);
     return true;
   } else if (cidr_addr.size == 128) {
     if (cidr_addr.cidr > 128)
       return false;
+    WG_ACQUIRE_RWLOCK_EXCLUSIVE(dev_->ip_to_peer_map_lock_);
     dev_->ip_to_peer_map_.InsertV6(cidr_addr.addr, cidr_addr.cidr, this);
+    WG_RELEASE_RWLOCK_EXCLUSIVE(dev_->ip_to_peer_map_lock_);
     allowed_ips_.push_back(cidr_addr);
     return true;
   } else {
@@ -1183,14 +1181,13 @@ bool WgPeer::AddCipher(int cipher) {
     return false;
 
   if (cipher == EXT_CIPHER_SUITE_AES128_GCM || cipher == EXT_CIPHER_SUITE_AES256_GCM) {
-#if !WITH_AESGCM
-    return true;
-#endif  // !WITH_AESGCM
+#if defined(ARCH_CPU_X86_FAMILY) && WITH_AESGCM
     if (!X86_PCAP_AES)
       return true;
+#else
+    return true;
+#endif  // defined(ARCH_CPU_X86_FAMILY) && WITH_AESGCM
   }
-
-
   ciphers_[num_ciphers_++] = cipher;
   return true;
 }
@@ -1214,15 +1211,10 @@ void WgRateLimit::Periodic(uint32 s[5]) {
     if (per_sec < 1)
       per_sec = 1;
   }
-
   if ((unsigned)per_sec > packets_per_sec_)
     per_sec = (per_sec + packets_per_sec_ + 1) >> 1;
-    
-//  if (per_sec != packets_per_sec_) {
-//    RINFO("Setting pps: %d", per_sec);
-  packets_per_sec_ = per_sec;
-//  }
-  
+
+  packets_per_sec_ = per_sec;  
   used_rate_limit_ = 0;
   rand_xor_ = s[4];
   key2_[0] = key1_[0];
@@ -1278,7 +1270,8 @@ void WgKeypairEncryptPayload(uint8 *dst, const size_t src_len,
 bool WgKeypairDecryptPayload(uint8 *dst, size_t src_len,
     const uint8 *ad, size_t ad_len,
     const uint64 nonce, WgKeypair *keypair) {
-  uint8 mac[16];
+
+  __aligned(16) uint8 mac[16];
 
   if (src_len < keypair->auth_tag_length)
     return false;

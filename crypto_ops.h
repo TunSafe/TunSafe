@@ -7,6 +7,7 @@
 #include "tunsafe_types.h"
 
 #include <string.h>
+
 #if defined(COMPILER_MSVC)
 #include <intrin.h>
 #endif  // defined(COMPILER_MSVC)

@@ -3,13 +3,38 @@
 #ifndef TINYVPN_TINYVPN_H_
 #define TINYVPN_TINYVPN_H_
 
-class WireguardProcessor;
+#include "netapi.h"
 
-bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, bool *exit_flag);
+class WireguardProcessor;
+class DnsBlocker;
+
+class DnsResolver {
+public:
+  explicit DnsResolver(DnsBlocker *dns_blocker);
+  ~DnsResolver();
+
+  bool Resolve(const char *hostname, IpAddr *result);
+
+  void ClearCache();
+
+  void SetAbortFlag(bool v) { abort_flag_ = v; }
+private:
+  struct Entry {
+    std::string name;
+    IpAddr ip;
+    Entry(const std::string &name, const IpAddr &ip) : name(name), ip(ip) {}
+  };
+  std::vector<Entry> cache_;
+  bool abort_flag_;
+  DnsBlocker *dns_blocker_;
+};
+
+
+bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsResolver *dns_resolver);
 
 #define kSizeOfAddress 64
 const char *print_ip_prefix(char buf[kSizeOfAddress], int family, const void *ip, int prefixlen);
-
+char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]);
 
 
 #endif  // TINYVPN_TINYVPN_H_

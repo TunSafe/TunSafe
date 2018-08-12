@@ -6,12 +6,14 @@
 #include "netapi.h"
 #include "wireguard.h"
 #include "wireguard_config.h"
+#include <string>
 
 struct RouteInfo {
   uint8 family;
   uint8 cidr;
   uint8 ip[16];
   uint8 gw[16];
+  std::string dev;
 };
 
 class TunsafeBackendBsd : public TunInterface, public UdpInterface {
@@ -34,9 +36,9 @@ protected:
   virtual bool InitializeTun(char devname[16]) = 0;
   virtual void RunLoopInner() = 0;
 
-  void AddRoute(uint32 ip, uint32 cidr, uint32 gw);
+  void AddRoute(uint32 ip, uint32 cidr, uint32 gw, const char *dev);
   void DelRoute(const RouteInfo &cd);
-  bool AddRoute(int family, const void *dest, int dest_prefix, const void *gateway);
+  bool AddRoute(int family, const void *dest, int dest_prefix, const void *gateway, const char *dev);
   bool RunPrePostCommand(const std::vector<std::string> &vec);
 
   WireguardProcessor *processor_;

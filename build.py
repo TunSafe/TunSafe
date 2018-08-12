@@ -11,9 +11,10 @@ import re
 MSBUILD_PATH = r"C:\Dev\VS2017\MSBuild\15.0\Bin\MSBuild.exe"
 NSIS_PATH = r'C:\Dev\NSIS\makeNSIS.EXE'
 
+
 SIGNTOOL_PATH = r'c:\Program Files (x86)\Windows Kits\10\bin\10.0.15063.0\x86\signtool.exe'
-SIGNTOOL_KEY_PATH = '' # put key here
-SIGNTOOL_PASS = '' # put key pass here
+SIGNTOOL_KEY_PATH = "" # path to key file
+SIGNTOOL_PASS = "" # password
 
 def RmTree(path):
   try:

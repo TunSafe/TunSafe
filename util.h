@@ -12,3 +12,14 @@ typedef void Logger(const char *msg);
 extern Logger *g_logger;
 
 
+void *memdup(const void *p, size_t size);
+char *my_strndup(const char *p, size_t size);
+
+size_t my_strlcpy(char *dst, size_t dstsize, const char *src);
+
+
+template<typename T, typename U> static inline T postinc(T&x, U v) {
+  T t = x;
+  x += v;
+  return t;
+}

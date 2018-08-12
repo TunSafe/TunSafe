@@ -17,6 +17,7 @@
 #include <arpa/inet.h>
 #endif
 
+#include <algorithm>
 #include "tunsafe_types.h"
 
 static char base64_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -133,6 +134,7 @@ int RunCommand(const char *fmt, ...) {
   char *args[33];
   char *envp[1] = {NULL};
   int nargs = 0;
+  bool didadd = false;
   va_start(va, fmt);
   for (;;) {
     c = *fmt++;
@@ -140,12 +142,13 @@ int RunCommand(const char *fmt, ...) {
       c = *fmt++;
       if (c == 0) goto ZERO;
       if (c == 's') {
-        tmp += va_arg(va, char*);
+        char *arg = va_arg(va, char*);
+        if (arg != NULL) {
+          tmp += arg;
+          didadd = true;
+        }
       } else if (c == 'd') {
         snprintf(buf, 32, "%d", va_arg(va, int));
-        tmp += buf;
-      } else if (c == 'u') {
-        snprintf(buf, 32, "%u", va_arg(va, int));
         tmp += buf;
       } else if (c == '%') {
         tmp += '%';
@@ -156,9 +159,12 @@ int RunCommand(const char *fmt, ...) {
       }
     } else if (c == ' ' || c == 0) {
 ZERO:
-      args[nargs++] = _strdup(tmp.c_str());
-      tmp.clear();
-      if (nargs == 32 || c == 0) break;
+      if (!tmp.empty() || didadd) {
+        args[nargs++] = _strdup(tmp.c_str());
+        tmp.clear();
+        if (nargs == 32 || c == 0) break;
+      }
+      didadd = false;
     } else {
       tmp += c;
     }
@@ -187,7 +193,7 @@ ZERO:
 #endif
 
   if (ret != 0)
-    RERROR("Command %s failed %d!", fmt_org, ret);
+    RERROR("Command failed %d!", ret);
 
   return ret;
 }
@@ -264,4 +270,30 @@ void RINFO(const char *msg, ...) {
     fputs(buf, stderr);
     fputs("\n", stderr);
   }
+}
+
+void *memdup(const void *p, size_t size) {
+  void *x = malloc(size);
+  if (x)
+    memcpy(x, p, size);
+  return x;
+}
+
+char *my_strndup(const char *p, size_t size) {
+  char *x = (char*)malloc(size + 1);
+  if (x) {
+    x[size] = 0;
+    memcpy(x, p, size);
+  }
+  return x;
+}
+
+size_t my_strlcpy(char *dst, size_t dstsize, const char *src) {
+  size_t len = strlen(src);
+  if (dstsize) {
+    size_t lenx = std::min<size_t>(dstsize - 1, len);
+    dst[lenx] = 0;
+    memcpy(dst, src, lenx);
+  }
+  return len;
 }
