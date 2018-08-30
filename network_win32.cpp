@@ -1052,7 +1052,7 @@ static bool SetIPV6DnsOnInterface(NET_LUID *InterfaceLuid, const uint8 new_addre
   if (ConvertInterfaceLuidToIndex(InterfaceLuid, &InterfaceIndex))
     return false;
   if (IsIpv6AddressSet(new_address)) {
-    if (!inet_ntop(AF_INET6, new_address, ipv6, sizeof(ipv6)))
+    if (!inet_ntop(AF_INET6, const_cast<uint8*>(new_address), ipv6, sizeof(ipv6)))
       return false;
 
     snprintf(buf, sizeof(buf), "netsh interface ipv6 set dns name=%d static %s validate=no", InterfaceIndex, ipv6);
