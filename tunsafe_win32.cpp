@@ -724,12 +724,17 @@ static void SetStartupFlags(int new_flags) {
       if (len < 512) {
         memcpy(buf + len + 1, L"\" --autostart", sizeof(wchar_t) * 14);
         result = RegSetValueExW(hkey, L"TunSafe", NULL, REG_SZ, (BYTE*)buf, (DWORD)(len + 15) * sizeof(wchar_t));
+      } else {
+        RERROR("Unable to add to startup list, filename too long.");
       }
     } else {
       RegDeleteValueW(hkey, L"TunSafe");
     }
     RegCloseKey(hkey);
   }
+  if (result != 0)
+    RERROR("Unable to modify startup list, error code = 0x%x", (int)result);
+
   RegWriteInt(g_reg_key, "StartupFlags", new_flags);
 
   bool was_started = g_backend && g_backend->is_started();
