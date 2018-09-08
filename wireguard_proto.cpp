@@ -984,6 +984,7 @@ void WgPeer::OnHandshakeInitSent() {
   assert(IsPeerLocked());
   WgClearTimer(TIMER_SEND_KEEPALIVE);
   WgSetTimer(TIMER_RETRANSMIT_HANDSHAKE);
+  WgSetTimer(TIMER_PERSISTENT_KEEPALIVE);
 }
 
 void WgPeer::OnHandshakeAuthComplete() {
