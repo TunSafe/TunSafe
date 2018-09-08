@@ -475,21 +475,25 @@ bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsR
   }
 
   while (fgets(buf, sizeof(buf), f)) {
-    size_t l = strlen(buf);
+    size_t len = strlen(buf);
 
-    if (ContainsNonAsciiCharacter(buf, l)) {
+    if (ContainsNonAsciiCharacter(buf, len)) {
       RERROR("File is not a config file: %s", filename);
       return false;
     }
+    
+    char *comment = (char*)memchr(buf, '#', len);
+    if (comment) {
+      len = comment - buf;
+      *comment = '\0';
+    }
+    while (len && is_space(buf[len - 1]))
+      buf[--len] = 0;
 
-
-    while (l && is_space(buf[l - 1]))
-      buf[--l] = 0;
-    if (buf[0] == '#' || buf[0] == '\0')
+    if (buf[0] == '\0')
       continue;
 
     if (buf[0] == '[') {
-      size_t len = strlen(buf);
       if (len < sizeof(group)) {
         memcpy(group, buf, len + 1);
         if (!file_parser.ParseFlag(group, NULL, NULL)) {
@@ -511,9 +515,7 @@ bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsR
     *sepe = 0;
 
     // trim space after =
-    sep++;
-    while (is_space(*sep))
-      sep++;
+    do sep++; while (is_space(*sep));
 
     if (!file_parser.ParseFlag(group, buf, sep)) {
       RERROR("Error parsing %s.%s = %s", group, buf, sep);
