@@ -987,6 +987,7 @@ DWORD SetMetricOnNetworkAdapter(NET_LUID *InterfaceLuid, ADDRESS_FAMILY family, 
 static const char *PrintIPV6(const uint8 new_address[16]) {
   sockaddr_in6 sin6 = {0};
   static char buf[100];
+  // cast to void* to work on VS2015
   if (!inet_ntop(PF_INET6, (void*)new_address, buf, 100))
     memcpy(buf, "unknown", 8);
   return buf;
@@ -1052,7 +1053,7 @@ static bool SetIPV6DnsOnInterface(NET_LUID *InterfaceLuid, const uint8 new_addre
   if (ConvertInterfaceLuidToIndex(InterfaceLuid, &InterfaceIndex))
     return false;
   if (IsIpv6AddressSet(new_address)) {
-    if (!inet_ntop(AF_INET6, new_address, ipv6, sizeof(ipv6)))
+    if (!inet_ntop(AF_INET6, (void*)new_address, ipv6, sizeof(ipv6)))
       return false;
 
     snprintf(buf, sizeof(buf), "netsh interface ipv6 set dns name=%d static %s validate=no", InterfaceIndex, ipv6);
