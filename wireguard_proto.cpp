@@ -54,6 +54,7 @@ bool ReplayDetector::CheckReplay(uint64 seq_nr) {
 
 WgDevice::WgDevice() {
   peers_ = NULL;
+  delegate_ = NULL;
   header_obfuscation_ = false;
   next_rng_slot_ = 0;
   memset(&compression_header_, 0, sizeof(compression_header_));
@@ -492,8 +493,10 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
   // Hi := HASH(Hi || msg.static)
   BlakeMix(hi, src->static_enc, sizeof(src->static_enc));
   // Lookup the peer with this ID
-  if (!(peer = dev->GetPeerFromPublicKey(spubi)))
-    goto getout;
+  while ((peer = dev->GetPeerFromPublicKey(spubi)) == NULL) {
+    if (dev->delegate_ == NULL || !dev->delegate_->HandleUnknownPeerId(spubi, packet))
+      goto getout;
+  }
   // (Ci, K) := KDF2(Ci, DH(sprivr, spubi))
   blake2s_hkdf(ci, sizeof(ci), k, sizeof(k), NULL, 32, peer->s_priv_pub_, sizeof(peer->s_priv_pub_), ci, WG_HASH_LEN);
   // Hi2 := Hi

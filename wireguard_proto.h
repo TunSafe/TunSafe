@@ -265,6 +265,16 @@ class WgDevice {
   friend class WgPeer;
   friend class WireguardProcessor;
 public:
+
+  // Can be used to customize the behavior of WgDevice
+  class Delegate {
+  public:
+    // This is called from the main thread whenever a public key was not found in the WgDevice,
+    // return true to try again or false to fail. The packet can be copied and saved
+    // to resume a handshake later on.
+    virtual bool HandleUnknownPeerId(uint8 public_key[WG_PUBLIC_KEY_LEN], Packet *packet) = 0;
+  };
+
   WgDevice();
   ~WgDevice();
 
@@ -296,6 +306,8 @@ public:
 
   bool IsMainThread() { return CurrentThreadIdEquals(main_thread_id_); }
   void SetCurrentThreadAsMainThread() { main_thread_id_ = GetCurrentThreadId(); }
+
+  void SetDelegate(Delegate *del) { delegate_ = del; }
 private:
   std::pair<WgPeer*, WgKeypair*> *LookupPeerInKeyIdLookup(uint32 key_id);
   WgKeypair *LookupKeypairByKeyId(uint32 key_id);
@@ -319,6 +331,9 @@ private:
    
   // For enumerating all peers
   WgPeer *peers_;
+
+  // For hooking
+  Delegate *delegate_;
 
   // Lock that protects key_id_lookup_
   WG_DECLARE_RWLOCK(key_id_lookup_lock_);
