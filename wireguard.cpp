@@ -288,7 +288,7 @@ bool WireguardProcessor::HandleIcmpv6NeighborSolicitation(const byte *data, size
   // Target address must match a peer's range.
   WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
   WgPeer *peer = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 48);
-  WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
+  WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
   if (peer == NULL)
     return false;
 
@@ -351,7 +351,7 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
     uint32 ip = ReadBE32(data + 16);
     WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ip);
-    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     if (peer == NULL)
       goto getout;
     if ((ip >= (224 << 24) || ip == peer->ipv4_broadcast_addr_) && !peer->allow_multicast_through_peer_)
@@ -371,7 +371,7 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
 
     WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_); 
     peer = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 24);
-    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     if (peer == NULL)
       goto getout;
     
@@ -929,7 +929,7 @@ void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *key
       goto getout_error_header;
     WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ReadBE32(data + 12));
-    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     size_from_header = ReadBE16(data + 2);
     if (size_from_header < IPV4_HEADER_SIZE) {
       // too small packet?
@@ -940,7 +940,7 @@ void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *key
       goto getout_error_header;
     WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 8);
-    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_)
+    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     size_from_header = IPV6_HEADER_SIZE + ReadBE16(data + 4);
   } else {
     // invalid ip version

@@ -14,7 +14,7 @@
 
 // Threading macros that enable locks only in MT builds
 #if WITH_WG_THREADING
-#define WG_SCOPED_LOCK(name) AutoLock scoped_lock(&name)
+#define WG_SCOPED_LOCK(name) ScopedLock scoped_lock(&name)
 #define WG_ACQUIRE_LOCK(name) name.Acquire()
 #define WG_RELEASE_LOCK(name) name.Release()
 #define WG_DECLARE_LOCK(name) Mutex name;
