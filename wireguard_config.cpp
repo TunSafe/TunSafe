@@ -333,10 +333,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       for (size_t i = 0; i < ss.size(); i++) {
         if (!ParseSockaddrInWithoutPort(ss[i], &sin, dns_resolver_))
           return false;
-        if (!wg_->AddDnsServer(sin)) {
-          RERROR("Multiple DNS not allowed.");
-          return false;
-        }
+        wg_->AddDnsServer(sin);
       }
     } else if (strcmp(key, "BlockDNS") == 0) {
       bool v;

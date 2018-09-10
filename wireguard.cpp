@@ -36,7 +36,6 @@ WireguardProcessor::WireguardProcessor(UdpInterface *udp, TunInterface *tun, Pro
   add_routes_mode_ = true;
   dns_blocking_ = true;
   internet_blocking_ = kBlockInternet_Default;
-  dns6_addr_.sin.sin_family = dns_addr_.sin.sin_family = 0;
 
   stats_last_bytes_in_ = 0;
   stats_last_bytes_out_ = 0;
@@ -54,12 +53,9 @@ void WireguardProcessor::SetListenPort(int listen_port) {
 }
 
 
-bool WireguardProcessor::AddDnsServer(const IpAddr &sin) {
-  IpAddr *target = (sin.sin.sin_family == AF_INET6) ? &dns6_addr_ : &dns_addr_;
-  if (target->sin.sin_family != 0)
-    return false;
-  *target = sin;
-  return true;
+void WireguardProcessor::AddDnsServer(const IpAddr &sin) {
+  std::vector<IpAddr> *target = (sin.sin.sin_family == AF_INET6) ? &dns6_addr_ : &dns_addr_;
+  target->push_back(sin);
 }
 
 bool WireguardProcessor::SetTunAddress(const WgCidrAddr &addr) {
@@ -201,24 +197,12 @@ bool WireguardProcessor::Start() {
     }
   }
 
-  uint8 dhcp_options[6];
-
-  config.block_dns_on_adapters = dns_blocking_ && ((config.use_ipv4_default_route && dns_addr_.sin.sin_family == AF_INET) ||
-                                                   (config.use_ipv6_default_route && dns6_addr_.sin6.sin6_family == AF_INET6));
+  config.block_dns_on_adapters = dns_blocking_ && ((config.use_ipv4_default_route && dns_addr_.size()) ||
+                                                   (config.use_ipv6_default_route && dns6_addr_.size()));
   config.internet_blocking = internet_blocking_;
 
-  if (dns_addr_.sin.sin_family == AF_INET) {
-    dhcp_options[0] = 6;
-    dhcp_options[1] = 4;
-    memcpy(&dhcp_options[2], &dns_addr_.sin.sin_addr, 4);
-    config.dhcp_options = dhcp_options;
-    config.dhcp_options_size = sizeof(dhcp_options);
-  }
-
-  if (dns6_addr_.sin6.sin6_family == AF_INET6) {
-    config.set_ipv6_dns = true;
-    memcpy(&config.dns_server_v6, &dns6_addr_.sin6.sin6_addr, 16);
-  }
+  config.ipv4_dns = dns_addr_;
+  config.ipv6_dns = dns6_addr_;
 
   TunInterface::TunConfigOut config_out;
   if (!tun_->Initialize(std::move(config), &config_out))

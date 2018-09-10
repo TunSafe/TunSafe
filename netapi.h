@@ -79,7 +79,6 @@ public:
     std::vector<std::string> post_down;
   };
 
-
   struct TunConfig {
     // IP address and netmask of the tun device
     in_addr_t ip;
@@ -96,10 +95,6 @@ public:
     // Set this to configure a default route for ipv6
     bool use_ipv6_default_route;
 
-    // DHCP settings
-    const byte *dhcp_options;
-    size_t dhcp_options_size;
-
     // This holds the address of the vpn endpoint, so those get routed to the old iface.
     uint32 default_route_endpoint_v4;
     
@@ -110,10 +105,9 @@ public:
     uint8 ipv6_address[16];
     uint8 ipv6_cidr;
 
-    bool set_ipv6_dns;
-
-    // Set this to configure DNS server.
-    uint8 dns_server_v6[16];
+    // Set this to configure DNS server for ipv4,ipv6
+    std::vector<IpAddr> ipv4_dns;
+    std::vector<IpAddr> ipv6_dns;
 
     // This holds the address of the vpn endpoint, so those get routed to the old iface.
     uint8 default_route_endpoint_v6[16];

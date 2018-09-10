@@ -112,10 +112,17 @@ private:
 
   std::vector<MIB_IPFORWARD_ROW2> routes_to_undo_;
   uint8 mac_adress_[6];
+  bool has_dns6_setting_;
   int mtu_;
-  char guid_[64];
+  
+  int old_ipv4_metric_, old_ipv6_metric_;
+
+  WgCidrAddr old_ipv6_address_;
+
+  NET_LUID interface_luid_;
 
   std::vector<std::string> pre_down_, post_down_;
+  char guid_[64];
 };
 
 // Implementation of TUN interface handling using IO Completion Ports

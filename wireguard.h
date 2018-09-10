@@ -69,7 +69,7 @@ public:
   ~WireguardProcessor();
 
   void SetListenPort(int listen_port);
-  bool AddDnsServer(const IpAddr &sin);
+  void AddDnsServer(const IpAddr &sin);
   bool SetTunAddress(const WgCidrAddr &addr);
   void AddExcludedIp(const WgCidrAddr &cidr_addr);
   void SetMtu(int mtu);
@@ -138,7 +138,7 @@ private:
   WgCidrAddr tun_addr_;
   WgCidrAddr tun6_addr_;
 
-  IpAddr dns_addr_, dns6_addr_;
+  std::vector<IpAddr> dns_addr_, dns6_addr_;
 
   TunInterface::PrePostCommands pre_post_;
 
