@@ -1155,7 +1155,7 @@ bool WgPeer::AddIp(const WgCidrAddr &cidr_addr) {
     if (cidr_addr.cidr > 32)
       return false;
     WG_ACQUIRE_RWLOCK_EXCLUSIVE(dev_->ip_to_peer_map_lock_);
-    dev_->ip_to_peer_map_.InsertV4(cidr_addr.addr, cidr_addr.cidr, this);
+    dev_->ip_to_peer_map_.InsertV4(ReadBE32(cidr_addr.addr), cidr_addr.cidr, this);
     WG_RELEASE_RWLOCK_EXCLUSIVE(dev_->ip_to_peer_map_lock_);
     allowed_ips_.push_back(cidr_addr);
     return true;
