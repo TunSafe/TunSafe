@@ -4,6 +4,10 @@ Changes:
 1.The kill switch is now remembered across computer restarts and
   is deactivated when disconnecting. Without this behavior, the 
   kill switch is unusable when auto connecting on Windows startup.
+2.Allow multiple DNS servers
+3.Show a couple of more error strings when failing to edit registry.
+4.Allow # comments in config file inside of a line
+5.Enable persistent keepalive timer on sent handshakes
 
 2018-08-11 - TunSafe v1.4-rc1
 
