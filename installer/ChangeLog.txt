@@ -1,3 +1,10 @@
+2018-??-?? - TunSafe v1.4-rc2
+
+Changes:
+1.The kill switch is now remembered across computer restarts and
+  is deactivated when disconnecting. Without this behavior, the 
+  kill switch is unusable when auto connecting on Windows startup.
+
 2018-08-11 - TunSafe v1.4-rc1
 
 Changes:

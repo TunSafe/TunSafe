@@ -203,8 +203,6 @@ static bool RemovePersistentInternetBlockingInner(HANDLE handle) {
     goto getout;
   }
 
-  internet_fw_blocking_state = IBS_INACTIVE;
-
 getout:
   if (enum_handle != NULL) {
     FwpmFilterDestroyEnumHandle0(handle, enum_handle);
@@ -212,7 +210,7 @@ getout:
   return false;
 }
 
-bool AddPersistentInternetBlocking(const NET_LUID *default_interface, const NET_LUID &luid_to_allow, bool also_ipv6) {
+bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &luid_to_allow, bool also_ipv6) {
   FWPM_SUBLAYER0 *sublayer_p = NULL;
   FWP_BYTE_BLOB *fwp_appid = NULL;
   FWPM_FILTER0 filter;
@@ -312,7 +310,6 @@ bool AddPersistentInternetBlocking(const NET_LUID *default_interface, const NET_
     goto getout;
 
   success = true;
-  internet_fw_blocking_state = IBS_ACTIVE;
 
 getout:
   if (handle != NULL) {
@@ -327,7 +324,7 @@ getout:
   return success;
 }
 
-static bool RemovePersistentInternetBlocking() {
+void RemoveKillSwitchFirewall() {
   DWORD err;
   HANDLE handle = NULL;
   FWPM_SUBLAYER0 *sublayer_p = NULL;
@@ -345,8 +342,6 @@ static bool RemovePersistentInternetBlocking() {
     // The sublayer exists
     FwpmFreeMemory0((void **)&sublayer_p);
   } else {
-    // Sublayer does not exist
-    internet_fw_blocking_state = IBS_INACTIVE;
     goto getout;
   }
   
@@ -357,17 +352,9 @@ getout:
     FwpmEngineClose0(handle);
     handle = NULL;
   }
-  return false;
 }
 
-void ClearInternetFwBlockingStateCache() {
-  internet_fw_blocking_state = 0;
-}
-
-uint8 GetInternetFwBlockingState() {
-  if (internet_fw_blocking_state != 0)
-    return internet_fw_blocking_state;
-  
+bool GetKillSwitchFirewallActive() {
   DWORD err;
   HANDLE handle = NULL;
   FWPM_SUBLAYER0 *sublayer_p = NULL;
@@ -395,18 +382,5 @@ getout:
     FwpmEngineClose0(handle);
     handle = NULL;
   }
-
-  return internet_fw_blocking_state = result + IBS_INACTIVE;
+  return result;
 }
-
-void SetInternetFwBlockingState(bool want) {
-  uint8 old_state = GetInternetFwBlockingState();
-  if ((old_state >= IBS_ACTIVE) != want) {
-    if (!want) {
-      RemovePersistentInternetBlocking();
-    } else {
-      internet_fw_blocking_state = IBS_PENDING;
-    }
-  }
-}
-

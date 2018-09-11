@@ -123,7 +123,6 @@ static bool GetConfigFullName(const char *basename, char *fullname, size_t fulln
   return true;
 }
 
-
 void StopTunsafeBackend(UpdateIconWhy why) {
   if (g_backend->is_started()) {
     g_backend->Stop();
@@ -916,20 +915,25 @@ static void HandleClickedItem(HWND hWnd, int wParam) {
   case IDSETT_BLOCKINTERNET_FIREWALL:
   case IDSETT_BLOCKINTERNET_BOTH:
   {
-    InternetBlockState old_state = g_backend->GetInternetBlockState(NULL);
-    InternetBlockState new_state = (InternetBlockState)(wParam - IDSETT_BLOCKINTERNET_OFF);
+    uint32 old_state = g_backend->GetInternetBlockState(NULL);
+    uint32 new_state = wParam - IDSETT_BLOCKINTERNET_OFF;
 
-    if (old_state == kBlockInternet_Off && new_state != kBlockInternet_Off) {
-      if (MessageBoxA(g_ui_window, "Warning! All Internet traffic will be blocked until you restart your computer. Only traffic through TunSafe will be allowed.\r\n\r\nThe blocking is activated the next time you connect to a VPN server.\r\n\r\nDo you want to continue?", "TunSafe", MB_ICONWARNING | MB_OKCANCEL) == IDCANCEL)
+    if ((old_state & kBlockInternet_Both) == kBlockInternet_Off && new_state != kBlockInternet_Off) {
+      if (MessageBoxA(g_ui_window, "Warning! All Internet traffic will be blocked while TunSafe is active. Only traffic through TunSafe will be allowed.\r\n\r\nThe blocking is activated the next time TunSafe connects.\r\n\r\nDo you want to continue?", "TunSafe", MB_ICONWARNING | MB_OKCANCEL) == IDCANCEL)
         return;
     }
-
-    g_backend->SetInternetBlockState(new_state);
+    g_backend->SetInternetBlockState((InternetBlockState)(new_state | (old_state & kBlockInternet_BlockOnDisconnect)));
 
     if ((~old_state & new_state) && g_backend->is_started())
       StartTunsafeBackend(UIW_START);
     return;
   }
+  case IDSETT_BLOCKINTERNET_DISCONN: {
+    uint32 old_state = g_backend->GetInternetBlockState(NULL);
+    g_backend->SetInternetBlockState((InternetBlockState)(old_state ^ kBlockInternet_BlockOnDisconnect));
+    return;
+  }
+
   case IDSETT_SERVICE_OFF:
   case IDSETT_SERVICE_FOREGROUND:
   case IDSETT_SERVICE_BACKGROUND:
@@ -1034,9 +1038,9 @@ static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
 
     bool is_activated = false;
     int value = g_backend->GetInternetBlockState(&is_activated);
-    CheckMenuRadioItem(menu, IDSETT_BLOCKINTERNET_OFF, IDSETT_BLOCKINTERNET_BOTH, IDSETT_BLOCKINTERNET_OFF + value, MF_BYCOMMAND);
+    CheckMenuRadioItem(menu, IDSETT_BLOCKINTERNET_OFF, IDSETT_BLOCKINTERNET_BOTH, IDSETT_BLOCKINTERNET_OFF + (value & kBlockInternet_Both), MF_BYCOMMAND);
     CheckMenuRadioItem(menu, IDSETT_SERVICE_OFF, IDSETT_SERVICE_BACKGROUND, IDSETT_SERVICE_OFF + (g_startup_flags & 3), MF_BYCOMMAND);
-
+    CheckMenuItem(menu, IDSETT_BLOCKINTERNET_DISCONN, (value & kBlockInternet_BlockOnDisconnect) ? MF_CHECKED : 0);
     break;
   }
 

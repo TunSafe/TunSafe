@@ -18,6 +18,7 @@
 
 #if !defined(AFX_RESOURCE_DLL) || defined(AFX_TARG_SVE)
 LANGUAGE LANG_SWEDISH, SUBLANG_SWEDISH
+#pragma code_page(1252)
 
 #ifdef APSTUDIO_INVOKED
 /////////////////////////////////////////////////////////////////////////////
@@ -160,10 +161,11 @@ BEGIN
         POPUP "Internet &Kill Switch"
         BEGIN
             MENUITEM "&Off",                        IDSETT_BLOCKINTERNET_OFF
-            MENUITEM SEPARATOR
             MENUITEM "Yes, with &Routing Rules",    IDSETT_BLOCKINTERNET_ROUTE
             MENUITEM "Yes, with &Firewall Rules",   IDSETT_BLOCKINTERNET_FIREWALL
             MENUITEM "Yes, &Both Methods",          IDSETT_BLOCKINTERNET_BOTH
+            MENUITEM SEPARATOR
+            MENUITEM "Block While &Disconnected",   IDSETT_BLOCKINTERNET_DISCONN
         END
         POPUP "&Service Mode"
         BEGIN

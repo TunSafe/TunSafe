@@ -18,16 +18,6 @@ public:
   bool also_ipv6_;
 };
 
-
-bool AddPersistentInternetBlocking(const NET_LUID *default_interface, const NET_LUID &luid_to_allow, bool also_ipv6);
-
-enum {
-  IBS_UNKOWN,
-  IBS_INACTIVE,
-  IBS_ACTIVE,
-  IBS_PENDING,
-};
-void SetInternetFwBlockingState(bool want);
-uint8 GetInternetFwBlockingState();
-
-void ClearInternetFwBlockingStateCache();
+bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &luid_to_allow, bool also_ipv6);
+void RemoveKillSwitchFirewall();
+bool GetKillSwitchFirewallActive();

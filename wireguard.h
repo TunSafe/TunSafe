@@ -52,10 +52,12 @@ public:
 };
 
 enum InternetBlockState {
-  kBlockInternet_Off,
-  kBlockInternet_Route,
-  kBlockInternet_Firewall,
-  kBlockInternet_Both,
+  kBlockInternet_Off = 0,
+  kBlockInternet_Route = 1,
+  kBlockInternet_Firewall = 2,
+  kBlockInternet_Both = 3,
+
+  kBlockInternet_BlockOnDisconnect = 16,
 
   // An unspecified value that uses either route or firewall
   kBlockInternet_DefaultOn = 254,
