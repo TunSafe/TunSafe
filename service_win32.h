@@ -28,7 +28,7 @@ public:
   public:
     virtual bool HandleMessage(int type, uint8 *data, size_t size) = 0;
     virtual bool HandleNotify() = 0;
-    virtual bool HandleNewConnection() = 0;
+    virtual void HandleNewConnection() = 0;
     virtual void HandleDisconnect() = 0;
   };
 
@@ -45,17 +45,14 @@ public:
 
   bool VerifyThread();
 
-  void FlushWrites(int delay);
   bool is_connected() { return connection_established_; }
 private:
-  bool InitializeServerPipe();
+  bool InitializeServerPipeAndWait();
   bool InitializeClientPipe();
+  void AdvanceStateMachine();
   void ClosePipe();
   DWORD ThreadMain();
   void SendNextQueuedWrite();
-  uint8 *ReadNamedPipeAsync(size_t *packet_size);
-  bool ConnectNamedPipeAsync();
-  bool WaitAndHandleWrites(int delay);
   static DWORD WINAPI StaticThreadMain(void *x);
 
   Delegate *delegate_;
@@ -63,12 +60,21 @@ private:
   HANDLE pipe_;
   HANDLE thread_;
   HANDLE wait_handles_[3];
-  OVERLAPPED write_overlapped_;
   bool write_overlapped_active_;
-  bool exit_;
+  bool exit_thread_;
   bool is_server_pipe_;
   bool connection_established_;
   char *pipe_name_;
+
+  enum State {
+    kStateNone,
+    kStateWaitConnect,
+    kStateWaitReadLength,
+    kStateWaitReadPayload,
+    kStateWaitTimeout,
+  };
+
+  int state_;
 
   struct OutgoingPacket {
     OutgoingPacket *next;
@@ -76,12 +82,15 @@ private:
     uint8 data[0];
   };
   OutgoingPacket *packets_, **packets_end_;
+  uint8 *tmp_packet_buf_;
+  DWORD tmp_packet_size_;
+
+  OVERLAPPED write_overlapped_, read_overlapped_;
 
   Mutex packets_mutex_;
 
   DWORD thread_id_;
 };
-
 
 class TunsafeServiceImpl : public TunsafeBackend::Delegate, public PipeMessageHandler::Delegate {
 public:
@@ -99,7 +108,7 @@ public:
   // -- from PipeMessageHandler::Delegate
   virtual bool HandleMessage(int type, uint8 *data, size_t size);
   virtual bool HandleNotify();
-  virtual bool HandleNewConnection();
+  virtual void HandleNewConnection();
   virtual void HandleDisconnect();
 
   // virtual methods
@@ -155,7 +164,7 @@ public:
   // -- from PipeMessageHandler::Delegate
   virtual bool HandleMessage(int type, uint8 *data, size_t size);
   virtual bool HandleNotify();
-  virtual bool HandleNewConnection();
+  virtual void HandleNewConnection();
   virtual void HandleDisconnect();
 
 protected:
