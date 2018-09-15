@@ -30,11 +30,19 @@ private:
 };
 
 
+class WgConfig {
+public:
+  static bool HandleConfigurationProtocolMessage(WireguardProcessor *proc, const std::string &&message, std::string *result);
+private:
+  static void HandleConfigurationProtocolGet(WireguardProcessor *proc, std::string *result);
+};
+
 bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsResolver *dns_resolver);
 
 #define kSizeOfAddress 64
 const char *print_ip_prefix(char buf[kSizeOfAddress], int family, const void *ip, int prefixlen);
 char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]);
-
+char *PrintWgCidrAddr(const WgCidrAddr &addr, char buf[kSizeOfAddress]);
+bool ParseCidrAddr(char *s, WgCidrAddr *out);
 
 #endif  // TINYVPN_TINYVPN_H_

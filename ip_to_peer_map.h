@@ -15,7 +15,7 @@ public:
   ~RoutingTrie32();
   NOINLINE Value Lookup(uint32 ip);
   NOINLINE Value LookupExact(uint32 ip, int cidr);
-  bool Insert(uint32 ip, int cidr, Value value);
+  bool Insert(uint32 ip, int cidr, Value *value);
   bool Delete(uint32 ip, int cidr);
 
 private:
@@ -31,7 +31,7 @@ private:
   static void PutChild(Node *pn, uint32 i, Node *n);
   static void ReplaceChild(Node **pnp, Node *n);
   static Node *ConvertOleafToLeaf(Node *pn, uint32 i, Node *n);
-  static bool InsertLeafInto(Node **n, uint8 leaf_pos, RoutingTrie32::Value value);
+  static bool InsertLeafInto(Node **n, uint8 leaf_pos, RoutingTrie32::Value *value);
 };
 
 
@@ -43,8 +43,8 @@ public:
   ~IpToPeerMap();
 
   // Inserts an IP address of a given CIDR length into the lookup table, pointing to peer.
-  bool InsertV4(uint32 ip, int cidr, void *peer);
-  bool InsertV6(const void *addr, int cidr, void *peer);
+  void *InsertV4(uint32 ip, int cidr, void *peer);
+  void *InsertV6(const void *addr, int cidr, void *peer);
 
   // Lookup the peer matching the IP Address
   void *LookupV4(uint32 ip);
@@ -53,8 +53,8 @@ public:
   void *LookupV4DefaultPeer();
   void *LookupV6DefaultPeer();
 
-  // Remove a peer from the table
-  void RemovePeer(void *peer);
+  void RemoveV4(uint32 ip, int cidr);
+  void RemoveV6(const void *addr, int cidr);
 private:
   struct Entry6 {
     uint8 ip[16];

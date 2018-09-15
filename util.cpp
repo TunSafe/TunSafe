@@ -17,46 +17,55 @@
 #include <arpa/inet.h>
 #endif
 
+#include <vector>
 #include <algorithm>
 #include "tunsafe_types.h"
 
-static char base64_alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static const char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-uint8 *base64_encode(const uint8 *input, size_t length, size_t *out_length) {
-  uint32 a;
-  size_t size;
-  uint8 *result, *r;
+char *base64_encode(const uint8 *input, size_t length, char *output, size_t output_size, size_t *out_length) {
+  char *result, *r;
   const uint8 *end;
 
-  size = length * 4 / 3 + 4 + 1;
-  r = result = (byte*)malloc(size);
+  size_t size = (length + 2) / 3 * 4 + 1;
 
+  if (output != NULL) {
+    result = output;
+    assert(output_size >= size);
+    if (output_size < size) {
+      *result = 0;
+      return NULL;
+    }
+  } else {
+    result = (char*)malloc(size);
+    if (!result)
+      return NULL;
+  }
+  r = result;
   end = input + length - 3;
-
   // Encode full blocks
   while (input <= end) {
-    a = (input[0] << 16) + (input[1] << 8) + input[2];
+    uint32 a = (input[0] << 16) + (input[1] << 8) + input[2];
     input += 3;
 
-    r[0] = base64_alphabet[(a >> 18)/* & 0x3F*/];
-    r[1] = base64_alphabet[(a >> 12) & 0x3F];
-    r[2] = base64_alphabet[(a >> 6) & 0x3F];
-    r[3] = base64_alphabet[(a) & 0x3F];
+    r[0] = kBase64Alphabet[(a >> 18)/* & 0x3F*/];
+    r[1] = kBase64Alphabet[(a >> 12) & 0x3F];
+    r[2] = kBase64Alphabet[(a >> 6) & 0x3F];
+    r[3] = kBase64Alphabet[(a) & 0x3F];
     r += 4;
   }
-
   if (input == end + 2) {
-    a = input[0] << 4;
-    r[0] = base64_alphabet[(a >> 6) /*& 0x3F*/];
-    r[1] = base64_alphabet[(a) & 0x3F];
+    uint32 a = input[0] << 4;
+    r[0] = kBase64Alphabet[(a >> 6) /*& 0x3F*/];
+    r[1] = kBase64Alphabet[(a) & 0x3F];
     r[2] = '=';
     r[3] = '=';
     r += 4;
   } else if (input == end + 1) {
-    a = (input[0] << 10) + (input[1] << 2);
-    r[0] = base64_alphabet[(a >> 12) /*& 0x3F*/];
-    r[1] = base64_alphabet[(a >> 6) & 0x3F];
-    r[2] = base64_alphabet[(a) & 0x3F];
+    uint32 a = (input[0] << 10) + (input[1] << 2);
+    r[0] = kBase64Alphabet[(a >> 12) /*& 0x3F*/];
+    r[1] = kBase64Alphabet[(a >> 6) & 0x3F];
+    r[2] = kBase64Alphabet[(a) & 0x3F];
     r[3] = '=';
     r += 4;
   }
@@ -250,13 +259,6 @@ void RERROR(const char *msg, ...) {
   }
 }
 
-void rinfo(const char *msg, ...) {
-  printf("muu");
-}
-
-void rinfo2(const char *msg) {
-  printf("muu2");
-}
 
 void RINFO(const char *msg, ...) {
   va_list va;
@@ -297,3 +299,114 @@ size_t my_strlcpy(char *dst, size_t dstsize, const char *src) {
   }
   return len;
 }
+
+void OsGetRandomBytes(uint8 *data, size_t data_size) {
+#if defined(OS_WIN)
+  static BOOLEAN(APIENTRY *pfn)(void*, ULONG);
+  if (!pfn) {
+    pfn = (BOOLEAN(APIENTRY *)(void*, ULONG))GetProcAddress(LoadLibrary("ADVAPI32.DLL"), "SystemFunction036");
+    if (!pfn)
+      ExitProcess(1);
+  }
+  if (!pfn(data, (ULONG)data_size)) {
+    ExitProcess(1);
+    return;
+  }
+#elif defined(OS_POSIX)
+  int fd = open("/dev/urandom", O_RDONLY);
+  if (fd < 0) {
+    fprintf(stderr, "/dev/urandom failed\n");
+    exit(1);
+  }
+  int r = read(fd, data, data_size);
+  if (r != data_size) {
+    fprintf(stderr, "/dev/urandom failed\n");
+    exit(1);
+  }
+  close(fd);
+#else
+#error
+#endif
+}
+
+bool ParseConfigKeyValue(char *m, std::vector<std::pair<char *, char*>> *result) {
+  for (;;) {
+    char *nl = strchr(m, '\n');
+    if (nl)
+      *nl = 0;
+    if (*m != '\0') {
+      char *value = strchr(m, '=');
+      if (value == NULL)
+        return false;
+      *value++ = '\0';
+      result->emplace_back(m, value);
+    }
+    if (!nl)
+      return true;
+    m = nl + 1;
+  }
+}
+
+bool ParseHexString(const char *text, void *data, size_t data_size) {
+  size_t len = strlen(text);
+  if (len != data_size * 2)
+    return false;
+  for (size_t i = 0; i < data_size; i++) {
+    uint32 c = text[i * 2 + 0];
+    if (c >= '0' && c <= '9') {
+      c -= '0';
+    } else if ((c |= 32) >= 'a' && c <= 'f') {
+      c -= 'a' - 10;
+    } else {
+      return false;
+    }
+    uint32 d = text[i * 2 + 1];
+    if (d >= '0' && d <= '9') {
+      d -= '0';
+    } else if ((d |= 32) >= 'a' && d <= 'f') {
+      d -= 'a' - 10;
+    } else {
+      return false;
+    }
+    ((uint8*)data)[i] = c * 16 + d;
+  }
+  return true;
+}
+
+bool is_space(uint8_t c) {
+  return c == ' ' || c == '\r' || c == '\n' || c == '\t';
+}
+
+void SplitString(char *s, int separator, std::vector<char*> *components) {
+  components->clear();
+  for (;;) {
+    while (is_space(*s)) s++;
+    char *d = strchr(s, separator);
+    if (d == NULL) {
+      if (*s)
+        components->push_back(s);
+      return;
+    }
+    *d = 0;
+    char *e = d;
+    while (e > s && is_space(e[-1]))
+      *--e = 0;
+    components->push_back(s);
+    s = d + 1;
+  }
+}
+
+void PrintHexString(const void *data, size_t data_size, char *result) {
+  for (size_t i = 0; i < data_size; i++) {
+    uint8 c = ((uint8*)data)[i];
+    *result++ = "0123456789abcdef"[c >> 4];
+    *result++ = "0123456789abcdef"[c & 0xF];
+  }
+  *result++ = 0;
+}
+
+bool ParseBase64Key(const char *s, uint8 key[32]) {
+  size_t size = 32;
+  return base64_decode((uint8*)s, strlen(s), key, &size) && size == 32;
+}
+

@@ -66,6 +66,7 @@ enum InternetBlockState {
 };
 
 class WireguardProcessor {
+  friend class WgConfig;
 public:
   WireguardProcessor(UdpInterface *udp, TunInterface *tun, ProcessorDelegate *procdel);
   ~WireguardProcessor();
@@ -73,13 +74,14 @@ public:
   void SetListenPort(int listen_port);
   void AddDnsServer(const IpAddr &sin);
   bool SetTunAddress(const WgCidrAddr &addr);
+  void ClearTunAddress();
   void AddExcludedIp(const WgCidrAddr &cidr_addr);
   void SetMtu(int mtu);
   void SetAddRoutesMode(bool mode);
   void SetDnsBlocking(bool dns_blocking);
   void SetInternetBlocking(InternetBlockState internet_blocking);
   void SetHeaderObfuscation(const char *key);
-  
+
   void HandleTunPacket(Packet *packet);
   void HandleUdpPacket(Packet *packet, bool overload);
   static bool IsMainThreadPacket(Packet *packet);
@@ -91,6 +93,9 @@ public:
 
   bool Start();
 
+  bool ConfigureUdp();
+  bool ConfigureTun();
+
   WgDevice &dev() { return dev_; }
   TunInterface::PrePostCommands &prepost() { return pre_post_; }
   const WgCidrAddr &tun_addr() { return tun_addr_; }
@@ -100,7 +105,6 @@ private:
   void DoWriteUdpPacket(Packet *packet);
   void WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Packet *packet);
   void SendHandshakeInitiation(WgPeer *peer);
-  void ScheduleNewHandshake(WgPeer *peer);
   void SendKeepalive_Locked(WgPeer *peer);
   void SendQueuedPackets_Locked(WgPeer *peer);
 
@@ -110,29 +114,25 @@ private:
   void HandleDataPacket(Packet *packet);
   
   void HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet, uint8 *data, size_t data_size);
-
   void HandleShortHeaderFormatPacket(uint32 tag, Packet *packet);
-
   bool CheckIncomingHandshakeRateLimit(Packet *packet, bool overload);
-
   bool HandleIcmpv6NeighborSolicitation(const byte *data, size_t data_size);
-
   void SetupCompressionHeader(WgPacketCompressionVer01 *c);
   void NotifyHandshakeComplete();
-
-  int listen_port_;
 
   ProcessorDelegate *procdel_;
   TunInterface *tun_;
   UdpInterface *udp_;
-  int mtu_;
-  WgProcessorStats stats_;
+  
+  uint16 listen_port_;
+  uint16 mtu_;
 
   bool dns_blocking_;
   uint8 internet_blocking_;
   bool add_routes_mode_;
   bool network_discovery_spoofing_;
   bool did_have_first_handshake_;
+  bool is_started_;
   uint8 network_discovery_mac_[6];
 
   WgDevice dev_;
@@ -140,13 +140,11 @@ private:
   WgCidrAddr tun_addr_;
   WgCidrAddr tun6_addr_;
 
+  WgProcessorStats stats_;
+
   std::vector<IpAddr> dns_addr_, dns6_addr_;
 
   TunInterface::PrePostCommands pre_post_;
-
-  // Queue of things scheduled to run on the main thread.
-  WG_DECLARE_LOCK(main_thread_scheduled_lock_);
-  WgPeer *main_thread_scheduled_, **main_thread_scheduled_last_;
 
   uint64 stats_last_bytes_in_, stats_last_bytes_out_;
   uint64 stats_last_ts_;

@@ -11,34 +11,39 @@
 #include "tunsafe_threading.h"
 #include <functional>
 
+enum {
+  ADAPTER_GUID_SIZE = 40,
+};
+
 struct Packet;
 class WireguardProcessor;
 class TunsafeBackendWin32;
 
-class ThreadedPacketQueue {
+class PacketProcessor {
 public:
-  explicit ThreadedPacketQueue(WireguardProcessor *wg, TunsafeBackendWin32 *backend);
-  ~ThreadedPacketQueue();
+  explicit PacketProcessor();
+  ~PacketProcessor();
 
   enum {
     TARGET_PROCESSOR_UDP = 0,
     TARGET_PROCESSOR_TUN = 1,
     TARGET_UDP_DEVICE = 2,
     TARGET_TUN_DEVICE = 3,
+    TARGET_CONFIG_PROTOCOL = 4,
   };
 
-  void Start();
-  void Stop();
+  void Reset();
 
+  int Run(WireguardProcessor *wg, TunsafeBackendWin32 *backend);
   void Post(Packet *packet, Packet **end, int count);
-  void AbortingDriver();
+  void ForcePost(Packet *packet);
+  void PostExit(int exit_code);
+
+  const uint32 *posted_exit_code() { return &exit_code_; }
 
 private:
-  void PostTimerInterrupt();
-  static void CALLBACK TimerRoutine(LPVOID lpArgToCompletionRoutine, DWORD dwTimerLowValue, DWORD dwTimerHighValue);
-  
-  DWORD ThreadMain();
-  static DWORD WINAPI ThreadedPacketQueueLauncher(VOID *x);
+  static void CALLBACK ThreadPoolTimerCallback(PTP_CALLBACK_INSTANCE iTimerInstance, PVOID pContext, PTP_TIMER);
+  void HandleConfigurationProtocolPacket(WireguardProcessor *wg, TunsafeBackendWin32 *backend, Packet *packet);
   Packet *first_;
   Packet **last_ptr_;
   uint32 packets_in_queue_;
@@ -46,12 +51,8 @@ private:
   Mutex mutex_;
   HANDLE event_;
 
-  HANDLE timer_handle_;
-  HANDLE handle_;
-  WireguardProcessor *wg_;
-  bool exit_flag_;
+  uint32 exit_code_;
   bool timer_interrupt_;
-  TunsafeBackendWin32 *backend_;
 };
 
 // Encapsulates a UDP socket, optionally listening for incoming packets
@@ -61,17 +62,16 @@ public:
   explicit UdpSocketWin32();
   ~UdpSocketWin32();
 
-  void SetPacketHandler(ThreadedPacketQueue *packet_handler) { packet_handler_ = packet_handler; }
+  void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
 
   void StartThread();
   void StopThread();
 
   // -- from UdpInterface
-  virtual bool Initialize(int listen_on_port) override;
+  virtual bool Configure(int listen_on_port) override;
   virtual void WriteUdpPacket(Packet *packet) override;
 
 private:
-
   void ThreadMain();
   static DWORD WINAPI UdpThread(void *x);
 
@@ -80,7 +80,7 @@ private:
 
   Mutex mutex_;
 
-  ThreadedPacketQueue *packet_handler_;
+  PacketProcessor *packet_handler_;
   SOCKET socket_;
   SOCKET socket_ipv6_;
   HANDLE completion_port_handle_;
@@ -93,12 +93,12 @@ class DnsBlocker;
 
 class TunWin32Adapter {
 public:
-  TunWin32Adapter(DnsBlocker *dns_blocker);
+  TunWin32Adapter(DnsBlocker *dns_blocker, const char guid[ADAPTER_GUID_SIZE]);
   ~TunWin32Adapter();
 
-  bool OpenAdapter(unsigned int *exit_thread, DWORD open_flags);
-  bool InitAdapter(const TunInterface::TunConfig &&config, TunInterface::TunConfigOut *out);
-  void CloseAdapter();
+  bool OpenAdapter(TunsafeBackendWin32 *backend, DWORD open_flags);
+  bool ConfigureAdapter(const TunInterface::TunConfig &&config, TunInterface::TunConfigOut *out);
+  void CloseAdapter(bool is_restart);
 
   HANDLE handle() { return handle_; }
 
@@ -121,8 +121,10 @@ private:
 
   NET_LUID interface_luid_;
 
+  void *backend_;
+
   std::vector<std::string> pre_down_, post_down_;
-  char guid_[64];
+  char guid_[ADAPTER_GUID_SIZE];
 };
 
 // Implementation of TUN interface handling using IO Completion Ports
@@ -131,23 +133,23 @@ public:
   explicit TunWin32Iocp(DnsBlocker *blocker, TunsafeBackendWin32 *backend);
   ~TunWin32Iocp();
 
-  void SetPacketHandler(ThreadedPacketQueue *packet_handler) { packet_handler_ = packet_handler; }
+  void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
 
   void StartThread();
   void StopThread();
 
   // -- from TunInterface
-  virtual bool Initialize(const TunConfig &&config, TunConfigOut *out) override;
+  virtual bool Configure(const TunConfig &&config, TunConfigOut *out) override;
   virtual void WriteTunPacket(Packet *packet) override;
 
   TunWin32Adapter &adapter() { return adapter_; }
 
 private:
-  void CloseTun();
+  void CloseTun(bool is_restart);
   void ThreadMain();
   static DWORD WINAPI TunThread(void *x);
 
-  ThreadedPacketQueue *packet_handler_;
+  PacketProcessor *packet_handler_;
   HANDLE completion_port_handle_;
   HANDLE thread_;
 
@@ -168,13 +170,13 @@ public:
   explicit TunWin32Overlapped(DnsBlocker *blocker, TunsafeBackendWin32 *backend);
   ~TunWin32Overlapped();
 
-  void SetPacketHandler(ThreadedPacketQueue *packet_handler) { packet_handler_ = packet_handler; }
+  void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
 
   void StartThread();
   void StopThread();
 
   // -- from TunInterface
-  virtual bool Initialize(const TunConfig &&config, TunConfigOut *out) override;
+  virtual bool Configure(const TunConfig &&config, TunConfigOut *out) override;
   virtual void WriteTunPacket(Packet *packet) override;
 
 private:
@@ -182,7 +184,7 @@ private:
   void ThreadMain();
   static DWORD WINAPI TunThread(void *x);
 
-  ThreadedPacketQueue *packet_handler_;
+  PacketProcessor *packet_handler_;
   HANDLE thread_;
 
   Mutex mutex_;
@@ -199,16 +201,18 @@ private:
 };
 
 class TunsafeBackendWin32 : public TunsafeBackend, public ProcessorDelegate {
-  friend class ThreadedPacketQueue;
+  friend class PacketProcessor;
   friend class TunWin32Iocp;
   friend class TunWin32Overlapped;
+  friend class TunWin32Adapter;
 public:
   TunsafeBackendWin32(Delegate *delegate);
   ~TunsafeBackendWin32();
 
   // -- from TunsafeBackend
-  virtual bool Initialize() override;
+  virtual bool Configure() override;
   virtual void Teardown() override;
+  virtual bool SetTunAdapterName(const char *name) override;
   virtual void Start(const char *config_file) override;
   virtual void Stop() override;
   virtual void RequestStats(bool enable) override;
@@ -218,13 +222,23 @@ public:
   virtual void SetServiceStartupFlags(uint32 flags) override;
   virtual LinearizedGraph *GetGraph(int type) override;
   virtual std::string GetConfigFileName() override;
+  virtual void SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) override;
 
   // -- from ProcessorDelegate
   virtual void OnConnected() override;
   virtual void OnConnectionRetry(uint32 attempts) override;
 
   void SetPublicKey(const uint8 key[32]);
-  void TunAdapterFailed();
+  void PostExit(int exit_code);
+  enum {
+    MODE_NONE = 0,
+    MODE_EXIT = 1,
+    MODE_RESTART = 2,
+    MODE_TUN_FAILED = 3,
+  };
+  uint32 exit_code() { return *packet_processor_.posted_exit_code(); }
+
+  void SetStatus(StatusCode status);
 private:
 
   void StopInner(bool is_restart);
@@ -232,16 +246,7 @@ private:
   void PushStats();
 
   HANDLE worker_thread_;
-
-  enum {
-    MODE_NONE = 0,
-    MODE_EXIT = 1,
-    MODE_RESTART = 2,
-    MODE_TUN_FAILED = 3,
-  };
-
   bool want_periodic_stats_;
-  unsigned int stop_mode_;
   
   Delegate *delegate_;
   char *config_file_;
@@ -256,6 +261,10 @@ private:
 
   Mutex stats_mutex_;
   WgProcessorStats stats_;
+
+  PacketProcessor packet_processor_;
+
+  char guid_[ADAPTER_GUID_SIZE];
 };
 
 // This class ensures that all callbacks get rescheduled to another thread
@@ -265,13 +274,14 @@ public:
   ~TunsafeBackendDelegateThreaded();
 
 private:
-  virtual void OnGetStats(const WgProcessorStats &stats);
-  virtual void OnGraphAvailable();
-  virtual void OnStateChanged();
-  virtual void OnClearLog();
-  virtual void OnLogLine(const char **s);
-  virtual void OnStatusCode(TunsafeBackend::StatusCode status);
-  virtual void DoWork();
+  virtual void OnGetStats(const WgProcessorStats &stats) override;
+  virtual void OnGraphAvailable() override;
+  virtual void OnStateChanged() override;
+  virtual void OnClearLog() override;
+  virtual void OnLogLine(const char **s) override;
+  virtual void OnStatusCode(TunsafeBackend::StatusCode status) override;
+  virtual void OnConfigurationProtocolReply(uint32 ident, const std::string &&reply) override;
+  virtual void DoWork() override;
 
   enum Which {
     Id_OnGetStats,
@@ -281,6 +291,7 @@ private:
     Id_OnUpdateUI,
     Id_OnStatusCode,
     Id_OnGraphAvailable,
+    Id_OnConfigurationProtocolReply,
   };
 
   void AddEntry(Which which, intptr_t lparam = 0, uint32 wparam = 0);
@@ -302,3 +313,37 @@ private:
   std::vector<Entry> processing_entry_;
 };
 
+// For each adapter, remembers whether the adapter is in use
+class TunAdaptersInUse {
+public:
+  TunAdaptersInUse();
+
+  // attempt to acquire the adapter, so it can't be acquired by anyone else
+  bool Acquire(const char guid[ADAPTER_GUID_SIZE], void *context);
+
+  // mark as free
+  void Release(void *context);
+
+  // Lookup a context from a guid
+  void *LookupContextFromGuid(const char guid[ADAPTER_GUID_SIZE]);
+
+  // Lookup a guid from a context
+  bool LookupGuidFromContext(void *context, char guid[ADAPTER_GUID_SIZE]);
+
+  char *GetAllGuid();
+
+  static TunAdaptersInUse *GetInstance();
+
+private:
+  enum {
+    kMaxAdaptersInUse = 16,
+  };
+  struct Entry {
+    char guid[ADAPTER_GUID_SIZE];
+    void *context;
+    int count;
+  };
+  Mutex mutex_;
+  uint8 num_inuse_;
+  Entry entry_[kMaxAdaptersInUse];
+};

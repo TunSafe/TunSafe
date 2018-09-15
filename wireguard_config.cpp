@@ -45,12 +45,26 @@ char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]) {
   return buf;
 }
 
+
+char *PrintWgCidrAddr(const WgCidrAddr &addr, char buf[kSizeOfAddress]) {
+  if (addr.size == 32) {
+    print_ip_prefix(buf, AF_INET, addr.addr, addr.cidr);
+  } else if (addr.size == 128) {
+    print_ip_prefix(buf, AF_INET6, addr.addr, addr.cidr);
+  } else {
+    buf[0] = 0;
+  }
+  return buf;
+}
+
+
+
 struct Addr {
   byte addr[4];
   uint8 cidr;
 };
 
-static bool ParseCidrAddr(char *s, WgCidrAddr *out) {
+bool ParseCidrAddr(char *s, WgCidrAddr *out) {
   char *slash = strchr(s, '/');
   if (!slash)
     return false;
@@ -92,15 +106,6 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
   char buf[kSizeOfAddress];
 
   memset(result, 0, sizeof(IpAddr));
-  if (inet_pton(AF_INET6, hostname, &result->sin6.sin6_addr) == 1) {
-    result->sin.sin_family = AF_INET6;
-    return true;
-  }
-
-  if (inet_pton(AF_INET, hostname, &result->sin.sin_addr) == 1) {
-    result->sin.sin_family = AF_INET;
-    return true;
-  }
 
   // First check cache
   for (auto it = cache_.begin(); it != cache_.end(); ++it) {
@@ -145,10 +150,7 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
   }
 }
 
-
-
-
-static bool ParseSockaddrInWithPort(char *s, IpAddr *sin, DnsResolver *resolver) {
+bool ParseSockaddrInWithPort(char *s, IpAddr *sin, DnsResolver *resolver) {
   memset(sin, 0, sizeof(IpAddr));
   if (*s == '[') {
     char *end = strchr(s, ']');
@@ -168,7 +170,11 @@ static bool ParseSockaddrInWithPort(char *s, IpAddr *sin, DnsResolver *resolver)
   if (!x) return false;
   *x = 0;
 
-  if (!resolver->Resolve(s, sin)) {
+  if (inet_pton(AF_INET, s, &sin->sin.sin_addr) == 1) {
+    sin->sin.sin_family = AF_INET;
+  } else if (!resolver) {
+    return false;
+  } else if (!resolver->Resolve(s, sin)) {
     RERROR("Unable to resolve %s", s);
     return false;
   }
@@ -177,16 +183,17 @@ static bool ParseSockaddrInWithPort(char *s, IpAddr *sin, DnsResolver *resolver)
 }
 
 static bool ParseSockaddrInWithoutPort(char *s, IpAddr *sin, DnsResolver *resolver) {
-  if (!resolver->Resolve(s, sin)) {
+  if (inet_pton(AF_INET6, s, &sin->sin6.sin6_addr) == 1) {
+    sin->sin.sin_family = AF_INET6;
+    return true;
+  } else if (inet_pton(AF_INET, s, &sin->sin.sin_addr) == 1) {
+    sin->sin.sin_family = AF_INET;
+    return true;
+  } else if (!resolver->Resolve(s, sin)) {
     RERROR("Unable to resolve %s", s);
     return false;
   }
   return true;
-}
-
-static bool ParseBase64Key(const char *s, uint8 key[32]) {
-  size_t size = 32;
-  return base64_decode((uint8*)s, strlen(s), key, &size) && size == 32;
 }
 
 class WgFileParser {
@@ -197,7 +204,7 @@ public:
 
   void FinishGroup();
   struct Peer {
-    uint8 pub[32];
+    WgPublicKey pub;
     uint8 psk[32];
   };
   Peer pi_;
@@ -205,29 +212,6 @@ public:
   DnsResolver *dns_resolver_;
   bool had_interface_ = false;
 };
-
-bool is_space(uint8_t c) {
-  return c == ' ' || c == '\r' || c == '\n' || c == '\t';
-}
-
-
-void SplitString(char *s, int separator, std::vector<char*> *components) {
-  for (;;) {
-    while (is_space(*s)) s++;
-    char *d = strchr(s, separator);
-    if (d == NULL) {
-      if (*s)
-        components->push_back(s);
-      return;
-    }
-    *d = 0;
-    char *e = d;
-    while (e > s && is_space(e[-1]))
-      *--e = 0;
-    components->push_back(s);
-    s = d + 1;
-  }
-}
 
 static bool ParseBoolean(const char *str, bool *value) {
   if (_stricmp(str, "true") == 0 ||
@@ -285,7 +269,7 @@ static int ParseCipherSuite(const char *cipher) {
 
 void WgFileParser::FinishGroup() {
   if (peer_) {
-    peer_->Initialize(pi_.pub, pi_.psk);
+    peer_->SetPublicKey(pi_.pub);
     peer_ = NULL;
   }
 }
@@ -303,7 +287,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       if (!ParseBase64Key(value, binkey))
         return false;
       had_interface_ = true;
-      wg_->dev().Initialize(binkey);
+      wg_->dev().SetPrivateKey(binkey);
     } else if (strcmp(key, "ListenPort") == 0) {
       wg_->SetListenPort(atoi(value));
     } else if (strcmp(key, "Address") == 0) {
@@ -394,11 +378,12 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       return true;
     }
     if (strcmp(key, "PublicKey") == 0) {
-      if (!ParseBase64Key(value, pi_.pub))
+      if (!ParseBase64Key(value, pi_.pub.bytes))
         return false;
     } else if (strcmp(key, "PresharedKey") == 0) {
       if (!ParseBase64Key(value, pi_.psk))
         return false;
+      peer_->SetPresharedKey(pi_.psk);
     } else if (strcmp(key, "AllowedIPs") == 0) {
       SplitString(value, ',', &ss);
       for (size_t i = 0; i < ss.size(); i++) {
@@ -412,7 +397,8 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
         return false;
       peer_->SetEndpoint(sin);
     } else if (strcmp(key, "PersistentKeepalive") == 0) {
-      peer_->SetPersistentKeepalive(atoi(value));
+      if (!peer_->SetPersistentKeepalive(atoi(value)))
+        return false;
     } else if (strcmp(key, "AllowMulticast") == 0) {
       bool b;
       if (!ParseBoolean(value, &b))
@@ -524,3 +510,154 @@ bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsR
   fclose(f);
   return true;
 }
+
+
+static void CmsgAppendFmt(std::string *result, const char *fmt, ...) {
+  va_list va;
+  char buf[256];
+  va_start(va, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, va);
+  (*result) += buf;
+  (*result) += '\n';
+  va_end(va);
+}
+
+static void CmsgAppendHex(std::string *result, const char *key, const void *data, size_t data_size) {
+  char *tmp = (char*)alloca(data_size * 2 + 2);
+  PrintHexString(data, data_size, tmp + 1);
+  tmp[0] = '=';
+  tmp[data_size * 2 + 1] = '\n';
+  (*result) += key;
+  result->append(tmp, data_size * 2 + 2);
+}
+
+void WgConfig::HandleConfigurationProtocolGet(WireguardProcessor *proc, std::string *result) {
+  char buf[kSizeOfAddress];
+
+  CmsgAppendHex(result, "private_key", proc->dev_.s_priv_, sizeof(proc->dev_.s_priv_));
+  if (proc->listen_port_)
+    CmsgAppendFmt(result, "listen_port=%d", proc->listen_port_);
+  if (proc->tun_addr_.size == 32)
+    CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(proc->tun_addr_, buf));
+  if (proc->tun6_addr_.size == 128)
+    CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(proc->tun6_addr_, buf));
+
+  for (WgPeer *peer = proc->dev_.peers_; peer; peer = peer->next_peer_) {
+    WG_SCOPED_LOCK(peer->lock_);
+
+    CmsgAppendHex(result, "public_key", peer->s_remote_.bytes, sizeof(peer->s_remote_));
+    if (!IsOnlyZeros(peer->preshared_key_, sizeof(peer->preshared_key_)))
+      CmsgAppendHex(result, "preshared_key", peer->preshared_key_, sizeof(peer->preshared_key_));
+    if (peer->tx_bytes_ | peer->rx_bytes_)
+      CmsgAppendFmt(result, "tx_bytes=%lld\nrx_bytes=%lld", peer->tx_bytes_, peer->rx_bytes_);
+    for (auto it = peer->allowed_ips_.begin(); it != peer->allowed_ips_.end(); ++it)
+      CmsgAppendFmt(result, "allowed_ip=%s", PrintWgCidrAddr(*it, buf));
+    if (peer->persistent_keepalive_ms_)
+      CmsgAppendFmt(result, "persistent_keepalive_interval=%d", peer->persistent_keepalive_ms_ / 1000);
+    if (peer->endpoint_.sin.sin_family == AF_INET)
+      CmsgAppendFmt(result, "endpoint=%s:%d", PrintIpAddr(peer->endpoint_, buf), htons(peer->endpoint_.sin.sin_port));
+    else if (peer->endpoint_.sin.sin_family == AF_INET6)
+      CmsgAppendFmt(result, "endpoint=[%s]:%d", PrintIpAddr(peer->endpoint_, buf), htons(peer->endpoint_.sin6.sin6_port));
+
+    if (peer->last_complete_handskake_timestamp_) {
+      uint64 millis_since = OsGetMilliseconds() - peer->last_complete_handskake_timestamp_;
+      uint64 when = time(NULL) - millis_since / 1000;
+      CmsgAppendFmt(result, "last_handshake_time_sec=%lld", when);
+    }
+  }
+  CmsgAppendFmt(result, "protocol_version=1");
+}
+
+bool WgConfig::HandleConfigurationProtocolMessage(WireguardProcessor *proc, const std::string &&message, std::string *result) {
+  std::string message_copy(std::move(message));
+  std::vector<std::pair<char *, char*>> kv;
+  bool is_set = false;
+  bool did_set_address = false;
+  WgPeer *peer = NULL;
+  WgCidrAddr cidr_addr;
+  IpAddr sin;
+  uint8 buf32[32];
+  assert(proc->dev().IsMainThread());
+
+  result->clear();
+
+  if (!ParseConfigKeyValue(&message_copy[0], &kv))
+    return false;
+
+  for (auto it : kv) {
+    char *key = it.first, *value = it.second;
+    if (strcmp(key, "get") == 0) {
+      if (strcmp(value, "1") != 0)
+        goto getout_fail;
+      HandleConfigurationProtocolGet(proc, result);
+      break;
+    } else if (strcmp(key, "set") == 0) {
+      if (strcmp(value, "1") != 0)
+        goto getout_fail;
+      is_set = true;
+    } else if (is_set) {
+      if (strcmp(key, "private_key") == 0) {
+        if (!ParseHexString(value, buf32, 32)) goto getout_fail;
+        proc->dev_.SetPrivateKey(buf32);
+      } else if (strcmp(key, "listen_port") == 0) {
+        int new_port = atoi(value);
+        proc->SetListenPort(new_port);
+      } else if (strcmp(key, "replace_peers") == 0) {
+        if (strcmp(value, "true") != 0) goto getout_fail;
+        proc->dev_.RemoveAllPeers();
+      } else if (strcmp(key, "address") == 0) {
+        if (!ParseCidrAddr(value, &cidr_addr)) goto getout_fail;
+        if (!did_set_address) {
+          did_set_address = true;
+          proc->ClearTunAddress();
+        }
+        if (!proc->SetTunAddress(cidr_addr)) goto getout_fail;
+      } else if (strcmp(key, "public_key") == 0) {
+        WgPublicKey pubkey;
+        if (!ParseHexString(value, pubkey.bytes, 32)) goto getout_fail;
+        peer = proc->dev_.GetPeerFromPublicKey(pubkey);
+        if (!peer) {
+          peer = proc->dev_.AddPeer();
+          peer->SetPublicKey(pubkey);
+        }
+      } else if (peer != NULL) {
+        if (strcmp(key, "remove") == 0) {
+          if (strcmp(value, "true") != 0) goto getout_fail;
+          peer->RemovePeer();
+          peer = NULL;
+        } else if (strcmp(key, "preshared_key") == 0) {
+          if (!ParseHexString(value, buf32, 32)) goto getout_fail;
+          peer->SetPresharedKey(buf32);
+        } else if (strcmp(key, "endpoint") == 0) {
+          if (!ParseSockaddrInWithPort(value, &sin, NULL)) goto getout_fail;
+          peer->SetEndpoint(sin);
+        } else if (strcmp(key, "persistent_keepalive_interval") == 0) {
+          if (!peer->SetPersistentKeepalive(atoi(value)))
+            goto getout_fail;
+        } else if (strcmp(key, "replace_allowed_ips") == 0) {
+          if (strcmp(value, "true") != 0) goto getout_fail;
+          peer->RemoveAllIps();
+        } else if (strcmp(key, "allowed_ip") == 0) {
+          if (!ParseCidrAddr(value, &cidr_addr)) goto getout_fail;
+          peer->AddIp(cidr_addr);
+        }
+      }
+    } else {
+      goto getout_fail;
+    }
+  }
+
+  // reconfigure the tun interface?
+  if (did_set_address) {
+    proc->ConfigureTun();
+  }
+  
+  result->append("errno=0\n\n");
+  return true;
+
+getout_fail:
+  (*result) = "errno=1\n\n";
+  return false;
+}
+
+

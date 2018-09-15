@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-1.0-only
 // Copyright (C) 2018 Ludvig Strigeus <info@tunsafe.com>. All Rights Reserved.
 #include "tunsafe_types.h"
+#include <vector>
 
 #pragma once
 const char *FindFilenameComponent(const char *s);
@@ -47,6 +48,7 @@ void ShellExecuteFromExplorer(
   int nShowCmd = SW_SHOWNORMAL);
 
 size_t GetConfigPath(char *path, size_t path_size);
+bool ExpandConfigPath(const char *basename, char *fullname, size_t fullname_size);
 bool EnsureValidConfigPath(const char *path);
 
 bool RunProcessAsAdminWithArgs(const char *args, bool wait_for_exit);
@@ -54,3 +56,8 @@ bool RestartProcessAsAdministrator();
 bool SetClipboardString(const char *string);
 RECT GetParentRect(HWND wnd);
 RECT MakeRect(int l, int t, int r, int b);
+struct GuidAndDevName {
+  char guid[40];
+  char name[64];
+};
+void GetTapAdapterInfo(std::vector<GuidAndDevName> *result);

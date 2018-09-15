@@ -39,6 +39,8 @@
 #include <linux/if_tun.h>
 #include <sys/prctl.h>
 #include <linux/rtnetlink.h>
+#include <sys/inotify.h>
+#include <limits.h>
 #endif
 
 void tunsafe_die(const char *msg) {
@@ -286,15 +288,6 @@ void OsGetTimestampTAI64N(uint8 dst[12]) {
   WriteBE32(dst + 8, nanos);
 }
 
-void OsGetRandomBytes(uint8 *data, size_t data_size) {
-  int fd = open("/dev/urandom", O_RDONLY);
-  int r = read(fd, data, data_size);
-  if (r < 0) r = 0;
-  close(fd);
-  for (; r < data_size; r++)
-    data[r] = rand() >> 6;
-}
-
 void OsInterruptibleSleep(int millis) {
   usleep((useconds_t)millis * 1000);
 }
@@ -387,11 +380,12 @@ int open_tun(char *devname, size_t devname_size) {
   memset(&ifr, 0, sizeof(ifr));
   ifr.ifr_flags = IFF_TUN | IFF_NO_PI;
 
+  my_strlcpy(ifr.ifr_name, sizeof(ifr.ifr_name), devname);
   if ((err = ioctl(fd, TUNSETIFF, (void *) &ifr)) < 0) {
     close(fd);
     return err;
   }
-  strcpy(devname, ifr.ifr_name);
+  my_strlcpy(devname, devname_size, ifr.ifr_name);
   return fd;
 }
 #endif
@@ -411,6 +405,8 @@ int open_udp(int listen_on_port) {
 
 TunsafeBackendBsd::TunsafeBackendBsd() 
     : processor_(NULL) {
+  devname_[0] = 0;
+  tun_interface_gone_ = false;
 }
 
 TunsafeBackendBsd::~TunsafeBackendBsd() {
@@ -495,10 +491,10 @@ void TunsafeBackendBsd::DelRoute(const RouteInfo &cd) {
 static bool IsIpv6AddressSet(const void *p) {
   return (ReadLE64(p) | ReadLE64((char*)p + 8)) != 0;
 }
-
+ 
 // Called to initialize tun
-bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) override {
-  char devname[16];
+bool TunsafeBackendBsd::Configure(const TunConfig &&config, TunConfigOut *out) override {
+  char buf[kSizeOfAddress];
 
   if (!RunPrePostCommand(config.pre_post_commands.pre_up)) {
     RERROR("Pre command failed!");
@@ -507,17 +503,35 @@ bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) 
 
   out->enable_neighbor_discovery_spoofing = false;
 
-  if (!InitializeTun(devname))
+  if (!InitializeTun(devname_))
     return false;
   
-  if (config.ipv6_cidr)
-    RERROR("IPv6 not supported");
-
   uint32 netmask = CidrToNetmaskV4(config.cidr);
   uint32 default_route_v4 = ComputeIpv4DefaultRoute(config.ip, netmask);
-  
-  RunCommand("/sbin/ifconfig %s %A mtu %d %A netmask %A up", devname, config.ip, config.mtu, config.ip, netmask);
-  AddRoute(config.ip & netmask, config.cidr, config.ip, devname);
+
+
+#if defined(OS_LINUX)
+  if (config.ip) {
+    char ip[4];
+    WriteBE32(ip, config.ip);
+    RunCommand("/sbin/ip address add dev %s %s", devname_, print_ip_prefix(buf, AF_INET, ip, config.cidr));
+  }
+  if (config.ipv6_cidr) {
+    RunCommand("/sbin/ip address add dev %s %s", devname_, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
+  }
+  RunCommand("/sbin/ip link set dev %s mtu %d up", devname_, config.mtu);
+#else  // !defined(OS_LINUX)
+  if (config.ip) {
+    RunCommand("/sbin/ifconfig %s %A mtu %d %A netmask %A up", devname_, config.ip, config.mtu, config.ip, netmask);
+  }
+  if (config.ipv6_cidr) {
+    RunCommand("/sbin/ifconfig %s inet6 add %s", devname_, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
+  }
+#endif  // !defined(OS_LINUX)
+
+  if (config.ip) {
+    AddRoute(config.ip & netmask, config.cidr, config.ip, devname_);
+  }
 
   if (config.use_ipv4_default_route) {
     if (config.default_route_endpoint_v4) {
@@ -533,35 +547,30 @@ bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) 
           AddRoute(ReadBE32(it->addr), it->cidr, ipv4_default_gw, default_iface);
       }
     }
-    AddRoute(0x00000000, 1, default_route_v4, devname);
-    AddRoute(0x80000000, 1, default_route_v4, devname);
+    AddRoute(0x00000000, 1, default_route_v4, devname_);
+    AddRoute(0x80000000, 1, default_route_v4, devname_);
   }
 
   uint8 default_route_v6[16];
 
   if (config.ipv6_cidr) {
     static const uint8 matchall_1_route[17] = {0x80, 0, 0, 0};
-    char buf[kSizeOfAddress];
-
     ComputeIpv6DefaultRoute(config.ipv6_address, config.ipv6_cidr, default_route_v6);
-
-    RunCommand("/sbin/ifconfig %s inet6 add %s", devname, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
-
     if (config.use_ipv6_default_route) {
       if (IsIpv6AddressSet(config.default_route_endpoint_v6)) {
         RERROR("default_route_endpoint_v6 not supported");
       }
-      AddRoute(AF_INET6, matchall_1_route + 1, 1, default_route_v6, devname);
-      AddRoute(AF_INET6, matchall_1_route + 0, 1, default_route_v6, devname);
+      AddRoute(AF_INET6, matchall_1_route + 1, 1, default_route_v6, devname_);
+      AddRoute(AF_INET6, matchall_1_route + 0, 1, default_route_v6, devname_);
     }
   }
 
   // Add all the extra routes
   for (auto it = config.extra_routes.begin(); it != config.extra_routes.end(); ++it) {
     if (it->size == 32) {
-      AddRoute(ReadBE32(it->addr), it->cidr, default_route_v4, devname);
+      AddRoute(ReadBE32(it->addr), it->cidr, default_route_v4, devname_);
     } else if (it->size == 128 && config.ipv6_cidr) {
-      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, devname);
+      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, devname_);
     }
   }
 
@@ -576,14 +585,20 @@ bool TunsafeBackendBsd::Initialize(const TunConfig &&config, TunConfigOut *out) 
 void TunsafeBackendBsd::CleanupRoutes() {
   RunPrePostCommand(pre_down_);
 
-  for(auto it = cleanup_commands_.begin(); it != cleanup_commands_.end(); ++it)
-    DelRoute(*it);
+  for(auto it = cleanup_commands_.begin(); it != cleanup_commands_.end(); ++it) {
+    if (!tun_interface_gone_ || strcmp(it->dev.c_str(), devname_) != 0)
+      DelRoute(*it);
+  }
   cleanup_commands_.clear();
 
   RunPrePostCommand(post_down_);
 
   pre_down_.clear();
   post_down_.clear();
+}
+
+void TunsafeBackendBsd::SetTunDeviceName(const char *name) {
+  my_strlcpy(devname_, sizeof(devname_), name);
 }
 
 static bool RunOneCommand(const std::string &cmd) {
@@ -604,15 +619,99 @@ bool TunsafeBackendBsd::RunPrePostCommand(const std::vector<std::string> &vec) {
   return success;
 }
 
+#if defined(OS_LINUX)
+UnixSocketDeletionWatcher::UnixSocketDeletionWatcher() 
+    : inotify_fd_(-1) {
+  pipes_[0] = -1;
+  pipes_[0] = -1;
+}
+
+UnixSocketDeletionWatcher::~UnixSocketDeletionWatcher() {
+  close(inotify_fd_);
+  close(pipes_[0]);
+  close(pipes_[1]);
+}
+
+bool UnixSocketDeletionWatcher::Start(const char *path, bool *flag_to_set) {
+  assert(inotify_fd_ == -1);
+  path_ = path;
+  flag_to_set_ = flag_to_set;
+  pid_ = getpid();
+  inotify_fd_ = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
+  if (inotify_fd_ == -1) {
+    perror("inotify_init1() failed");
+    return false;
+  }
+  if (inotify_add_watch(inotify_fd_, "/var/run/wireguard", IN_DELETE | IN_DELETE_SELF) == -1) {
+    perror("inotify_add_watch failed");
+    return false;
+  }
+  if (pipe(pipes_) == -1) {
+    perror("pipe() failed");
+    return false;
+  }
+  return pthread_create(&thread_, NULL, &UnixSocketDeletionWatcher::RunThread, this) == 0;
+}
+
+void UnixSocketDeletionWatcher::Stop() {
+  RINFO("Stopping..");
+  void *retval;
+  write(pipes_[1], "", 1);
+  pthread_join(thread_, &retval);
+}
+
+void *UnixSocketDeletionWatcher::RunThread(void *arg) {
+  UnixSocketDeletionWatcher *self = (UnixSocketDeletionWatcher*)arg;
+  return self->RunThreadInner();
+}
+
+void *UnixSocketDeletionWatcher::RunThreadInner() {
+  char buf[sizeof(struct inotify_event) + NAME_MAX + 1]
+     __attribute__ ((aligned(__alignof__(struct inotify_event))));
+  fd_set fdset;
+  struct stat st;
+  for(;;) {
+    if (lstat(path_, &st) == -1 && errno == ENOENT) {
+      RINFO("Unix socket %s deleted.", path_);
+      *flag_to_set_ = true;
+      kill(pid_, SIGALRM);
+      break;
+    }
+    FD_ZERO(&fdset);
+    FD_SET(inotify_fd_, &fdset);
+    FD_SET(pipes_[0], &fdset);
+    int n = select(std::max(inotify_fd_, pipes_[0]) + 1, &fdset, NULL, NULL, NULL);
+    if (n == -1) {
+      perror("select");
+      break;
+    }
+    if (FD_ISSET(inotify_fd_, &fdset)) {
+      ssize_t len = read(inotify_fd_, buf, sizeof(buf));
+      if (len == -1) {
+        perror("read");
+        break;
+      }
+    }
+    if (FD_ISSET(pipes_[0], &fdset))
+      break;
+  }
+  return NULL;
+}
+
+#else  // !defined(OS_LINUX)
+
+bool UnixSocketDeletionWatcher::Poll(const char *path) {
+  struct stat st;
+  return lstat(path, &st) == -1 && errno == ENOENT;
+}
+
+#endif // !defined(OS_LINUX)
+
 static TunsafeBackendBsd *g_tunsafe_backend_bsd;
 
 static void SigAlrm(int sig) {
   if (g_tunsafe_backend_bsd)
     g_tunsafe_backend_bsd->HandleSigAlrm();
-}
-
-static void SigUsr1(int sig) {
-
 }
 
 static bool did_ctrlc;
@@ -623,6 +722,7 @@ void SigInt(int sig) {
   did_ctrlc = true;
   write(1, "Ctrl-C detected. Exiting. Press again to force quit.\n", sizeof("Ctrl-C detected. Exiting. Press again to force quit.\n")-1);
   
+  // todo: fix signal safety?
   if (g_tunsafe_backend_bsd)
     g_tunsafe_backend_bsd->HandleExit();
 }
@@ -631,7 +731,10 @@ void TunsafeBackendBsd::RunLoop() {
   assert(!g_tunsafe_backend_bsd);
   assert(processor_);
 
+  sigset_t mask;
+
   g_tunsafe_backend_bsd = this;
+
   // We want an alarm signal every second.
   {
     struct sigaction act = {0};
@@ -651,16 +754,14 @@ void TunsafeBackendBsd::RunLoop() {
     }
   }
 
-  {
-    struct sigaction act = {0};
-    act.sa_handler = SigUsr1;
-    if (sigaction(SIGUSR1, &act, NULL) < 0) {
-      RERROR("Unable to install SIGUSR1 handler.");
-      return;
-    }
+#if defined(OS_LINUX) || defined(OS_FREEBSD)
+  sigemptyset(&mask);
+  sigaddset(&mask, SIGALRM);
+  if (sigprocmask(SIG_BLOCK, &mask, &orig_signal_mask_) < 0) {
+    perror("sigprocmask");
+    return;
   }
 
-#if defined(OS_LINUX) || defined(OS_FREEBSD)
   {
     struct itimerspec tv = {0};
     struct sigevent sev;
@@ -727,7 +828,17 @@ public:
   bool is_connected_;
 };
 
+struct CommandLineOutput {
+  const char *filename_to_load;
+  const char *interface_name;
+  bool daemon;
+};
+
+int HandleCommandLine(int argc, char **argv, CommandLineOutput *output);
+
 int main(int argc, char **argv) {
+  CommandLineOutput cmd = {0};
+
   InitCpuFeatures();
 
   if (argc == 2 && strcmp(argv[1], "--benchmark") == 0) {
@@ -735,12 +846,9 @@ int main(int argc, char **argv) {
     return 0;
   }
 
-  fprintf(stderr, "%s\n", TUNSAFE_VERSION_STRING);
-
-  if (argc < 2) {
-    fprintf(stderr, "Syntax: tunsafe file.conf\n");
-    return 1;
-  }
+  int rv = HandleCommandLine(argc, argv, &cmd);
+  if (!cmd.filename_to_load)
+    return rv;
   
 #if defined(OS_MACOSX)
   InitOsxGetMilliseconds();
@@ -749,19 +857,29 @@ int main(int argc, char **argv) {
   SetThreadName("tunsafe-m");
 
   MyProcessorDelegate my_procdel;
-  TunsafeBackendBsd *socket_loop = CreateTunsafeBackendBsd();
-  WireguardProcessor wg(socket_loop, socket_loop, &my_procdel);
+  TunsafeBackendBsd *backend = CreateTunsafeBackendBsd();
+  if (cmd.interface_name)
+    backend->SetTunDeviceName(cmd.interface_name);
+
+  WireguardProcessor wg(backend, backend, &my_procdel);
 
   my_procdel.wg_processor_ = &wg;
-  socket_loop->SetProcessor(&wg);
+  backend->SetProcessor(&wg);
 
   DnsResolver dns_resolver(NULL);
-  if (!ParseWireGuardConfigFile(&wg, argv[1], &dns_resolver)) return 1;
+  if (*cmd.filename_to_load && !ParseWireGuardConfigFile(&wg, cmd.filename_to_load, &dns_resolver))
+    return 1;
   if (!wg.Start()) return 1;
 
-  socket_loop->RunLoop();
-  socket_loop->CleanupRoutes();
-  delete socket_loop;
+  if (cmd.daemon) {
+    fprintf(stderr, "Switching to daemon mode...\n");
+    if (daemon(0, 0) == -1)
+      perror("daemon() failed");
+  }
+
+  backend->RunLoop();
+  backend->CleanupRoutes();
+  delete backend;
 
   return 0;
 }

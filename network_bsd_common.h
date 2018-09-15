@@ -7,6 +7,7 @@
 #include "wireguard.h"
 #include "wireguard_config.h"
 #include <string>
+#include <signal.h>
 
 struct RouteInfo {
   uint8 family;
@@ -16,6 +17,39 @@ struct RouteInfo {
   std::string dev;
 };
 
+#if defined(OS_LINUX)
+// Keeps track of when the unix socket gets deleted
+class UnixSocketDeletionWatcher {
+public:
+  UnixSocketDeletionWatcher();
+  ~UnixSocketDeletionWatcher();
+  bool Start(const char *path, bool *flag_to_set);
+  void Stop();
+  bool Poll(const char *path) { return false; }
+ 
+private:
+  static void *RunThread(void *arg);
+  void *RunThreadInner();
+  const char *path_;
+  int inotify_fd_;
+  int pid_;
+  int pipes_[2];
+  pthread_t thread_;
+  bool *flag_to_set_;
+};
+#else  // !defined(OS_LINUX)
+// all other platforms that lack inotify
+class UnixSocketDeletionWatcher {
+public:
+  UnixSocketDeletionWatcher() {}
+  ~UnixSocketDeletionWatcher() {}
+  bool Start(const char *path, bool *flag_to_set) { return true; }
+  void Stop() {}
+  bool Poll(const char *path);
+};
+#endif  // !defined(OS_LINUX)
+
+
 class TunsafeBackendBsd : public TunInterface, public UdpInterface {
 public:
   TunsafeBackendBsd();
@@ -24,10 +58,12 @@ public:
   void RunLoop();
   void CleanupRoutes();
 
+  void SetTunDeviceName(const char *name);
+
   void SetProcessor(WireguardProcessor *wg) { processor_ = wg; }
 
   // -- from TunInterface
-  virtual bool Initialize(const TunConfig &&config, TunConfigOut *out) override;
+  virtual bool Configure(const TunConfig &&config, TunConfigOut *out) override;
 
   virtual void HandleSigAlrm() = 0;
   virtual void HandleExit() = 0;
@@ -44,6 +80,9 @@ protected:
   WireguardProcessor *processor_;
   std::vector<RouteInfo> cleanup_commands_;
   std::vector<std::string> pre_down_, post_down_;
+  sigset_t orig_signal_mask_;
+  char devname_[16];
+  bool tun_interface_gone_;
 };
 
 #if defined(OS_MACOSX) || defined(OS_FREEBSD)

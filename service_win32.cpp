@@ -9,40 +9,19 @@
 #include <string>
 #include <assert.h>
 #include "util_win32.h"
-
-static const uint64 kTunsafeServiceProtocolVersion = 20180809001;
+#include "service_win32_constants.h"
 
 static SERVICE_STATUS_HANDLE m_statusHandle;
-static TunsafeServiceImpl *g_service;
+static TunsafeServiceManager *g_service;
+
+#define SERVICE_DEBUGGING 0
 
 #define SERVICE_NAME             L"TunSafeService"
 #define SERVICE_NAMEA            "TunSafeService"
 #define SERVICE_START_TYPE       SERVICE_AUTO_START
 #define SERVICE_DEPENDENCIES     L"tap0901\0dhcp\0"
 #define SERVICE_ACCOUNT          NULL
-//L"NT AUTHORITY\\LocalService"
 #define SERVICE_PASSWORD         NULL
-#define PIPE_NAME "\\\\.\\pipe\\TunSafe\\ServiceControl"
-
-
-enum {
-  SERVICE_REQ_LOGIN = 0,
-  SERVICE_REQ_START = 1,
-  SERVICE_REQ_STOP = 2,
-  SERVICE_REQ_GETSTATS = 4,
-  SERVICE_REQ_SET_INTERNET_BLOCKSTATE = 5,
-  SERVICE_REQ_RESETSTATS = 6,
-  SERVICE_REQ_SET_STARTUP_FLAGS = 7,
-
-  SERVICE_MSG_STATE = 8,
-  SERVICE_MSG_LOGLINE = 9,
-  SERVICE_MSG_STATS = 11,
-  SERVICE_MSG_CLEARLOG = 12,
-  SERVICE_MSG_STATUS_CODE = 14,
-
-  SERVICE_REQ_GET_GRAPH = 15,
-  SERVICE_MSG_GRAPH = 16,
-};
 
 struct ServiceHandles {
   SC_HANDLE manager;
@@ -60,7 +39,6 @@ struct ServiceHandles {
   bool StopService();
   bool StartService();
 };
-
 
 static DWORD InstallService(PWSTR pszServiceName,
                     PWSTR pszDisplayName,
@@ -191,6 +169,18 @@ getout:
   return result;
 }
 
+static wchar_t *RegReadStrW(HKEY hkey, const wchar_t *key, const wchar_t *def) {
+  wchar_t buf[1024];
+  DWORD n = sizeof(buf) - 2;
+  DWORD type = 0;
+  if (RegQueryValueExW(hkey, key, NULL, &type, (BYTE*)buf, &n) != ERROR_SUCCESS || type != REG_SZ)
+    return def ? _wcsdup(def) : NULL;
+  n >>= 1;
+  if (n && buf[n - 1] == 0)
+    n--;
+  buf[n] = 0;
+  return _wcsdup(buf);
+}
 
 static DWORD GetNonTransientServiceStatus(SC_HANDLE service) {
   SERVICE_STATUS ssSvcStatus = {};
@@ -208,7 +198,6 @@ static DWORD GetNonTransientServiceStatus(SC_HANDLE service) {
   }
 }
 
-
 bool ServiceHandles::StartService() {
   DWORD state = GetNonTransientServiceStatus(service);
   if (state == 0 || state == SERVICE_RUNNING)
@@ -221,7 +210,6 @@ bool ServiceHandles::StartService() {
   return GetNonTransientServiceStatus(service) == SERVICE_RUNNING;
 }
 
-
 static bool StartTunsafeService() {
   ServiceHandles handles;
 
@@ -232,13 +220,13 @@ static bool StartTunsafeService() {
 
 bool IsTunsafeServiceRunning() {
   ServiceHandles handles;
-
+#if SERVICE_DEBUGGING
+  return true;
+#endif
   if (!handles.Open(SERVICE_NAME, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS))
     return false;
-
   return GetNonTransientServiceStatus(handles.service) == SERVICE_RUNNING;
 }
-
 
 void StopTunsafeService() {
   ServiceHandles handles;
@@ -296,7 +284,6 @@ bool IsTunSafeServiceInstalled() {
   return handles.Open(SERVICE_NAME, SC_MANAGER_CONNECT, SERVICE_QUERY_STATUS);
 }
 
-
 static void WriteServiceLog(const char *pszFunction, WORD dwError) {
   char szMessage[260];
   snprintf(szMessage, ARRAYSIZE(szMessage), "%s failed w/err 0x%08lx", pszFunction, dwError);
@@ -321,8 +308,7 @@ static void WriteServiceLog(const char *pszFunction, WORD dwError) {
   }
 }
 
-static void SetServiceStatus(DWORD dwCurrentState,
-                             DWORD dwWin32ExitCode = 0,
+static void SetServiceStatus(DWORD dwCurrentState, DWORD dwWin32ExitCode = 0,
                              DWORD dwWaitHint = 0) {
   static DWORD dwCheckPoint = 1;
 
@@ -333,10 +319,8 @@ static void SetServiceStatus(DWORD dwCurrentState,
   m_status.dwCurrentState = dwCurrentState;
   m_status.dwWin32ExitCode = dwWin32ExitCode;
   m_status.dwWaitHint = dwWaitHint;
-  m_status.dwCheckPoint =
-    ((dwCurrentState == SERVICE_RUNNING) ||
-    (dwCurrentState == SERVICE_STOPPED)) ?
-    0 : dwCheckPoint++;
+  m_status.dwCheckPoint = ((dwCurrentState == SERVICE_RUNNING) ||
+                           (dwCurrentState == SERVICE_STOPPED)) ? 0 : dwCheckPoint++;
   // Report the status of the service to the SCM.
   ::SetServiceStatus(m_statusHandle, &m_status);
 }
@@ -389,495 +373,147 @@ static const SERVICE_TABLE_ENTRYW serviceTable[] = {
   {NULL, NULL}
 };
 
-PipeMessageHandler::PipeMessageHandler(const char *pipe_name, bool is_server_pipe, Delegate *delegate) {
-  pipe_name_ = _strdup(pipe_name);
-  is_server_pipe_ = is_server_pipe;
-  delegate_ = delegate;
-  pipe_ = INVALID_HANDLE_VALUE;
-  wait_handles_[0] = CreateEvent(NULL, TRUE, FALSE, NULL); // for ReadFile
-  wait_handles_[1] = CreateEvent(NULL, FALSE, FALSE, NULL); // For Exit
-  wait_handles_[2] = CreateEvent(NULL, TRUE, FALSE, NULL); // for WriteFile
-  packets_ = NULL;
-  thread_ = NULL;
-  packets_end_ = &packets_;
-  write_overlapped_active_ = false;
-  exit_thread_ = false;
-  connection_established_ = false;
-  thread_id_ = 0;
-  state_ = kStateNone;
-  tmp_packet_buf_ = NULL;
-}
+///////////////////////////////////////////////////////////////////////////////////////
+// TunsafeServiceManager
+///////////////////////////////////////////////////////////////////////////////////////
 
-PipeMessageHandler::~PipeMessageHandler() {
-  StopThread();
-  CloseHandle(wait_handles_[0]);
-  CloseHandle(wait_handles_[1]);
-  CloseHandle(wait_handles_[2]);
-  free(pipe_name_);
-}
-
-bool PipeMessageHandler::InitializeServerPipeAndWait() {
-  int BUFSIZE = 2048;
-  SECURITY_ATTRIBUTES  saPipeSecurity = {0};
-  uint8 buf[SECURITY_DESCRIPTOR_MIN_LENGTH];
-  PSECURITY_DESCRIPTOR pPipeSD = (PSECURITY_DESCRIPTOR)buf;
-
-  if (!InitializeSecurityDescriptor(pPipeSD, SECURITY_DESCRIPTOR_REVISION))
-    return false;
-
-  // set NULL DACL on the SD
-  if (!SetSecurityDescriptorDacl(pPipeSD, TRUE, (PACL)NULL, FALSE))
-    return false;
-
-  // now set up the security attributes
-  saPipeSecurity.nLength = sizeof(SECURITY_ATTRIBUTES);
-  saPipeSecurity.bInheritHandle = TRUE;
-  saPipeSecurity.lpSecurityDescriptor = pPipeSD;
-
-  pipe_ = CreateNamedPipeW(L"\\\\.\\pipe\\TunSafe\\ServiceControl",
-                                 PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
-                                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_REJECT_REMOTE_CLIENTS | PIPE_WAIT,
-                                 PIPE_UNLIMITED_INSTANCES,
-                                 BUFSIZE, BUFSIZE, 0, &saPipeSecurity);
-  if (pipe_ == INVALID_HANDLE_VALUE)
-    return false;
+TunsafeServiceManager::TunsafeServiceManager()
+    : pipe_manager_(TUNSAFE_PIPE_NAME, true, this) {
+  server_unique_id_ = 0;
   
-  memset(&read_overlapped_, 0, sizeof(read_overlapped_));
-  read_overlapped_.hEvent = wait_handles_[0];
-  if (!ConnectNamedPipe(pipe_, &read_overlapped_)) {
-    DWORD rv = GetLastError();
-    if (rv != ERROR_PIPE_CONNECTED && rv != ERROR_IO_PENDING)
-      return false;
-  }
-  return true;
-}
-
-bool PipeMessageHandler::InitializeClientPipe() {
-  assert(pipe_ == INVALID_HANDLE_VALUE);
-  pipe_ = CreateFile(pipe_name_, GENERIC_READ | GENERIC_WRITE, 0, NULL, 
-                     OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
-  if (pipe_ == INVALID_HANDLE_VALUE)
-    return false;
-  DWORD mode = PIPE_READMODE_MESSAGE;
-  SetNamedPipeHandleState(pipe_, &mode, NULL, NULL);
-  return true;
-}
-
-void PipeMessageHandler::ClosePipe() {
-  if (pipe_ != INVALID_HANDLE_VALUE) {
-    CancelIo(pipe_);
-    CloseHandle(pipe_);
-    pipe_ = INVALID_HANDLE_VALUE;
-  }
-  connection_established_ = false;
-  write_overlapped_active_ = false;
-
-  free(tmp_packet_buf_);
-  tmp_packet_buf_ = NULL;
-
-  ResetEvent(wait_handles_[0]);
-  ResetEvent(wait_handles_[2]);
-
-  packets_mutex_.Acquire();
-  OutgoingPacket *packets = packets_;
-  packets_ = NULL;
-  packets_end_ = &packets_;
-  packets_mutex_.Release();
-  while (packets) {
-    OutgoingPacket *p = packets;
-    packets = p->next;
-    free(p);
-  }
-}
-
-bool PipeMessageHandler::WritePacket(int type, const uint8 *data, size_t data_size) {
-  OutgoingPacket *packet = (OutgoingPacket *)malloc(offsetof(OutgoingPacket, data[data_size + 1]));
-  if (packet) {
-    packet->size = (uint32)(data_size + 1);
-    packet->data[0] = type;
-    memcpy(packet->data + 1, data, data_size);
-    packet->next = NULL;
-
-    packets_mutex_.Acquire();
-    OutgoingPacket *was_empty = packets_;
-    // login messages are always queued up front
-    if (type == SERVICE_REQ_LOGIN) {
-      packet->next = packets_;
-      if (packet->next == NULL)
-        packets_end_ = &packet->next;
-      packets_ = packet;
-    } else {
-      *packets_end_ = packet;
-      packets_end_ = &packet->next;
-    }
-    packets_mutex_.Release();
-
-    if (was_empty == NULL) {
-      // Only allow the pipe thread to invoke the send
-      if (GetCurrentThreadId() == thread_id_) {
-        SendNextQueuedWrite();
-      } else {
-        SetEvent(wait_handles_[1]);
-      }
-    }
-  }
-  return true;
-}
-
-void PipeMessageHandler::SendNextQueuedWrite() {
-  assert(thread_id_ == GetCurrentThreadId());
-  if (!write_overlapped_active_) {
-    OutgoingPacket *p = packets_;
-    if (p && connection_established_) {
-      memset(&write_overlapped_, 0, sizeof(write_overlapped_));
-      write_overlapped_.hEvent = wait_handles_[2];
-      if (WriteFile(pipe_, p->data, p->size, NULL, &write_overlapped_) || GetLastError() == ERROR_IO_PENDING)
-        write_overlapped_active_ = true;
-    } else {
-      ResetEvent(wait_handles_[2]);
-    }
-  }
-}
-
-#define TS_WAIT_BEGIN(t) switch(state_) { case t:
-#define TS_WAIT_POINT(t) state_ = (t); return; case t:
-#define TS_WAIT_END() }
-
-void PipeMessageHandler::AdvanceStateMachine() {
-  DWORD rv, bytes_read;
-
-  TS_WAIT_BEGIN(kStateNone)
-  for(;;) {
-    // Create a named pipe and wait for connections from the UI process
-    if (is_server_pipe_) {
-      if (!InitializeServerPipeAndWait()) {
-        if (!exit_thread_)
-          ExitProcess(1);
-        break;
-      }
-      TS_WAIT_POINT(kStateWaitConnect);
-    } else {
-      if (!InitializeClientPipe()) {
-        RINFO("Unable to connect to the TunSafe Service. Please make sure it's running.");
-        break;
-      }
-    }
-    connection_established_ = true;
-    delegate_->HandleNewConnection();
-    SendNextQueuedWrite();
-
-    for (;;) {
-      memset(&read_overlapped_, 0, sizeof(read_overlapped_));
-      read_overlapped_.hEvent = wait_handles_[0];
-      if (!ReadFile(pipe_, NULL, 0, NULL, &read_overlapped_)) {
-        rv = GetLastError();
-        if (rv != ERROR_IO_PENDING && rv != ERROR_MORE_DATA)
-          break;
-      }
-      TS_WAIT_POINT(kStateWaitReadLength);
-      PeekNamedPipe(pipe_, NULL, 0, NULL, &tmp_packet_size_, NULL);
-      if (tmp_packet_size_ == 0)
-        break;
-
-      free(tmp_packet_buf_);
-      tmp_packet_buf_ = (uint8*)malloc(tmp_packet_size_);
-      if (!tmp_packet_buf_)
-        break;
-
-      memset(&read_overlapped_, 0, sizeof(read_overlapped_));
-      read_overlapped_.hEvent = wait_handles_[0];
-      if (!ReadFile(pipe_, tmp_packet_buf_, tmp_packet_size_, NULL, &read_overlapped_)) {
-        rv = GetLastError();
-        if (rv != ERROR_IO_PENDING)
-          break;
-      }
-      TS_WAIT_POINT(kStateWaitReadPayload);
-      bytes_read = (uint32)read_overlapped_.InternalHigh;
-      if (bytes_read == 0)
-        break;
-      if (!delegate_->HandleMessage(tmp_packet_buf_[0], tmp_packet_buf_ + 1, bytes_read - 1)) {
-        ResetEvent(wait_handles_[0]);
-        TS_WAIT_POINT(kStateWaitTimeout);
-        break;
-      }
-    }
-    if (exit_thread_)
-      break;
-    delegate_->HandleDisconnect();
-    if (!is_server_pipe_)
-      break;
-    ClosePipe();
-  }  
-  TS_WAIT_END()
-  ClosePipe();
-}
-
-DWORD WINAPI PipeMessageHandler::StaticThreadMain(void *x) {
-  return ((PipeMessageHandler*)x)->ThreadMain();
-}
-
-bool PipeMessageHandler::VerifyThread() {
-  return thread_id_ == GetCurrentThreadId();
-}
-
-DWORD PipeMessageHandler::ThreadMain() {
-  assert((thread_id_ = GetCurrentThreadId()) != 0);
-  assert(state_ == kStateNone);
-
-  AdvanceStateMachine();
-
-  for(;;) {
-    DWORD rv = WaitForMultipleObjects(3, wait_handles_, FALSE, (state_ == kStateWaitTimeout) ? 1000 : INFINITE);
-    
-    // packet write finished?
-    if (rv == WAIT_OBJECT_0 + 2) {
-      assert(write_overlapped_active_);
-
-      write_overlapped_active_ = false;
-
-      // Remove the packet from the front of the queue, now that it was sent.
-      packets_mutex_.Acquire();
-      OutgoingPacket *p = packets_;
-      if ((packets_ = p->next) == NULL)
-        packets_end_ = &packets_;
-      packets_mutex_.Release();
-      free(p);
-      SendNextQueuedWrite();
-
-    // notification
-    } else if (rv == WAIT_OBJECT_0 + 1) {
-      if (exit_thread_ || !delegate_->HandleNotify())
-        break;
-      // The notification event is set when there might be new messages to send,
-      // so try to send them.
-      SendNextQueuedWrite();
-    
-    // read finished?
-    } else if (rv == WAIT_OBJECT_0) {
-      AdvanceStateMachine();
-    } else if (rv == WAIT_TIMEOUT) {
-      if (state_ == kStateWaitTimeout)
-        AdvanceStateMachine();
-    } else {
-      assert(0);
-    }
-  }
-  return 0;
-}
-
-bool PipeMessageHandler::StartThread() {
-  DWORD thread_id;
-  assert(thread_ == NULL);
-  thread_ = CreateThread(NULL, 0, &StaticThreadMain, this, 0, &thread_id);
-  return thread_ != NULL;
-}
-
-void PipeMessageHandler::StopThread() {
-  if (thread_ != NULL) {
-    exit_thread_ = true;
-    SetEvent(wait_handles_[1]);
-    WaitForSingleObject(thread_, INFINITE);
-    CloseHandle(thread_);
-    thread_ = NULL;
-  }
-  ClosePipe();
-}
-
-TunsafeServiceImpl::TunsafeServiceImpl() 
-    : message_handler_(PIPE_NAME, true, this) {
-  thread_delegate_ = CreateTunsafeBackendDelegateThreaded(this, [=] {
-    SetEvent(message_handler_.notify_handle());
-  });
-
-  backend_ = CreateNativeTunsafeBackend(thread_delegate_);
-  historical_log_lines_count_ = historical_log_lines_pos_ = 0;
-  last_line_sent_ = 0;
-  did_send_getstate_ = false;
-  memset(historical_log_lines_, 0, sizeof(historical_log_lines_));
   hkey_ = NULL;
-  want_graph_type_ = 0xffffffff;
   RegCreateKeyEx(HKEY_LOCAL_MACHINE, "Software\\TunSafe", NULL, NULL, 0, KEY_ALL_ACCESS, NULL, &hkey_, NULL);
+
+  main_backend_ = new TunsafeServiceBackend(this);
+  backends_.push_back(main_backend_);
 }
 
-TunsafeServiceImpl::~TunsafeServiceImpl() {
+TunsafeServiceManager::~TunsafeServiceManager() {
+  for (TunsafeServiceBackend *backend : backends_)
+    delete backend;
   RegCloseKey(hkey_);
 }
 
-static wchar_t *RegReadStrW(HKEY hkey, const wchar_t *key, const wchar_t *def) {
-  wchar_t buf[1024];
-  DWORD n = sizeof(buf) - 2;
-  DWORD type = 0;
-  if (RegQueryValueExW(hkey, key, NULL, &type, (BYTE*)buf, &n) != ERROR_SUCCESS || type != REG_SZ)
-    return def ? _wcsdup(def) : NULL;
-  n >>= 1;
-  if (n && buf[n - 1] == 0)
-    n--;
-  buf[n] = 0;
-  return _wcsdup(buf);
+void TunsafeServiceManager::HandleNotify() {
+  for (TunsafeServiceBackend *backend : backends_)
+    backend->HandleNotify();
 }
 
-unsigned TunsafeServiceImpl::OnStart(int argc, wchar_t **argv) {
+PipeConnection::Delegate *TunsafeServiceManager::HandleNewConnection(PipeConnection *connection) {
+  TunsafeServiceServer *server = new TunsafeServiceServer(connection, main_backend_, server_unique_id_++);
+  main_backend_->AddPipeServer(server);
+  pipe_manager_.TryStartNewListener();
+  return server;
+}
+
+unsigned TunsafeServiceManager::OnStart(int argc, wchar_t **argv) {
   uint32 service_flags = RegReadInt(hkey_, "ServiceStartupFlags", 0);
-  if ( (service_flags & kStartupFlag_BackgroundService) && (service_flags & kStartupFlag_ConnectWhenWindowsStarts) ) {
+  if ((service_flags & kStartupFlag_BackgroundService) && (service_flags & kStartupFlag_ConnectWhenWindowsStarts)) {
     char *conf = RegReadStr(hkey_, "LastUsedConfigFile", "");
-    if (conf && *conf) {
-      current_filename_ = (char*)conf;
-      backend_->Start((char*)conf);
-    }
+    if (conf && *conf)
+      main_backend_->Start(conf);
     free(conf);
   }
-
-  message_handler_.StartThread();
+  pipe_manager_.StartThread();
   return 0;
 }
 
-bool TunsafeServiceImpl::AuthenticateUser() {
-  did_authenticate_user_ = true;
-
-  if (!ImpersonateNamedPipeClient(message_handler_.pipe_handle()))
-    return false;
-  wchar_t *user = GetUsernameOfCurrentUser(true);
-  RevertToSelf();
-  if (!user)
-    return false;
-  wchar_t *valid_user = RegReadStrW(hkey_, L"AllowedUsername", L"");
-  bool rv = valid_user && wcscmp(user, valid_user) == 0;
-
-  free(user);
-  free(valid_user);
-  return rv;
+void TunsafeServiceManager::OnStop() {
+  pipe_manager_.StopThread();
+  for (TunsafeServiceBackend *backend : backends_)
+    backend->Stop();
 }
 
-bool TunsafeServiceImpl::HandleMessage(int type, uint8 *data, size_t size) {
-  if (!did_authenticate_user_) {
-    if (type != SERVICE_REQ_LOGIN || size < 8 || *(uint64*)data != kTunsafeServiceProtocolVersion) {
-      const char *s = "Versioning Problem: The TunSafe service is a different version than the UI.";
-      message_handler_.WritePacket(SERVICE_MSG_LOGLINE, (uint8*)s, strlen(s));
-      return false;
-    }
-    if (!AuthenticateUser()) {
-      const char *s = "Permission Problem: Your Windows account is different from the account\r\nthat installed the TunSafe Service. Please reinstall it.\r\n";
-      message_handler_.WritePacket(SERVICE_MSG_LOGLINE, (uint8*)s, strlen(s));
-      return false;
+void TunsafeServiceManager::OnShutdown() {
+
+}
+
+TunsafeServiceBackend *TunsafeServiceManager::CreateBackend(const char *guid) {
+  TunsafeServiceBackend *service_backend = new TunsafeServiceBackend(this);
+ 
+  // If we're unable to assign the name, maybe it's already in use
+  if (!service_backend->backend()->SetTunAdapterName(guid)) {
+    delete service_backend;
+    return NULL;
+  }
+  backends_.push_back(service_backend);
+  return service_backend;
+}
+
+void TunsafeServiceManager::DestroyBackend(TunsafeServiceBackend *service_backend) {
+  assert(service_backend != main_backend_);
+
+  // Erase from the list
+  auto it = std::find(backends_.begin(), backends_.end(), service_backend);
+  if (it != backends_.end())
+    backends_.erase(it);
+
+  delete service_backend;
+}
+
+bool TunsafeServiceManager::SwitchInterface(TunsafeServiceServer *server, const char *interfac, bool want_create) {
+  // Find a backend by name
+  TunsafeBackend *backend = TunsafeBackend::FindBackendByTunGuid(interfac);
+  TunsafeServiceBackend *service_backend = NULL;
+  if (backend) {
+    for (TunsafeServiceBackend *sb : backends_) {
+      if (sb->backend() == backend) {
+        service_backend = sb;
+        break;
+      }
     }
   }
-  
-  switch (type) {
-  case SERVICE_REQ_START:
-    if (data[size - 1] != 0)
+  if (!service_backend) {
+    if (!want_create)
       return false;
-
-    // Don't allow reading arbitrary files on disk
-    if (!EnsureValidConfigPath((char*)data)) {
-      char buf[MAX_PATH];
-      GetConfigPath(buf, sizeof(buf));
-      char *s = str_cat_alloc("Permission Problem: The Config file is in an unsafe location.\r\n   Must be in:", buf, "\r\n");
-      message_handler_.WritePacket(SERVICE_MSG_LOGLINE, (uint8*)s, strlen(s));
-      free(s);
+    service_backend = CreateBackend(interfac);
+    if (!service_backend)
       return false;
-    }
-
-    g_allow_pre_post = RegReadInt(hkey_, "AllowPrePost", 0) != 0;
-
-    current_filename_ = (char*)data;
-    backend_->Start((char*)data);
-    RegWriteStr(hkey_, "LastUsedConfigFile", (char*)data);
-
-    break;
-
-  case SERVICE_REQ_STOP:
-    backend_->Stop();
-    RegWriteStr(hkey_, "LastUsedConfigFile", "");
-    OnStateChanged();
-    break;
-
-  case SERVICE_REQ_LOGIN:
-    did_send_getstate_ = true;
-    OnStatusCode(backend_->status());
-    OnStateChanged();
-    SendQueuedLogLines();
-    break;
-
-  case SERVICE_REQ_GETSTATS:
-    if (size < 1) return false;
-    backend_->RequestStats(data[0] != 0);
-    break;
-
-  case SERVICE_REQ_SET_INTERNET_BLOCKSTATE:
-    if (size < 1)
-      return false;
-    backend_->SetInternetBlockState((InternetBlockState)data[0]);
-    OnStateChanged();
-    break;
-
-  case SERVICE_REQ_RESETSTATS:
-    backend_->ResetStats();
-    break;
-
-  case SERVICE_REQ_GET_GRAPH:
-    if (size < 4) return false;
-    want_graph_type_ = *(int*)data;
-    TunsafeServiceImpl::OnGraphAvailable();
-    break;
-
-  case SERVICE_REQ_SET_STARTUP_FLAGS:
-    if (size < 4)
-      return false;
-    RegSetValueEx(hkey_, "ServiceStartupFlags", NULL, REG_DWORD, (BYTE*)data, 4);
-    break;
-    
-  default:
-    return false;
+  }
+  if (server->service_backend() != service_backend) {
+    server->service_backend()->RemovePipeServer(server);
+    service_backend->AddPipeServer(server);
+    server->set_service_backend(service_backend);
   }
   return true;
 }
 
-bool TunsafeServiceImpl::HandleNotify() {
-  thread_delegate_->DoWork();
-  return true;
+
+///////////////////////////////////////////////////////////////////////////////////////
+// TunsafeServiceBackend
+///////////////////////////////////////////////////////////////////////////////////////
+
+TunsafeServiceBackend::TunsafeServiceBackend(TunsafeServiceManager *manager) {
+  manager_ = manager;
+  historical_log_lines_count_ = historical_log_lines_pos_ = 0;
+  memset(historical_log_lines_, 0, sizeof(historical_log_lines_));
+  HANDLE event = manager_->pipe_manager_.notify_handle();
+  thread_delegate_ = CreateTunsafeBackendDelegateThreaded(this, [=] { SetEvent(event); });
+  backend_ = CreateNativeTunsafeBackend(thread_delegate_);
 }
 
-void TunsafeServiceImpl::HandleNewConnection() {
-  did_send_getstate_ = false;
-  did_authenticate_user_ = false;
-  last_line_sent_ = 0;
+TunsafeServiceBackend::~TunsafeServiceBackend() {
+  assert(pipe_servers_.empty());
+  delete backend_;
+  delete thread_delegate_;
 }
 
-void TunsafeServiceImpl::HandleDisconnect() {
-  want_graph_type_ = 0xffffffff;
-  backend_->RequestStats(false);
-  uint32 service_flags = RegReadInt(hkey_, "ServiceStartupFlags", 0);
-  if (!(service_flags & kStartupFlag_BackgroundService))
-    backend_->Stop();
+void TunsafeServiceBackend::OnGetStats(const WgProcessorStats &stats) {
+  for (TunsafeServiceServer *pipe_server : pipe_servers_)
+    if (pipe_server->want_stats())
+      pipe_server->WritePacket(TS_SERVICE_MSG_STATS, (uint8*)&stats, sizeof(stats));
 }
 
-void TunsafeServiceImpl::OnGraphAvailable() {
-  if (want_graph_type_ != 0xffffffff) {
-    LinearizedGraph *graph = backend_->GetGraph(want_graph_type_);
-    if (graph)
-      message_handler_.WritePacket(SERVICE_MSG_GRAPH, (uint8*)graph, graph->total_size);
-  }
-}
-
-void TunsafeServiceImpl::SendQueuedLogLines() {
-  assert(message_handler_.VerifyThread());
-  uint32 maxi = std::min<uint32>(historical_log_lines_count_, historical_log_lines_pos_ - last_line_sent_);
-  last_line_sent_ = historical_log_lines_pos_;
-  for (uint32 i = 0; i < maxi; i++) {
-    const char *s = historical_log_lines_[(historical_log_lines_pos_ - maxi + i) & (LOGLINE_COUNT - 1)];
-    if (s)
-      message_handler_.WritePacket(SERVICE_MSG_LOGLINE, (uint8*)s, strlen(s));
-  }
-}
-
-void TunsafeServiceImpl::OnClearLog() {
+void TunsafeServiceBackend::OnClearLog() {
   historical_log_lines_pos_ = 0;
   historical_log_lines_count_ = 0;
-  message_handler_.WritePacket(SERVICE_MSG_CLEARLOG, NULL, 0);
+  for (TunsafeServiceServer *pipe_server : pipe_servers_)
+    if (pipe_server->want_state_updates())
+      pipe_server->WritePacket(TS_SERVICE_MSG_CLEARLOG, NULL, 0);
 }
 
-void TunsafeServiceImpl::OnLogLine(const char **s) {
-  assert(message_handler_.VerifyThread());
+void TunsafeServiceBackend::OnLogLine(const char **s) {
+  assert(manager_->pipe_manager_.VerifyThread());
   char *ss = (char*)*s;
   *s = NULL;
   char *&x = historical_log_lines_[historical_log_lines_pos_++ & (LOGLINE_COUNT - 1)];
@@ -885,46 +521,321 @@ void TunsafeServiceImpl::OnLogLine(const char **s) {
   if (historical_log_lines_count_ < LOGLINE_COUNT)
     historical_log_lines_count_++;
   free(ss);
-  if (did_send_getstate_)
-    SendQueuedLogLines();
+
+  for (TunsafeServiceServer *pipe_server : pipe_servers_)
+    pipe_server->SendQueuedLogLines();
 }
 
-void TunsafeServiceImpl::OnGetStats(const WgProcessorStats &stats) {
-  message_handler_.WritePacket(SERVICE_MSG_STATS, (uint8*)&stats, sizeof(stats));
+void TunsafeServiceBackend::OnStateChanged() {
+  SendStateUpdate(NULL); // Send to all
 }
 
-void TunsafeServiceImpl::OnStateChanged() {
+void TunsafeServiceBackend::OnStatusCode(TunsafeBackend::StatusCode status) {
+  if (status == TunsafeBackend::kStatusConnected)
+    OnStateChanged(); // ensure we know the ip first
+  uint32 v32 = (uint32)status;
+  for (TunsafeServiceServer *pipe_server : pipe_servers_)
+    if (pipe_server->want_state_updates())
+      pipe_server->WritePacket(TS_SERVICE_MSG_STATUS_CODE, (uint8*)&v32, 4);
+}
+
+void TunsafeServiceBackend::OnGraphAvailable() {
+  for (TunsafeServiceServer *pipe_server : pipe_servers_)
+    pipe_server->OnGraphAvailable();
+}
+
+void TunsafeServiceBackend::OnConfigurationProtocolReply(uint32 ident, const std::string &&reply) {
+  for (TunsafeServiceServer *pipe_server : pipe_servers_)
+    if (pipe_server->unique_id() == ident)
+      pipe_server->WritePacket(TS_SERVICE_REQ_TEXT_PROTOCOL_REPLY, (uint8*)reply.data(), reply.size());
+}
+
+void TunsafeServiceBackend::Start(const char *filename) {
+  g_allow_pre_post = RegReadInt(manager_->hkey_, "AllowPrePost", 0) != 0;
+  current_filename_ = filename;
+  backend_->Start(filename);
+}
+
+void TunsafeServiceBackend::RememberLastUsedConfigFile(const char *filename) {
+  if (manager_->main_backend() == this)
+    RegWriteStr(manager_->hkey_, "LastUsedConfigFile", filename);
+}
+
+void TunsafeServiceBackend::Stop() {
+  if (manager_->main_backend() == this)
+    RegWriteStr(manager_->hkey_, "LastUsedConfigFile", "");
+
+  backend_->Stop();
+  OnStateChanged();
+}
+
+void TunsafeServiceBackend::UpdateRequestStats() {
+  bool want = false;
+  for (auto it = pipe_servers_.begin(); it != pipe_servers_.end(); ++it) {
+    if ((*it)->want_stats()) {
+      want = true;
+      break;
+    }
+  }
+  backend_->RequestStats(want);
+}
+
+void TunsafeServiceBackend::HandleNotify() {
+  thread_delegate_->DoWork();
+}
+
+void TunsafeServiceBackend::SendStateUpdate(TunsafeServiceServer *filter) {
+  if (pipe_servers_.empty())
+    return;
+
   uint8 *temp = new uint8[current_filename_.size() + 1 + sizeof(ServiceState)];
   bool is_activated;
 
   memset(temp, 0, sizeof(ServiceState));
-
   ServiceState *ss = (ServiceState *)temp;
   ss->is_started = backend_->is_started();
   ss->internet_block_state = backend_->GetInternetBlockState(&is_activated);
   ss->internet_block_state_active = is_activated;
   ss->ipv4_ip = backend_->GetIP();
   memcpy(ss->public_key, backend_->public_key(), 32);
-
   memcpy(temp + sizeof(ServiceState), current_filename_.c_str(), current_filename_.size() + 1);
-  message_handler_.WritePacket(SERVICE_MSG_STATE, temp, current_filename_.size() + 1 + sizeof(ServiceState));
+  for (TunsafeServiceServer *pipe_server : pipe_servers_) {
+    if (filter != NULL && pipe_server != filter)
+      continue;
+    if (pipe_server->want_state_updates())
+      pipe_server->WritePacket(TS_SERVICE_MSG_STATE, temp, current_filename_.size() + 1 + sizeof(ServiceState));
+  }
+
   delete[] temp;
 }
 
-void TunsafeServiceImpl::OnStatusCode(TunsafeBackend::StatusCode status) {
-  if (status == TunsafeBackend::kStatusConnected)
-    OnStateChanged(); // ensure we know the ip first
-  uint32 v32 = (uint32)status;
-  message_handler_.WritePacket(SERVICE_MSG_STATUS_CODE, (uint8*)&v32, 4);
+void TunsafeServiceBackend::RemovePipeServer(TunsafeServiceServer *pipe_server) {
+  auto it = std::find(pipe_servers_.begin(), pipe_servers_.end(), pipe_server);
+  if (it != pipe_servers_.end())
+    pipe_servers_.erase(it);
+
+  UpdateRequestStats();
+
+  // Stop the main backend, or destroy a disconnetced backend, when the last client disconnects.
+  if (pipe_servers_.empty()) {
+    if (this == manager_->main_backend_) {
+      uint32 service_flags = RegReadInt(manager_->hkey_, "ServiceStartupFlags", 0);
+      if (!(service_flags & kStartupFlag_BackgroundService))
+        backend_->Stop();
+    } else {
+      if (!backend_->is_started())
+        manager_->DestroyBackend(this);
+    }
+  }
 }
 
-void TunsafeServiceImpl::OnStop() {
-  message_handler_.StopThread();
-  backend_->Stop();
+void TunsafeServiceBackend::AddPipeServer(TunsafeServiceServer *pipe_server) {
+  pipe_servers_.push_back(pipe_server);
 }
 
-void TunsafeServiceImpl::OnShutdown() {
+///////////////////////////////////////////////////////////////////////////////////////
+// TunsafeServiceServer
+///////////////////////////////////////////////////////////////////////////////////////
 
+TunsafeServiceServer::TunsafeServiceServer(PipeConnection *pipe, TunsafeServiceBackend *backend, uint32 unique_id) {
+  unique_id_ = unique_id;
+  connection_ = pipe;
+  service_backend_ = backend;
+  last_line_sent_ = 0;
+  want_state_updates_ = false;
+  did_authenticate_user_ = false;
+  want_stats_ = false;
+  want_graph_type_ = 0xffffffff;
+}
+
+TunsafeServiceServer::~TunsafeServiceServer() {
+}
+
+void TunsafeServiceServer::WritePacket(int type, const uint8 *data, size_t data_size) {
+  connection_->WritePacket(type, data, data_size);
+}
+
+struct ServiceLoginMessage {
+  uint64 version;
+  char interfac[kTsMaxDevnameSize];
+  bool want_state_updates;
+  bool want_create_interface;
+};
+
+bool TunsafeServiceServer::HandleMessage(int type, uint8 *data, size_t size) {
+  if (!did_authenticate_user_) {
+    if (type != TS_SERVICE_REQ_LOGIN ||
+        size < sizeof(ServiceLoginMessage) || 
+        ((ServiceLoginMessage*)data)->version != TUNSAFE_SERVICE_PROTOCOL_VERSION) {
+      const char *s = "Versioning Problem: The TunSafe service is a different version than the UI.";
+      connection_->WritePacket(TS_SERVICE_MSG_ERROR_REPLY, (uint8*)s, strlen(s));
+      return false;
+    }
+    if (!AuthenticateUser()) {
+      const char *s = "Permission Problem: Your Windows account is different from the account\r\nthat installed the TunSafe Service. Please reinstall it.";
+      connection_->WritePacket(TS_SERVICE_MSG_ERROR_REPLY, (uint8*)s, strlen(s));
+      return false;
+    }
+  }
+
+  switch (type) {
+  case TS_SERVICE_REQ_START: {
+    if (size == 0 || data[size - 1] != 0)
+      return false;
+
+    for (size_t i = 0; i < size; i++) {
+      if (data[i] == '/')
+        data[i] = '\\';
+    }
+
+    char buf[MAX_PATH];
+    buf[0] = 0;
+
+    if (data[0]) {
+      if (!ExpandConfigPath((char*)data, buf, sizeof(buf)) || GetFileAttributesA(buf) == INVALID_FILE_ATTRIBUTES) {
+        char *s = str_cat_alloc("File '", (char*)data, "' not found");
+        connection_->WritePacket(TS_SERVICE_MSG_ERROR_REPLY, (uint8*)s, strlen(s));
+        free(s);
+        return false;
+      }
+      // Don't allow reading arbitrary files on disk
+      if (!EnsureValidConfigPath(buf)) {
+        GetConfigPath(buf, sizeof(buf));
+        char *s = str_cat_alloc("Permission Problem: The Config file is in an unsafe location.\r\n   Must be in: ", buf, "");
+        connection_->WritePacket(TS_SERVICE_MSG_ERROR_REPLY, (uint8*)s, strlen(s));
+        free(s);
+        return false;
+      }
+    }
+    service_backend_->Start(buf);
+    service_backend_->RememberLastUsedConfigFile(buf);
+
+    // Ensure we reply with something
+    if (!want_state_updates_) {
+      uint32 v32 = (uint32)service_backend_->backend_->status();
+      connection_->WritePacket(TS_SERVICE_MSG_STATUS_CODE, (uint8*)&v32, 4);
+    }
+    break;
+  }
+
+  case TS_SERVICE_REQ_STOP:
+    service_backend_->Stop();
+    if (!want_state_updates_) {
+      uint32 v32 = (uint32)service_backend_->backend_->status();
+      connection_->WritePacket(TS_SERVICE_MSG_STATUS_CODE, (uint8*)&v32, 4);
+    }
+    break;
+
+  case TS_SERVICE_REQ_LOGIN: {
+    if (((ServiceLoginMessage*)data)->interfac[kTsMaxDevnameSize - 1])
+      return false; // sanity check
+
+    if (((ServiceLoginMessage*)data)->interfac[0] != 0) {
+      if (!service_backend_->manager_->SwitchInterface(this, ((ServiceLoginMessage*)data)->interfac, ((ServiceLoginMessage*)data)->want_create_interface)) {
+        const char *s = ((ServiceLoginMessage*)data)->want_create_interface ? "Unable to add the interface" : "Interface is not started";
+        connection_->WritePacket(TS_SERVICE_MSG_ERROR_REPLY, (uint8*)s, strlen(s));
+        return false;
+      }
+    }
+    want_state_updates_ = ((ServiceLoginMessage*)data)->want_state_updates;
+    if (want_state_updates_) {
+      SendQueuedLogLines();
+      service_backend_->SendStateUpdate(this);
+      uint32 v32 = (uint32)service_backend_->backend_->status();
+      connection_->WritePacket(TS_SERVICE_MSG_STATUS_CODE, (uint8*)&v32, 4);
+    }
+
+    break;
+  }
+
+  // return a list of all running interfaces
+  case TS_SERVICE_REQ_GETINTERFACES: {
+    char *s = TunsafeBackend::GetAllGuid();
+    connection_->WritePacket(TS_SERVICE_REQ_GETINTERFACES_REPLY, (uint8*)s, s ? strlen(s) : 0);
+    free(s);
+    break;
+  }
+
+  case TS_SERVICE_REQ_GETSTATS:
+    if (size < 1) return false;
+    want_stats_ = (data[0] != 0);
+    service_backend_->UpdateRequestStats();
+    break;
+
+  case TS_SERVICE_REQ_SET_INTERNET_BLOCKSTATE:
+    if (size < 1)
+      return false;
+    service_backend_->backend_->SetInternetBlockState((InternetBlockState)data[0]);
+    service_backend_->OnStateChanged();
+    break;
+
+  case TS_SERVICE_REQ_RESETSTATS:
+    service_backend_->backend_->ResetStats();
+    break;
+
+  case TS_SERVICE_REQ_GET_GRAPH:
+    if (size < 4) return false;
+    want_graph_type_ = *(int*)data;
+    TunsafeServiceServer::OnGraphAvailable();
+    break;
+
+  case TS_SERVICE_REQ_SET_STARTUP_FLAGS:
+    if (size < 4)
+      return false;
+    RegSetValueEx(service_backend_->manager_->hkey_, "ServiceStartupFlags", NULL, REG_DWORD, (BYTE*)data, 4);
+    break;
+
+  case TS_SERVICE_REQ_TEXT_PROTOCOL:
+    if (!service_backend_->backend_->is_started())
+      service_backend_->Start("");
+    service_backend_->backend_->SendConfigurationProtocolPacket(unique_id_, std::string((char*)data, size));
+    break;
+
+  default:
+    return false;
+  }
+  return true;
+}
+
+void TunsafeServiceServer::HandleDisconnect() {
+  service_backend_->RemovePipeServer(this);
+  delete this;
+}
+
+void TunsafeServiceServer::OnGraphAvailable() {
+  if (want_graph_type_ != 0xffffffff) {
+    LinearizedGraph *graph = service_backend_->backend_->GetGraph(want_graph_type_);
+    if (graph)
+      connection_->WritePacket(TS_SERVICE_MSG_GRAPH, (uint8*)graph, graph->total_size);
+  }
+}
+
+void TunsafeServiceServer::SendQueuedLogLines() {
+  if (!want_state_updates_)
+    return;
+  assert(connection_->VerifyThread());
+  uint32 maxi = std::min<uint32>(service_backend_->historical_log_lines_count_, service_backend_->historical_log_lines_pos_ - last_line_sent_);
+  last_line_sent_ = service_backend_->historical_log_lines_pos_;
+  for (uint32 i = 0; i < maxi; i++) {
+    const char *s = service_backend_->historical_log_lines_[(service_backend_->historical_log_lines_pos_ - maxi + i) & (TunsafeServiceBackend::LOGLINE_COUNT - 1)];
+    if (s)
+      connection_->WritePacket(TS_SERVICE_MSG_LOGLINE, (uint8*)s, strlen(s));
+  }
+}
+
+bool TunsafeServiceServer::AuthenticateUser() {
+  if (!ImpersonateNamedPipeClient(connection_->pipe_handle()))
+    return false;
+  wchar_t *user = GetUsernameOfCurrentUser(true);
+  RevertToSelf();
+  if (!user)
+    return false;
+  wchar_t *valid_user = RegReadStrW(service_backend_->manager_->hkey_, L"AllowedUsername", L"");
+  bool rv = valid_user && wcscmp(user, valid_user) == 0;
+  did_authenticate_user_ = rv;
+  free(user);
+  free(valid_user);
+  return rv;
 }
 
 static void PushServiceLine(const char *s) {
@@ -937,13 +848,11 @@ static void PushServiceLine(const char *s) {
     snprintf(buf, sizeof(buf), "[%.2d:%.2d:%.2d] ", t.wHour, t.wMinute, t.wSecond);
     size_t tl = strlen(buf);
 
-    char *x = (char*) malloc(tl + l + 3);
+    char *x = (char*) malloc(tl + l + 1);
     memcpy(x, buf, tl);
     memcpy(x + tl, s, l);
-    x[l + tl] = '\r';
-    x[l + tl + 1] = '\n';
-    x[l + tl + 2] = '\0';
-    g_service->delegate()->OnLogLine((const char**)&x);
+    x[l + tl] = '\0';
+    g_service->main_backend()->delegate()->OnLogLine((const char**)&x);
     free(x);
   } else {
     size_t l = strlen(s);
@@ -965,14 +874,14 @@ static void PushServiceLine(const char *s) {
 }
 
 BOOL RunProcessAsTunsafeServiceProcess() {
-  g_service = new TunsafeServiceImpl;
+  g_service = new TunsafeServiceManager;
   g_logger = &PushServiceLine;
-  
-  //g_service->OnStart(NULL, 0);
 
-  //MessageBoxA(0, "Service running", "Service running", 0);
-  //return TRUE;
-//  while (true)Sleep(1000);
+#if SERVICE_DEBUGGING
+  g_service->OnStart(NULL, 0);
+  while (true)
+    Sleep(1000);
+#endif
 
   // Connects the main thread of a service process to the service control 
   // manager, which causes the thread to be the service control dispatcher 
@@ -980,42 +889,47 @@ BOOL RunProcessAsTunsafeServiceProcess() {
   // stopped. The process should simply terminate when the call returns.
   return StartServiceCtrlDispatcherW(serviceTable);
 }
-TunsafeServiceClient::TunsafeServiceClient(TunsafeBackend::Delegate *delegate) 
-    : message_handler_(PIPE_NAME, false, this) {
+
+
+///////////////////////////////////////////////////////////////////////////////////////
+// TunsafeServiceClient
+///////////////////////////////////////////////////////////////////////////////////////
+
+TunsafeServiceClient::TunsafeServiceClient(TunsafeBackend::Delegate *delegate)
+  : pipe_manager_(TUNSAFE_PIPE_NAME, false, this) {
   is_remote_ = true;
   got_state_from_control_ = false;
   delegate_ = delegate;
   cached_graph_ = 0;
   last_graph_type_ = 0xffffffff;
   memset(&service_state_, 0, sizeof(service_state_));
+  connection_ = pipe_manager_.GetClientConnection();
 }
 
 TunsafeServiceClient::~TunsafeServiceClient() {
-  message_handler_.StopThread();
+  pipe_manager_.StopThread();
 }
 
-bool TunsafeServiceClient::Initialize() {
-  // Wait for the service to start
-  last_graph_type_ = 0xffffffff;
-  return message_handler_.StartThread();
+bool TunsafeServiceClient::Configure() {
+  return pipe_manager_.StartThread();
 }
 
 void TunsafeServiceClient::Start(const char *config_file) {
-  message_handler_.WritePacket(SERVICE_REQ_START, (uint8*)config_file, strlen(config_file) + 1);
+  connection_->WritePacket(TS_SERVICE_REQ_START, (uint8*)config_file, strlen(config_file) + 1);
 }
 
 void TunsafeServiceClient::Stop() {
-  message_handler_.WritePacket(SERVICE_REQ_STOP, NULL, 0);
+  connection_->WritePacket(TS_SERVICE_REQ_STOP, NULL, 0);
 }
 
 void TunsafeServiceClient::RequestStats(bool enable) {
   want_stats_ = enable;
-  if (message_handler_.is_connected())
-    message_handler_.WritePacket(SERVICE_REQ_GETSTATS, &want_stats_, 1);
+  if (connection_->is_connected())
+    connection_->WritePacket(TS_SERVICE_REQ_GETSTATS, &want_stats_, 1);
 }
 
 void TunsafeServiceClient::ResetStats() {
-  message_handler_.WritePacket(SERVICE_REQ_RESETSTATS, NULL, 0);
+  connection_->WritePacket(TS_SERVICE_REQ_RESETSTATS, NULL, 0);
 }
 
 InternetBlockState TunsafeServiceClient::GetInternetBlockState(bool *is_activated) {
@@ -1026,17 +940,17 @@ InternetBlockState TunsafeServiceClient::GetInternetBlockState(bool *is_activate
 
 void TunsafeServiceClient::SetInternetBlockState(InternetBlockState s) {
   uint8 v = (uint8)s;
-  message_handler_.WritePacket(SERVICE_REQ_SET_INTERNET_BLOCKSTATE, &v, 1);
+  connection_->WritePacket(TS_SERVICE_REQ_SET_INTERNET_BLOCKSTATE, &v, 1);
 }
 
 void TunsafeServiceClient::SetServiceStartupFlags(uint32 flags) {
-  message_handler_.WritePacket(SERVICE_REQ_SET_STARTUP_FLAGS, (uint8*)&flags, 4);
+  connection_->WritePacket(TS_SERVICE_REQ_SET_STARTUP_FLAGS, (uint8*)&flags, 4);
 }
 
 LinearizedGraph *TunsafeServiceClient::GetGraph(int type) {
   if (type != last_graph_type_) {
     last_graph_type_ = type;
-    message_handler_.WritePacket(SERVICE_REQ_GET_GRAPH, (uint8*)&type, 4);
+    connection_->WritePacket(TS_SERVICE_REQ_GET_GRAPH, (uint8*)&type, 4);
   }
   mutex_.Acquire();
   LinearizedGraph *graph = cached_graph_;
@@ -1045,6 +959,8 @@ LinearizedGraph *TunsafeServiceClient::GetGraph(int type) {
   return new_graph;
 }
 
+void TunsafeServiceClient::SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) {
+}
 
 std::string TunsafeServiceClient::GetConfigFileName() {
   mutex_.Acquire();
@@ -1054,8 +970,8 @@ std::string TunsafeServiceClient::GetConfigFileName() {
 }
 
 bool TunsafeServiceClient::HandleMessage(int type, uint8 *data, size_t data_size) {
-  switch(type) {
-  case SERVICE_MSG_STATE:
+  switch (type) {
+  case TS_SERVICE_MSG_STATE:
     if (data_size <= sizeof(service_state_) || data[data_size - 1])
       return false;
     got_state_from_control_ = true;
@@ -1069,15 +985,18 @@ bool TunsafeServiceClient::HandleMessage(int type, uint8 *data, size_t data_size
     mutex_.Release();
     delegate_->OnStateChanged();
     return true;
-  case SERVICE_MSG_LOGLINE: {
+  case TS_SERVICE_MSG_LOGLINE: 
+  case TS_SERVICE_MSG_ERROR_REPLY: {
     if (data_size == 0)
       return false;
     char *s = my_strndup((char*)data, data_size);
-    delegate_->OnLogLine((const char **)&s);
-    free(s);
+    if (s) {
+      delegate_->OnLogLine((const char **)&s);
+      free(s);
+    }
     return true;
   }
-  case SERVICE_MSG_STATS: {
+  case TS_SERVICE_MSG_STATS: {
     WgProcessorStats stats;
     if (data_size != sizeof(WgProcessorStats))
       return false;
@@ -1085,25 +1004,24 @@ bool TunsafeServiceClient::HandleMessage(int type, uint8 *data, size_t data_size
     delegate_->OnGetStats(stats);
     return true;
   }
-  case SERVICE_MSG_CLEARLOG:
+  case TS_SERVICE_MSG_CLEARLOG:
     delegate_->OnClearLog();
     return true;
 
-  case SERVICE_MSG_STATUS_CODE:
+  case TS_SERVICE_MSG_STATUS_CODE:
     if (data_size < 4)
       return false;
     status_ = (StatusCode)*(uint32*)data;
     delegate_->OnStatusCode(status_);
     return true;
 
-  case SERVICE_MSG_GRAPH:
-    if (data_size < 4 || data_size != *(uint32*)data)
+  case TS_SERVICE_MSG_GRAPH:
+    if (data_size < sizeof(LinearizedGraph) || data_size != *(uint32*)data)
       return false;
-
     LinearizedGraph *graph = (LinearizedGraph*)memdup(data, data_size);
     mutex_.Acquire();
     std::swap(graph, cached_graph_);
-    mutex_.Release(); 
+    mutex_.Release();
     free(graph);
     delegate_->OnGraphAvailable();
     return true;
@@ -1112,15 +1030,18 @@ bool TunsafeServiceClient::HandleMessage(int type, uint8 *data, size_t data_size
   return false;
 }
 
-bool TunsafeServiceClient::HandleNotify() {
-  return true;
+void TunsafeServiceClient::HandleNotify() {
 }
 
-
-void TunsafeServiceClient::HandleNewConnection() {
-  message_handler_.WritePacket(SERVICE_REQ_LOGIN, (uint8*)&kTunsafeServiceProtocolVersion, 8);
+PipeConnection::Delegate *TunsafeServiceClient::HandleNewConnection(PipeConnection *connection) {
+  assert(connection == connection_);
+  ServiceLoginMessage msg = {0};
+  msg.want_state_updates = true;
+  msg.version = TUNSAFE_SERVICE_PROTOCOL_VERSION;
+  connection_->WritePacket(TS_SERVICE_REQ_LOGIN, (uint8*)&msg, sizeof(msg));
   if (want_stats_)
-    message_handler_.WritePacket(SERVICE_REQ_GETSTATS, &want_stats_, 1);
+    connection_->WritePacket(TS_SERVICE_REQ_GETSTATS, &want_stats_, 1);
+  return this;
 }
 
 void TunsafeServiceClient::HandleDisconnect() {
@@ -1129,16 +1050,19 @@ void TunsafeServiceClient::HandleDisconnect() {
 }
 
 void TunsafeServiceClient::Teardown() {
-  message_handler_.StopThread();
+  pipe_manager_.StopThread();
+}
+
+bool TunsafeServiceClient::SetTunAdapterName(const char *name) {
+  // override which tun adapter we want to start
+  return false;
 }
 
 TunsafeBackend *CreateTunsafeServiceClient(TunsafeBackend::Delegate *delegate) {
   TunsafeServiceClient *client = new TunsafeServiceClient(delegate);
-  if (client && !client->Initialize()) {
+  if (client && !client->Configure()) {
     delete client;
     client = NULL;
   }
   return client;
 }
-
-

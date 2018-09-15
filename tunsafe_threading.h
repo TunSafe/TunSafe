@@ -150,11 +150,13 @@ public:
   typedef void DoDeleteFunc(void *x);
   void Add(DoDeleteFunc *func, void *param);
 
-  void Initialize(uint32 num_threads);
+  void Configure(uint32 num_threads);
 
   void Checkpoint(uint32 thread_id);
 
   void MainCheckpoint();
+
+  bool enabled() const { return num_threads_ != 0; }
 
 private:
   struct Entry {

@@ -5,6 +5,8 @@
 #include "bit_ops.h"
 #include <string.h>
 #include <assert.h>
+#include <stdlib.h>
+#include "util.h"
 
 IpToPeerMap::IpToPeerMap() {
 
@@ -13,18 +15,22 @@ IpToPeerMap::IpToPeerMap() {
 IpToPeerMap::~IpToPeerMap() {
 }
 
-bool IpToPeerMap::InsertV4(uint32 ip, int cidr, void *peer) {
-  ipv4_.Insert(ip, cidr, peer);
-  return true;
+void *IpToPeerMap::InsertV4(uint32 ip, int cidr, void *peer) {
+  ipv4_.Insert(ip, cidr, &peer);
+  return peer;
 }
 
-bool IpToPeerMap::InsertV6(const void *addr, int cidr, void *peer) {
+void *IpToPeerMap::InsertV6(const void *addr, int cidr, void *peer) {
   Entry6 e;
+  for (auto it = ipv6_.begin(); it != ipv6_.end(); ++it) {
+    if (it->cidr_len == cidr && memcmp(it->ip, addr, 16) == 0)
+      return exch(it->peer, peer);
+  }
   e.cidr_len = cidr;
   e.peer = peer;
   memcpy(e.ip, addr, 16);
   ipv6_.push_back(e);
-  return true;
+  return NULL;
 }
 
 void *IpToPeerMap::LookupV4(uint32 ip) {
@@ -41,6 +47,19 @@ void *IpToPeerMap::LookupV6DefaultPeer() {
       return it->peer;
   }
   return NULL;
+}
+
+void IpToPeerMap::RemoveV4(uint32 ip, int cidr) {
+  ipv4_.Delete(ip, cidr);
+}
+
+void IpToPeerMap::RemoveV6(const void *addr, int cidr) {
+  for (auto it = ipv6_.begin(); it != ipv6_.end(); ++it) {
+    if (it->cidr_len == cidr && memcmp(it->ip, addr, 16) == 0) {
+      ipv6_.erase(it);
+      return;
+    }
+  }
 }
 
 static int CalculateIPv6CommonPrefix(const uint8 *a, const uint8 *b) {
@@ -60,20 +79,6 @@ void *IpToPeerMap::LookupV6(const void *addr) {
     }
   }
   return best_peer;
-}
-
-void IpToPeerMap::RemovePeer(void *peer) {
-  assert(0);
-  // todo: remove peer also from ipv4_
-  {
-    size_t n = ipv6_.size();
-    Entry6 *r = &ipv6_[0], *w = r;
-    for (size_t i = 0; i != n; i++, r++) {
-      if (r->peer != peer)
-        *w++ = *r;
-    }
-    ipv6_.resize(w - &ipv6_[0]);
-  }
 }
 
 #pragma warning (disable: 4200)  // warning C4200: nonstandard extension used: zero-sized array in struct/union
@@ -175,7 +180,7 @@ RoutingTrie32::~RoutingTrie32() {
 RoutingTrie32::Value RoutingTrie32::Lookup(uint32 ip) {
   uint32 key = ip;
   Node *n = root_, *pn = n, *ppn;
-  int cindex = 0;
+  uint32 cindex = 0;
   if (!n)
     return NULL;
   // Find the longest prefix match
@@ -232,7 +237,7 @@ backtrace:
         }
         // strip lsb of cindex and find child
         cindex &= cindex - 1;
-        assert(cindex < (1 << pn->bits));
+        assert(cindex < (1U << pn->bits));
         n = pn->child[cindex];
         if (!NODE_IS_NULL_OR_OLEAF(n))
           break;
@@ -246,7 +251,7 @@ backtrace:
   }
 }
 
-bool RoutingTrie32::InsertLeafInto(Node **nn, uint8 leaf_pos, Value value) {
+bool RoutingTrie32::InsertLeafInto(Node **nn, uint8 leaf_pos, Value *valuep) {
   // put higher cidr higher up
   Node *n = *nn;
   assert(IS_LEAF(n));
@@ -255,12 +260,12 @@ bool RoutingTrie32::InsertLeafInto(Node **nn, uint8 leaf_pos, Value value) {
     if (leaf_pos < n->pos)
       break;
     if (leaf_pos == n->pos) {
-      n->leaf_value = value;
+      std::swap(n->leaf_value, *valuep);
       return true;
     }
     nn = &n->leaf_next;
   } while ((n = *nn) != NULL);
-  Node *leaf = NewLeaf(key, leaf_pos, value);
+  Node *leaf = NewLeaf(key, leaf_pos, *valuep);
   if (leaf == NULL)
     return false;
   leaf->leaf_next = *nn;
@@ -283,14 +288,14 @@ void RoutingTrie32::PutChild(Node *pn, uint32 i, Node *n) {
   assert(pn->full_children < 0x80000000);
 }
 
-bool RoutingTrie32::Insert(uint32 ip, int cidr, Value value) {
+bool RoutingTrie32::Insert(uint32 ip, int cidr, Value *valuep) {
   uint32 key = ip;
   Node **nn = &root_, *n = root_, *pn = NULL, *leaf, *tn = NULL, *leaf_to_free = NULL;
   uint8 leaf_pos = 32 - cidr;
-
+  
   if (n == NULL) {
-    root_ = NewLeaf(key, leaf_pos, value);
-    return (root_ != NULL);
+    root_ = NewLeaf(key, leaf_pos, exch_null(*valuep));
+    return false;
   }
   assert(!NODE_IS_OLEAF(n));
 
@@ -316,7 +321,7 @@ force_add:
     if (IS_LEAF(n)) {
       if (key != n->key)
         goto force_add;
-      return InsertLeafInto(nn, leaf_pos, value);
+      return InsertLeafInto(nn, leaf_pos, valuep);
     }
     pn = n;
     nn = &n->child[index];
@@ -330,6 +335,7 @@ force_add:
       *nn = n;
     }
   }
+  Value value = *valuep;
   // Create either leaf or oleaf
   if (tn->pos == leaf_pos) {
     leaf = VALUE_TO_OLEAF(value);
@@ -338,8 +344,8 @@ force_add:
       FreeNode(tn);
     return false;
   }
-
   // -- Start making irreversible changes here
+  *valuep = NULL;
   if (leaf_to_free)
     FreeNode(leaf_to_free);
 

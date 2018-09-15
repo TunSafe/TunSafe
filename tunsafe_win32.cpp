@@ -107,22 +107,6 @@ static void SetUiVisibility(bool visible) {
   UpdateGraphReq();
 }
 
-static bool GetConfigFullName(const char *basename, char *fullname, size_t fullname_size) {
-  size_t len = strlen(basename);
-
-  if (FindFilenameComponent(basename)[0]) {
-    if (len >= fullname_size)
-      return false;
-    memcpy(fullname, basename, len + 1);
-    return true;
-  }
-  size_t clen = GetConfigPath(fullname, fullname_size);
-  if (clen == 0 || clen + len >= fullname_size)
-    return false;
-  memcpy(fullname + clen, basename, (len + 1) * sizeof(fullname[0]));
-  return true;
-}
-
 void StopTunsafeBackend(UpdateIconWhy why) {
   if (g_backend->is_started()) {
     g_backend->Stop();
@@ -154,6 +138,7 @@ void StartTunsafeBackend(UpdateIconWhy reason) {
   }
   g_notified_connected_server = false;
   g_is_connected_to_server = false;
+  memset(&g_processor_stats, 0, sizeof(g_processor_stats));
   g_backend->Start(g_current_filename);
   RegWriteInt(g_reg_key, "IsConnected", 1);
 }
@@ -189,12 +174,21 @@ public:
   }
 
   virtual void OnLogLine(const char **s) {
+    const char *line = *s;
+    size_t len = strlen(line);
+    char *tmp = (char*)alloca(len + 3);
+
+    tmp[len + 0] = '\r';
+    tmp[len + 1] = '\n';
+    tmp[len + 2] = 0;
+    memcpy(tmp, line, len);
+
     CHARRANGE cr;
     cr.cpMin = -1;
     cr.cpMax = -1;
     // hwnd = rich edit hwnd
     SendMessage(hwndEdit, EM_EXSETSEL, 0, (LPARAM)&cr);
-    SendMessage(hwndEdit, EM_REPLACESEL, 0, (LPARAM)*s);
+    SendMessage(hwndEdit, EM_REPLACESEL, 0, (LPARAM)tmp);
   }
 
   virtual void OnStateChanged() {
@@ -204,13 +198,13 @@ public:
 
       const char *filename = g_cmdline_filename;
       if (filename) {
-        if (GetConfigFullName(filename, fullname, sizeof(fullname)))
+        if (ExpandConfigPath(filename, fullname, sizeof(fullname)))
           SetCurrentConfigFilename(fullname);
       } else {
         std::string currconfig = g_backend->GetConfigFileName();
         if (currconfig.empty()) {
           char *conf = RegReadStr(g_reg_key, "ConfigFile", "TunSafe.conf");
-          if (GetConfigFullName(conf, fullname, sizeof(fullname)))
+          if (ExpandConfigPath(conf, fullname, sizeof(fullname)))
             SetCurrentConfigFilename(fullname);
           free(conf);
         } else {
@@ -233,10 +227,12 @@ public:
   }
 
   virtual void OnStatusCode(TunsafeBackend::StatusCode status) override {
+    if (status != g_status_code)
+      InvalidatePaintbox();
+
     g_status_code = status;
     if (TunsafeBackend::IsPermanentError(status)) {
       UpdateIcon(g_is_connected_to_server ? UIW_STOPPED_WORKING_FAIL : UIW_NONE);
-      InvalidatePaintbox();
       return;
     }
     bool is_connected = (status == TunsafeBackend::kStatusConnected);
@@ -254,12 +250,14 @@ public:
       if (is_connected > not_first && (g_startup_flags & kStartupFlag_BackgroundService))
         g_notified_connected_server = true;
       UpdateIcon(UIW_NONE);
-      InvalidatePaintbox();
     }
   }
 
   virtual void OnClearLog() override {
     SetWindowText(hwndEdit, "");
+  }
+
+  virtual void OnConfigurationProtocolReply(uint32 ident, const std::string &&reply) override {
   }
 };
 
@@ -411,7 +409,7 @@ public:
 
 ConfigMenuBuilder::ConfigMenuBuilder() 
     : nfiles_(0), depth_(0) {
-  if (!GetConfigFullName("", buf_, sizeof(buf_)))
+  if (!ExpandConfigPath("", buf_, sizeof(buf_)))
     bufpos_ = sizeof(buf_);
   else
     bufpos_ = strlen(buf_);
@@ -556,7 +554,7 @@ static void OpenEditor() {
 
 static void BrowseFiles() {
   char buf[MAX_PATH];
-  if (GetConfigFullName("", buf, ARRAYSIZE(buf))) {
+  if (ExpandConfigPath("", buf, ARRAYSIZE(buf))) {
     size_t l = strlen(buf);
     buf[l - 1] = 0;
     ShellExecuteFromExplorer(buf, NULL, NULL, "explore");
@@ -572,7 +570,7 @@ bool ImportFile(const char *s, bool silent = false) {
   bool rv = false;
   int filerv;
 
-  if (!*last || !GetConfigFullName(last, buf, ARRAYSIZE(buf)) || _stricmp(buf, s) == 0)
+  if (!*last || !ExpandConfigPath(last, buf, ARRAYSIZE(buf)) || _stricmp(buf, s) == 0)
     goto out;
 
   filedata = LoadFileSane(s, &filesize);
@@ -657,9 +655,8 @@ void BrowseFile(HWND wnd) {
 static const uint8 kCurve25519Basepoint[32] = {9};
 
 static void SetKeyBox(HWND wnd, int ctr, uint8 buf[32]) {
-  uint8 *privs = base64_encode(buf, 32, NULL);
-  SetDlgItemText(wnd, ctr, (char*)privs);
-  free(privs);
+  char base64[WG_PUBLIC_KEY_LEN_BASE64 + 1];
+  SetDlgItemText(wnd, ctr, base64_encode(buf, 32, base64, sizeof(base64), NULL));
 }
 
 static INT_PTR WINAPI KeyPairDlgProc(HWND hWnd, UINT message, WPARAM wParam,
@@ -1075,20 +1072,18 @@ void PushLine(const char *s) {
   snprintf(buf, sizeof(buf), "[%.2d:%.2d:%.2d] ", t.wHour, t.wMinute, t.wSecond);
   size_t tl = strlen(buf);
 
-  char *x = (char*)malloc(tl + l + 3);
+  char *x = (char*)malloc(tl + l + 1);
   if (!x) return;
   memcpy(x, buf, tl);
   memcpy(x + tl, s, l);
-  x[l + tl] = '\r';
-  x[l + tl + 1] = '\n';
-  x[l + tl + 2] = '\0';
+  x[l + tl] = '\0';
   g_backend_delegate->OnLogLine((const char**)&x);
   free(x);
 }
 
 void EnsureConfigDirCreated() {
   char fullname[1024];
-  if (GetConfigFullName("", fullname, sizeof(fullname)))
+  if (ExpandConfigPath("", fullname, sizeof(fullname)))
     CreateDirectory(fullname, NULL);
 }
 
@@ -1358,7 +1353,7 @@ static void DrawGraph(HDC dc, const RECT *rr, StatsCollector::TimeSeries **sourc
   for (size_t j = 0; j != num_source; j++) {
     const StatsCollector::TimeSeries *src = sources[j];
     for (size_t i = 0; i != src->size; i++)
-      mx = max(mx, src->data[i]);
+      mx = std::max(mx, src->data[i]);
   }
   int topval = (int)(mx + 0.5f);
   // round it appropriately
@@ -1432,11 +1427,13 @@ static void DrawInGraphBox(HDC hdc, int w, int h) {
     for (int i = 0; i < graph->num_charts; i++) {
       time_series_ptr[i] = &time_series[i];
       time_series[i].shift = 0;
-      time_series[i].size = *(uint32*)ptr;
+
+      uint32 size = *(uint32*)ptr;
+      time_series[i].size = size;
       time_series[i].data = (float*)(ptr + 4);
-      ptr += 4 + *(uint32*)ptr * 4;
-      if (ptr - (uint8*)graph > graph->total_size)
+      if ((ptr - (uint8*)graph) + 4 + (uint64)size * 4 > graph->total_size)
         break;
+      ptr += 4 + size * 4;
     }
     num_charts = graph->num_charts;
   }
@@ -1517,9 +1514,7 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
   case 0: {
     if (IsOnlyZeros(g_backend->public_key(), 32))
       return "";
-    char *str = (char*)base64_encode(g_backend->public_key(), 32, NULL);
-    snprintf(buffer, 256, "%s", str);
-    free(str);
+    base64_encode(g_backend->public_key(), 32, buffer, 256, NULL);
     return buffer;
   }
   case 1: {
@@ -1764,7 +1759,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 
   // Check if the app is already running.
   g_runonce_mutex = CreateMutexA(0, FALSE, "TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90");
-  if (GetLastError() == ERROR_ALREADY_EXISTS) {
+  if (GetLastError() == ERROR_ALREADY_EXISTS&&0) {
     HWND window = FindWindow("TunSafe-f19e092db01cbe0fb6aee132f8231e5b71c98f90", NULL);
     DWORD_PTR result;
     if (!window || !SendMessageTimeout(window, WM_USER + 10, 0, 0, SMTO_BLOCK, 3000, &result) || result != 31337) {

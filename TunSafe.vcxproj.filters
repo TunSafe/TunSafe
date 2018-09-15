@@ -89,6 +89,12 @@
     <ClInclude Include="util_win32.h">
       <Filter>Source Files\Win32</Filter>
     </ClInclude>
+    <ClInclude Include="service_pipe_win32.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
+    <ClInclude Include="service_win32_constants.h">
+      <Filter>Source Files\Win32</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -153,6 +159,9 @@
     </ClCompile>
     <ClCompile Include="ip_to_peer_map.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="service_pipe_win32.cpp">
+      <Filter>Source Files\Win32</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

@@ -57,10 +57,12 @@ Section "TunSafe Client" SecTunSafe
 		DetailPrint "Installing 64-bit version of TunSafe."
 		SetOutPath "$INSTDIR"
 		File "x64\TunSafe.exe"
+		File "x64\ts.exe"
 	${Else}
 		DetailPrint "Installing 32-bit version of TunSafe."
 		SetOutPath "$INSTDIR"
 		File "x86\TunSafe.exe"
+		File "x86\ts.exe"
 	${EndIf}
 	File "License.txt"
 	File "ChangeLog.txt"
@@ -205,6 +207,7 @@ Section "Uninstall"
 
 
 	Delete "$INSTDIR\TunSafe.exe"
+	Delete "$INSTDIR\ts.exe"
 	Delete "$INSTDIR\License.txt"
 	Delete "$INSTDIR\ChangeLog.txt"
 	Delete "$INSTDIR\Config\TunSafe.conf"

@@ -297,6 +297,23 @@ size_t GetConfigPath(char *path, size_t path_size) {
   return last + 7 - path;
 }
 
+bool ExpandConfigPath(const char *basename, char *fullname, size_t fullname_size) {
+  size_t len = strlen(basename);
+
+  if (FindFilenameComponent(basename)[0]) {
+    if (len >= fullname_size)
+      return false;
+    memcpy(fullname, basename, len + 1);
+    return true;
+  }
+  size_t clen = GetConfigPath(fullname, fullname_size);
+  if (clen == 0 || clen + len >= fullname_size)
+    return false;
+  memcpy(fullname + clen, basename, (len + 1) * sizeof(fullname[0]));
+  return true;
+}
+
+
 static bool ContainsDotDot(const char *path) {
   for (uint8 last = 0, cur; (cur = path[0]) != '\0'; last = cur, path++)
     if (cur == '.' && last == cur)
@@ -308,7 +325,7 @@ bool EnsureValidConfigPath(const char *path) {
   char buf[1024];
 
   size_t len = GetConfigPath(buf, sizeof(buf));
-  return (len != 0) && (strlen(path) > len && memcmp(path, buf, len) == 0 && !ContainsDotDot(path + len));
+  return (len != 0) && (strlen(path) > len && _strnicmp(path, buf, len) == 0 && !ContainsDotDot(path + len));
 }
 
 bool RunProcessAsAdminWithArgs(const char *args, bool wait_for_exit) {
@@ -375,4 +392,66 @@ RECT GetParentRect(HWND wnd) {
 RECT MakeRect(int l, int t, int r, int b) {
   RECT rr = { l, t, r, b };
   return rr;
+}
+
+// Retrieve the device path to the TAP adapter.
+
+#define kAdapterKeyName "SYSTEM\\CurrentControlSet\\Control\\Class\\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+#define kNetworkConnectionsKeyName "SYSTEM\\CurrentControlSet\\Control\\Network\\{4D36E972-E325-11CE-BFC1-08002BE10318}"
+#define kTapComponentId "tap0901"
+
+
+void GetTapAdapterInfo(std::vector<GuidAndDevName> *result) {
+  LONG err;
+  HKEY adapter_key, device_key, network_connections_key;
+  bool retval = false;
+  GuidAndDevName gn;
+
+  err = RegOpenKeyEx(HKEY_LOCAL_MACHINE, kAdapterKeyName, 0, KEY_READ, &adapter_key);
+  if (err != ERROR_SUCCESS) {
+    RERROR("GetTapAdapterName: RegOpenKeyEx failed: 0x%X", GetLastError());
+    return;
+  }
+  for (int i = 0; !retval; i++) {
+    char keyname[64 + sizeof(kAdapterKeyName) + 1 + 32 /* some margin */];
+    char value[64];
+    DWORD len = sizeof(value), type;
+    err = RegEnumKeyEx(adapter_key, i, value, &len, NULL, NULL, NULL, NULL);
+    if (err == ERROR_NO_MORE_ITEMS)
+      break;
+    if (err != ERROR_SUCCESS) {
+      RERROR("GetTapAdapterName: RegEnumKeyEx failed: 0x%X", GetLastError());
+      break;
+    }
+    snprintf(keyname, sizeof(keyname), "%s\\%s", kAdapterKeyName, value);
+    err = RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyname, 0, KEY_READ, &device_key);
+    if (err == ERROR_SUCCESS) {
+      len = sizeof(value);
+      err = RegQueryValueEx(device_key, "ComponentId", NULL, &type, (LPBYTE)value, &len);
+      if (err == ERROR_SUCCESS && type == REG_SZ && !memcmp(value, kTapComponentId, sizeof(kTapComponentId))) {
+        len = sizeof(gn.guid);
+        err = RegQueryValueEx(device_key, "NetCfgInstanceId", NULL, &type, (LPBYTE)gn.guid, &len);
+        if (err == ERROR_SUCCESS && type == REG_SZ) {
+          gn.guid[sizeof(gn.guid) - 1] = 0;
+          gn.name[0] = 0;
+
+          snprintf(keyname, sizeof(keyname), "%s\\%s\\Connection", kNetworkConnectionsKeyName, gn.guid);
+          err = RegOpenKeyEx(HKEY_LOCAL_MACHINE, keyname, 0, KEY_READ, &network_connections_key);
+          if (err == ERROR_SUCCESS) {
+            len = sizeof(gn.guid);
+            err = RegQueryValueEx(network_connections_key, "Name", NULL, &type, (LPBYTE)gn.name, &len);
+            if (err == ERROR_SUCCESS && type == REG_SZ) {
+              gn.name[sizeof(gn.guid) - 1] = 0;
+            } else {
+              gn.name[0] = 0;
+            }
+            RegCloseKey(network_connections_key);
+          }
+          result->push_back(gn);
+        }
+      }
+      RegCloseKey(device_key);
+    }
+  }
+  RegCloseKey(adapter_key);
 }

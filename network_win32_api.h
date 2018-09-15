@@ -5,7 +5,6 @@
 #include "stdafx.h"
 #include "tunsafe_types.h"
 #include "wireguard.h"
-
 #include <functional>
 
 struct StatsCollector {
@@ -72,6 +71,7 @@ public:
     virtual void OnClearLog() = 0;
     virtual void OnLogLine(const char **s) = 0;
     virtual void OnStatusCode(TunsafeBackend::StatusCode status) = 0;
+    virtual void OnConfigurationProtocolReply(uint32 ident, const std::string &&reply) = 0;
     // This function is needed for CreateTunsafeBackendDelegateThreaded,
     // It's expected to be called on the main thread and then all callbacks will arrive
     // on the right thread.
@@ -82,8 +82,15 @@ public:
   virtual ~TunsafeBackend();
 
   // Setup/teardown the connection to the local service (if any)
-  virtual bool Initialize() = 0;
+  virtual bool Configure() = 0;
   virtual void Teardown() = 0;
+
+  // Set the name of the tun adapter that we want to use.
+  // On Windows this is the guid of the adapter.
+  // After having called this, this tun name cannot be used by any other instances.
+  // Returns false if the name can't be exclusively reserved to this adapter.
+  virtual bool SetTunAdapterName(const char *name) = 0;
+
 
   virtual void Start(const char *config_file) = 0;
   virtual void Stop() = 0;
@@ -93,10 +100,9 @@ public:
   virtual InternetBlockState GetInternetBlockState(bool *is_activated) = 0;
   virtual void SetInternetBlockState(InternetBlockState s) = 0;
   virtual void SetServiceStartupFlags(uint32 flags) = 0;
-
   virtual std::string GetConfigFileName() = 0;
-
   virtual LinearizedGraph *GetGraph(int type) = 0;
+  virtual void SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) = 0;
 
   bool is_started() { return is_started_; }
   bool is_remote() { return is_remote_; }
@@ -104,6 +110,9 @@ public:
 
   StatusCode status() { return status_; }
   uint32 GetIP() { return ipv4_ip_; }
+
+  static TunsafeBackend *FindBackendByTunGuid(const char *guid);
+  static char *GetAllGuid();
 
 protected:
   bool is_started_;

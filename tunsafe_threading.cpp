@@ -10,10 +10,14 @@ MultithreadedDelayedDelete::MultithreadedDelayedDelete() {
 }
 
 MultithreadedDelayedDelete::~MultithreadedDelayedDelete() {
+  assert(curr_.size() == 0);
+  assert(next_.size() == 0);
+  assert(to_delete_.size() == 0);
   free(table_);
 }
 
-void MultithreadedDelayedDelete::Initialize(uint32 num_threads) {
+void MultithreadedDelayedDelete::Configure(uint32 num_threads) {
+  assert(table_ == NULL);
   num_threads_ = num_threads;
   table_ = (CheckpointData*)calloc(sizeof(CheckpointData), num_threads);
 }
