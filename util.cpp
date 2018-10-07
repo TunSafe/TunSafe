@@ -20,6 +20,7 @@
 #include <vector>
 #include <algorithm>
 #include "tunsafe_types.h"
+#include "tunsafe_endian.h"
 
 static const char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -410,3 +411,73 @@ bool ParseBase64Key(const char *s, uint8 key[32]) {
   return base64_decode((uint8*)s, strlen(s), key, &size) && size == 32;
 }
 
+
+#if defined(OS_WIN)
+uint64 OsGetMilliseconds() {
+  return GetTickCount64();
+}
+
+void OsGetTimestampTAI64N(uint8 dst[12]) {
+  SYSTEMTIME systime;
+  uint64 file_time_uint64 = 0;
+  GetSystemTime(&systime);
+  SystemTimeToFileTime(&systime, (FILETIME*)&file_time_uint64);
+  uint64 time_since_epoch_100ns = (file_time_uint64 - 116444736000000000);
+  uint64 secs_since_epoch = time_since_epoch_100ns / 10000000 + 0x400000000000000a;
+  uint32 nanos = (uint32)(time_since_epoch_100ns % 10000000) * 100;
+  WriteBE64(dst, secs_since_epoch);
+  WriteBE32(dst + 8, nanos);
+}
+
+void OsInterruptibleSleep(int millis) {
+  SleepEx(millis, TRUE);
+}
+
+#endif  // defined(OS_WIN)
+
+
+#if defined(OS_POSIX)
+
+#if defined(OS_MACOSX)
+static mach_timebase_info_data_t timebase = { 0, 0 };
+static uint64_t                  initclock;
+
+void InitOsxGetMilliseconds() {
+  if (mach_timebase_info(&timebase) != 0)
+    abort();
+  initclock = mach_absolute_time();
+
+  timebase.denom *= 1000000;
+}
+
+uint64 OsGetMilliseconds() {
+  uint64_t clock = mach_absolute_time() - initclock;
+  return clock * (uint64_t)timebase.numer / (uint64_t)timebase.denom;
+}
+
+#else  // defined(OS_MACOSX)
+uint64 OsGetMilliseconds() {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    //error
+    fprintf(stderr, "clock_gettime failed\n");
+    exit(1);
+  }
+  return (uint64)ts.tv_sec * 1000 + (ts.tv_nsec / 1000000);
+}
+#endif
+
+void OsGetTimestampTAI64N(uint8 dst[12]) {
+  struct timeval tv;
+  gettimeofday(&tv, NULL);
+  uint64 secs_since_epoch = tv.tv_sec + 0x400000000000000a;
+  uint32 nanos = tv.tv_usec * 1000;
+  WriteBE64(dst, secs_since_epoch);
+  WriteBE32(dst + 8, nanos);
+}
+
+void OsInterruptibleSleep(int millis) {
+  usleep((useconds_t)millis * 1000);
+ }
+
+#endif  // defined(OS_POSIX)

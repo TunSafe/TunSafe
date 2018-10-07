@@ -18,10 +18,6 @@
 
 #pragma warning (disable: 4200)
 
-uint64 OsGetMilliseconds();
-void OsGetTimestampTAI64N(uint8 dst[12]);
-void OsInterruptibleSleep(int millis);
-
 union IpAddr {
   sockaddr_in sin;
   sockaddr_in6 sin6;

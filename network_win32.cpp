@@ -60,26 +60,6 @@ static bool IsIpv6AddressSet(const void *p) {
   return (ReadLE64(p) | ReadLE64((char*)p + 8)) != 0;
 }
 
-void OsInterruptibleSleep(int millis) {
-  SleepEx(millis, TRUE);
-}
-
-uint64 OsGetMilliseconds() {
-  return GetTickCount64();
-}
-
-void OsGetTimestampTAI64N(uint8 dst[12]) {
-  SYSTEMTIME systime;
-  uint64 file_time_uint64 = 0;
-  GetSystemTime(&systime);
-  SystemTimeToFileTime(&systime, (FILETIME*)&file_time_uint64);
-  uint64 time_since_epoch_100ns = (file_time_uint64 - 116444736000000000);
-  uint64 secs_since_epoch = time_since_epoch_100ns / 10000000 + 0x400000000000000a;
-  uint32 nanos = (uint32)(time_since_epoch_100ns % 10000000) * 100;
-  WriteBE64(dst, secs_since_epoch);
-  WriteBE32(dst + 8, nanos);
-}
-
 extern "C"
 PSLIST_ENTRY __fastcall InterlockedPushListSList(
   IN PSLIST_HEADER ListHead,

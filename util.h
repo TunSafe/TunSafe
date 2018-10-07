@@ -42,3 +42,9 @@ bool ParseHexString(const char *text, void *data, size_t data_size);
 void PrintHexString(const void *data, size_t data_size, char *result);
 void SplitString(char *s, int separator, std::vector<char*> *components);
 bool ParseBase64Key(const char *s, uint8 key[32]);
+
+
+uint64 OsGetMilliseconds();
+void InitOsxGetMilliseconds();
+void OsInterruptibleSleep(int millis);
+void OsGetTimestampTAI64N(uint8 dst[12]);
