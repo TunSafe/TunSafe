@@ -96,7 +96,7 @@ void WireguardProcessor::SetHeaderObfuscation(const char *key) {
   dev_.SetHeaderObfuscation(key);
 }
 
-WgProcessorStats WireguardProcessor::GetStats() {
+const WgProcessorStats &WireguardProcessor::GetStats() {
   // todo: only supports one peer but i want this in the ui for now.
   stats_.endpoint.sin.sin_family = 0;
   WgPeer *peer = dev_.first_peer();

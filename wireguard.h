@@ -88,7 +88,7 @@ public:
 
   void SecondLoop();
 
-  WgProcessorStats GetStats();
+  const WgProcessorStats &GetStats();
   void ResetStats();
 
   bool Start();
