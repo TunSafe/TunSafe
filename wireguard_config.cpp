@@ -57,8 +57,6 @@ char *PrintWgCidrAddr(const WgCidrAddr &addr, char buf[kSizeOfAddress]) {
   return buf;
 }
 
-
-
 struct Addr {
   byte addr[4];
   uint8 cidr;
@@ -88,9 +86,147 @@ bool ParseCidrAddr(char *s, WgCidrAddr *out) {
   return false;
 }
 
+static Mutex g_dns_mutex;
+
+// This starts a background thread for running DNS resolving.
+class DnsResolverThread : private Thread::Runner {
+public:
+  DnsResolverThread();
+  ~DnsResolverThread();
+
+  // Resolve the hostname and store the result in |result|.
+  // The function will block until it's resolved. If the cancellation
+  // token or becomes signalled, the call will fail.
+  bool Resolve(const char *hostname, IpAddr *result, DnsResolverCanceller *token);
+
+private:
+  virtual void ThreadMain();
+  void StartThread();
+
+  struct Entry {
+    enum {
+      // Set when it's been posted to the job queue
+      POSTED = 0,
+      // Set when the thread has finished and original thread should delete
+      COMPLETE = 1,
+      // Set when the original thread has cancelled and worker thread should delete
+      CANCELLED = 2,
+    };
+
+    Entry() : hostname(NULL) {}
+    ~Entry() { free(hostname); }
+
+    char *hostname;
+    IpAddr *result;
+    Entry *next;
+    uint32 state;
+    ConditionVariable *condvar;
+  };
+  Entry *entry_;
+  Thread thread_;
+  bool thread_active_;
+};
+
+DnsResolverThread::DnsResolverThread() {
+  thread_active_ = false;
+  entry_ = NULL;
+}
+
+DnsResolverThread::~DnsResolverThread() {
+  assert(entry_ == NULL);
+  thread_.StopThread();
+}
+
+void DnsResolverCanceller::Cancel() {
+  g_dns_mutex.Acquire();
+  cancel_ = true;
+  condvar_.Wake();
+  g_dns_mutex.Release();
+}
+
+bool DnsResolverThread::Resolve(const char *hostname, IpAddr *result, DnsResolverCanceller *token) {
+  if (token->cancel_)
+    return false;
+
+  Entry *e = new Entry;
+  e->hostname = _strdup(hostname);
+  e->result = result;
+  e->next = NULL;
+  e->state = Entry::POSTED;
+  e->condvar = &token->condvar_;
+  result->sin.sin_family = 0;
+
+  // Push it to the queue and start thread
+  g_dns_mutex.Acquire();
+  Entry **p = &entry_;
+  while (*p) p = &(*p)->next;
+  *p = e;
+  if (!thread_active_)
+    StartThread();
+  // Wait for something to happen with it.
+  while (!token->cancel_ && e->state == Entry::POSTED)
+    token->condvar_.Wait(&g_dns_mutex);
+  if (e->state == Entry::COMPLETE) {
+    delete e;
+  } else {
+    e->state = Entry::CANCELLED;
+  }
+  g_dns_mutex.Release();
+  return result->sin.sin_family != 0;
+}
+
+void DnsResolverThread::StartThread() {
+  thread_.StopThread();
+  thread_active_ = true;
+  thread_.StartThread(this);
+}
+
+void DnsResolverThread::ThreadMain() {
+  Entry *e = NULL;
+  struct hostent *he = NULL;
+  for (;;) {
+    g_dns_mutex.Acquire();
+    if (e) {
+      if (e->state == Entry::CANCELLED) {
+        delete e;
+      } else {
+        if (he) {
+          e->result->sin.sin_family = AF_INET;
+          e->result->sin.sin_port = 0;
+          memcpy(&e->result->sin.sin_addr, he->h_addr_list[0], 4);
+        }
+        e->state = Entry::COMPLETE;
+        e->condvar->Wake();
+      }
+    }
+    if (!(e = entry_)) {
+      thread_active_ = false;
+      break;
+    }
+    entry_ = e->next;
+    g_dns_mutex.Release();
+    he = gethostbyname(e->hostname);
+  }
+  g_dns_mutex.Release();
+}
+
+static DnsResolverThread g_dnsresolver_thread;
+
+bool InterruptibleSleep(int delay, DnsResolverCanceller *token) {
+  g_dns_mutex.Acquire();
+  uint32 time_at_start = (uint32)OsGetMilliseconds();
+  while (delay > 0 && !token->cancel_) {
+    token->condvar_.WaitTimed(&g_dns_mutex, delay);
+    uint32 now = (uint32)OsGetMilliseconds();
+    delay -= (now - time_at_start);
+    time_at_start = now;
+  }
+  g_dns_mutex.Release();
+  return (delay <= 0);
+}
+
 DnsResolver::DnsResolver(DnsBlocker *dns_blocker) {
   dns_blocker_ = dns_blocker;
-  abort_flag_ = false;
 }
 
 DnsResolver::~DnsResolver() {
@@ -126,23 +262,17 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
 #endif  // defined(OS_WIN)
 
   for (;;) {
-    hostent *he = gethostbyname(hostname);
-    if (abort_flag_)
-      return false;
-
-    if (he) {
-      result->sin.sin_family = AF_INET;
-      result->sin.sin_port = 0;
-      memcpy(&result->sin.sin_addr, he->h_addr_list[0], 4);
+    if (g_dnsresolver_thread.Resolve(hostname, result, &token_)) {
       // add to cache
       cache_.emplace_back(hostname, *result);
       RINFO("Resolved %s to %s%s", hostname, PrintIpAddr(*result, buf), "");
       return true;
     }
+    if (token_.is_cancelled())
+      return false;
 
     RINFO("Unable to resolve %s. Trying again in %d second(s)", hostname, retry_delays[attempt]);
-    OsInterruptibleSleep(retry_delays[attempt] * 1000);
-    if (abort_flag_)
+    if (!InterruptibleSleep(retry_delays[attempt] * 1000, &token_))
       return false;
 
     if (attempt != ARRAY_SIZE(retry_delays) - 1)
@@ -150,7 +280,11 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
   }
 }
 
-bool ParseSockaddrInWithPort(char *s, IpAddr *sin, DnsResolver *resolver) {
+bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver) {
+  size_t len = strlen(si) + 1;
+  char *s = (char*)alloca(len);
+  memcpy(s, si, len);
+
   memset(sin, 0, sizeof(IpAddr));
   if (*s == '[') {
     char *end = strchr(s, ']');

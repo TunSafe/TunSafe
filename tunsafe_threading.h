@@ -23,6 +23,7 @@ private:
 };
 
 class Mutex {
+  friend class ConditionVariable;
 public:
 #if defined(_DEBUG)
   bool locked_;
@@ -44,6 +45,17 @@ public:
   }
 private:
   SRWLOCK lock_;
+};
+
+class ConditionVariable {
+public:
+  ConditionVariable() { InitializeConditionVariable(&condvar_); }
+  void Wait(Mutex *mutex) { SleepConditionVariableSRW(&condvar_, &mutex->lock_, INFINITE, 0); }
+  void WaitTimed(Mutex *mutex, int millis) { SleepConditionVariableSRW(&condvar_, &mutex->lock_, millis, 0); }
+  void Wake() { WakeConditionVariable(&condvar_); }
+
+private:
+  CONDITION_VARIABLE condvar_;
 };
 
 typedef uint32 ThreadId;
@@ -72,6 +84,7 @@ private:
 };
 
 class Mutex {
+  friend class ConditionVariable;
 public:
 #if defined(_DEBUG)
   bool locked_;
@@ -103,6 +116,17 @@ public:
 private:
   pthread_mutex_t lock_;
 };
+
+class ConditionVariable {
+public:
+  ConditionVariable() { pthread_cond_init(&condvar_, NULL); }
+  void Wait(Mutex *mutex) { pthread_cond_wait(&condvar_, &mutex->lock_); }
+  void WaitTimed(Mutex *mutex, int millis);
+  void Wake() { pthread_cond_signal(&condvar_); }
+private:
+  pthread_cond_t condvar_;
+};
+
 
 typedef pthread_t ThreadId;
 
@@ -139,6 +163,28 @@ public:
 private:
   Mutex *lock_;
 };
+
+class Thread {
+public:
+  class Runner {
+  public:
+    virtual void ThreadMain() = 0;
+  };
+  Thread();
+  ~Thread();
+  void StartThread(Runner *runner);
+  void StopThread();
+  void DetachThread();
+  bool is_started();
+
+private:
+#if defined(OS_WIN)
+  HANDLE thread_;
+#else  // defined(OS_WIN)
+  pthread_t thread_;
+#endif  // !defined(OS_WIN)
+};
+
 
 // This class deletes objects delayed. All participating threads will call a function,
 // and then once all threads did, all registered objects will get deleted.

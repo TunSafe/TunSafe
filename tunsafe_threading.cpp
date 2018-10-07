@@ -3,6 +3,110 @@
 #include "stdafx.h"
 #include "tunsafe_threading.h"
 #include <stdlib.h>
+#include <assert.h>
+
+#if defined(OS_POSIX)
+Thread::Thread() {
+  thread_ = 0;
+}
+
+Thread::~Thread() {
+  assert(thread_ == 0);
+}
+
+static void *ThreadMainStatic(void *x) {
+  Thread::Runner *t = (Thread::Runner*)x;
+  t->ThreadMain();
+  return 0;
+}
+
+void Thread::StartThread(Runner *runner) {
+  assert(thread_ == 0);
+  if (pthread_create(&thread_, NULL, &ThreadMainStatic, runner) != 0)
+    tunsafe_die("pthread_create failed");
+}
+
+void Thread::StopThread() {
+  if (thread_) {
+    void *x;
+    pthread_join(thread_, &x);
+    thread_ = 0;
+  }
+}
+
+void Thread::DetachThread() {
+  if (thread_) {
+    pthread_detach(thread_);
+    thread_ = 0;
+  }
+}
+
+bool Thread::is_started() {
+  return thread_ != 0;
+}
+
+void ConditionVariable::WaitTimed(Mutex *mutex, int millis) {
+#if !defined(OS_MACOSX)
+  struct timespec ts;
+  clock_gettime(CLOCK_REALTIME, &ts);
+
+  ts.tv_sec += (millis / 1000);
+  ts.tv_nsec += (millis % 1000) * 1000000;
+  if (ts.tv_nsec >= 1000000000) {
+    ts.tv_nsec -= 1000000000;
+    ts.tv_sec++;
+  }
+  pthread_cond_timedwait(&condvar_, &mutex->lock_, &ts);
+#else
+  struct timespec ts;
+  ts.tv_sec = millis / 1000;
+  ts.tv_nsec = (millis % 1000) * 1000000;
+
+  pthread_cond_timedwait_relative_np(&condvar_, &mutex->lock_, &ts);
+#endif
+}
+#endif  // defined(OS_POSIX)
+
+#if defined(OS_WIN)
+Thread::Thread() {
+  thread_ = 0;
+}
+
+Thread::~Thread() {
+  assert(thread_ == 0);
+}
+
+static DWORD WINAPI ThreadMainStatic(void *x) {
+  Thread::Runner *t = (Thread::Runner*)x;
+  t->ThreadMain();
+  return 0;
+}
+
+void Thread::StartThread(Runner *runner) {
+  assert(thread_ == 0);
+  DWORD thread_id;
+  thread_ = CreateThread(NULL, 0, &ThreadMainStatic, (LPVOID)runner, 0, &thread_id);
+}
+
+void Thread::StopThread() {
+  if (thread_) {
+    WaitForSingleObject(thread_, INFINITE);
+    CloseHandle(thread_);
+    thread_ = 0;
+  }
+}
+
+void Thread::DetachThread() {
+  if (thread_) {
+    CloseHandle(thread_);
+    thread_ = 0;
+  }
+}
+
+bool Thread::is_started() {
+  return thread_ != 0;
+}
+#endif
 
 MultithreadedDelayedDelete::MultithreadedDelayedDelete() {
   table_ = NULL;

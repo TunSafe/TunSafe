@@ -2088,7 +2088,7 @@ void TunsafeBackendWin32::Stop() {
 
 void TunsafeBackendWin32::Start(const char *config_file) {
   StopInner(true);
-  dns_resolver_.SetAbortFlag(false);
+  dns_resolver_.ResetCancel();
   is_started_ = true;
   memset(public_key_, 0, sizeof(public_key_));
   SetStatus(kStatusInitializing);
@@ -2107,7 +2107,7 @@ void TunsafeBackendWin32::PostExit(int exit_code) {
 void TunsafeBackendWin32::StopInner(bool is_restart) {
   if (worker_thread_) {
     ipv4_ip_ = 0;
-    dns_resolver_.SetAbortFlag(true);
+    dns_resolver_.Cancel();
     PostExit(is_restart ? MODE_RESTART : MODE_EXIT);
     WaitForSingleObject(worker_thread_, INFINITE);
     CloseHandle(worker_thread_);

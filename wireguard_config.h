@@ -4,9 +4,21 @@
 #define TINYVPN_TINYVPN_H_
 
 #include "netapi.h"
+#include "tunsafe_threading.h"
 
 class WireguardProcessor;
 class DnsBlocker;
+
+class DnsResolverCanceller {
+public:
+  DnsResolverCanceller() : cancel_(false) {}
+  void Cancel();
+  void Reset() { cancel_ = false; }
+  bool is_cancelled() { return cancel_; }
+public:
+  bool cancel_;
+  ConditionVariable condvar_;
+};
 
 class DnsResolver {
 public:
@@ -14,10 +26,10 @@ public:
   ~DnsResolver();
 
   bool Resolve(const char *hostname, IpAddr *result);
-
   void ClearCache();
 
-  void SetAbortFlag(bool v) { abort_flag_ = v; }
+  void Cancel() { token_.Cancel(); }
+  void ResetCancel() { token_.Reset(); }
 private:
   struct Entry {
     std::string name;
@@ -25,8 +37,8 @@ private:
     Entry(const std::string &name, const IpAddr &ip) : name(name), ip(ip) {}
   };
   std::vector<Entry> cache_;
-  bool abort_flag_;
   DnsBlocker *dns_blocker_;
+  DnsResolverCanceller token_;
 };
 
 
@@ -43,6 +55,8 @@ bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsR
 const char *print_ip_prefix(char buf[kSizeOfAddress], int family, const void *ip, int prefixlen);
 char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]);
 char *PrintWgCidrAddr(const WgCidrAddr &addr, char buf[kSizeOfAddress]);
+
 bool ParseCidrAddr(char *s, WgCidrAddr *out);
+bool ParseSockaddrInWithPort(const char *s, IpAddr *sin, DnsResolver *resolver);
 
 #endif  // TINYVPN_TINYVPN_H_
