@@ -50,4 +50,11 @@ uint64 siphash_u64_u32(const uint64 combined, const uint32 third, const siphash_
  */
 uint64 siphash(const void *data, size_t len, const siphash_key_t *key);
 
+uint64 siphash13_2u64(const uint64 first, const uint64 second, const siphash_key_t *key);
+uint64 siphash13_3u64(const uint64 first, const uint64 second, const uint64 third,
+                      const siphash_key_t *key);
+
+uint64 siphash13_4u64(const uint64 first, const uint64 second, const uint64 third,
+                      const uint64 fourth, const siphash_key_t *key);
+
 #endif  // TUNSAFE_CRYPTO_SIPHASH_H_

@@ -33,7 +33,7 @@
   v1 ^= key->key[1]; \
   v0 ^= key->key[0];
 
-#define POSTAMBLE \
+#define POSTAMBLE24 \
   v3 ^= b; \
   SIPROUND; \
   SIPROUND; \
@@ -44,6 +44,17 @@
   SIPROUND; \
   SIPROUND; \
   return (v0 ^ v1) ^ (v2 ^ v3);
+
+#define POSTAMBLE13 \
+  v3 ^= b; \
+  SIPROUND; \
+  v0 ^= b; \
+  v2 ^= 0xff; \
+  SIPROUND; \
+  SIPROUND; \
+  SIPROUND; \
+  return (v0 ^ v1) ^ (v2 ^ v3);
+
 
 uint64 siphash(const void *data, size_t len, const siphash_key_t *key) {
   const uint8 *end = (uint8*)data + len - (len % sizeof(uint64));
@@ -66,7 +77,7 @@ uint64 siphash(const void *data, size_t len, const siphash_key_t *key) {
   case 2: b |= ReadLE16(data); break;
   case 1: b |= end[0];
   }
-  POSTAMBLE
+  POSTAMBLE24
 }
 
 /**
@@ -81,7 +92,7 @@ uint64 siphash_1u64(const uint64 first, const siphash_key_t *key)
   SIPROUND;
   SIPROUND;
   v0 ^= first;
-  POSTAMBLE
+  POSTAMBLE24
 }
 
 /**
@@ -101,7 +112,7 @@ uint64 siphash_2u64(const uint64 first, const uint64 second, const siphash_key_t
   SIPROUND;
   SIPROUND;
   v0 ^= second;
-  POSTAMBLE
+  POSTAMBLE24
 }
 
 /**
@@ -127,7 +138,58 @@ uint64 siphash_3u64(const uint64 first, const uint64 second, const uint64 third,
   SIPROUND;
   SIPROUND;
   v0 ^= third;
-  POSTAMBLE
+  POSTAMBLE24
+}
+
+/**
+* siphash13_3u64 - compute 64-bit siphash13 PRF value of 3 uint64
+* @first: first uint64
+* @second: second uint64
+* @third: third uint64
+* @key: the siphash key
+*/
+uint64 siphash13_3u64(const uint64 first, const uint64 second, const uint64 third,
+                      const siphash_key_t *key) {
+  PREAMBLE(24)
+  v3 ^= first;
+  SIPROUND;
+  v0 ^= first;
+  v3 ^= second;
+  SIPROUND;
+  v0 ^= second;
+  v3 ^= third;
+  SIPROUND;
+  v0 ^= third;
+  POSTAMBLE13
+}
+
+uint64 siphash13_2u64(const uint64 first, const uint64 second, const siphash_key_t *key) {
+  PREAMBLE(24)
+  v3 ^= first;
+  SIPROUND;
+  v0 ^= first;
+  v3 ^= second;
+  SIPROUND;
+  v0 ^= second;
+  POSTAMBLE13
+}
+
+uint64 siphash13_4u64(const uint64 first, const uint64 second, const uint64 third, const uint64 fourth,
+                      const siphash_key_t *key) {
+  PREAMBLE(24)
+  v3 ^= first;
+  SIPROUND;
+  v0 ^= first;
+  v3 ^= second;
+  SIPROUND;
+  v0 ^= second;
+  v3 ^= third;
+  SIPROUND;
+  v0 ^= third;
+  v3 ^= fourth;
+  SIPROUND;
+  v0 ^= fourth;
+  POSTAMBLE13
 }
 
 /**
@@ -158,14 +220,14 @@ uint64 siphash_4u64(const uint64 first, const uint64 second, const uint64 third,
   SIPROUND;
   SIPROUND;
   v0 ^= forth;
-  POSTAMBLE
+  POSTAMBLE24
 }
 
 uint64 siphash_1u32(const uint32 first, const siphash_key_t *key)
 {
   PREAMBLE(4)
   b |= first;
-  POSTAMBLE
+  POSTAMBLE24
 }
 
 uint64 siphash_3u32(const uint32 first, const uint32 second, const uint32 third,
@@ -178,7 +240,7 @@ uint64 siphash_3u32(const uint32 first, const uint32 second, const uint32 third,
   SIPROUND;
   v0 ^= combined;
   b |= third;
-  POSTAMBLE
+  POSTAMBLE24
 }
 
 uint64 siphash_u64_u32(const uint64 combined, const uint32 third, const siphash_key_t *key) {
@@ -188,6 +250,6 @@ uint64 siphash_u64_u32(const uint64 combined, const uint32 third, const siphash_
   SIPROUND;
   v0 ^= combined;
   b |= third;
-  POSTAMBLE
+  POSTAMBLE24
 }
 

@@ -6,12 +6,18 @@
 #include "netapi.h"
 #include "ipzip2/ipzip2.h"
 #include "tunsafe_config.h"
+#include "tunsafe_endian.h"
 #include "tunsafe_threading.h"
 #include "ip_to_peer_map.h"
 #include <vector>
 #include <unordered_map>
 #include <atomic>
 #include <string.h>
+
+#if WITH_BYTELL_HASHMAP
+#include "third_party/flat_hash_map/bytell_hash_map.hpp"
+#endif  // WITH_BYTELL_HASHMAP
+
 // Threading macros that enable locks only in MT builds
 #if WITH_WG_THREADING
 #define WG_SCOPED_LOCK(name) ScopedLock scoped_lock(&name)
@@ -40,6 +46,13 @@
 #define WG_SCOPED_RWLOCK_EXCLUSIVE(name)
 #define WG_IF_LOCKS_ENABLED_ELSE(expr, def) (def)
 #endif  // WITH_WG_THREADING
+
+// bytell hash is faster but more untested
+#if WITH_BYTELL_HASHMAP
+#define WG_HASHTABLE_IMPL ska::bytell_hash_map
+#else
+#define WG_HASHTABLE_IMPL std::unordered_map
+#endif
 
 enum ProtocolTimeouts {
   COOKIE_SECRET_MAX_AGE_MS = 120000,
@@ -235,13 +248,23 @@ private:
 };
 
 struct WgAddrEntry {
-  // The id of the addr entry, so we can delete ourselves
-  uint64 addr_entry_id;
+  struct IpPort {
+    uint8 bytes[20];
 
-  // Ensure there's at least 1 minute between we allow registering
-  // a new key in this table. This means that each key will have
-  // a life time of at least 3 minutes.
-  uint64 time_of_last_insertion;
+    friend bool operator==(const IpPort &a, const IpPort &b) {
+      uint64 rv = Read64(a.bytes) ^ Read64(b.bytes);
+      rv |= Read64(a.bytes + 8) ^ Read64(b.bytes + 8);
+      rv |= Read32(a.bytes + 16) ^ Read32(b.bytes + 16);
+      return (rv == 0);
+    }
+  };
+
+  struct IpPortHasher {
+    size_t operator()(const IpPort &a) const;
+  };
+
+  // The id of the addr entry, so we can delete ourselves
+  IpPort addr_entry_id;
 
   // This entry gets erased when there's no longer any key pointing at it.
   uint8 ref_count;
@@ -249,13 +272,19 @@ struct WgAddrEntry {
   // Index of the next slot 0-2 where we'll insert the next key.
   uint8 next_slot;
 
+  // Ensure there's at least 1 minute between we allow registering
+  // a new key in this table. This means that each key will have
+  // a life time of at least 3 minutes.
+  uint64 time_of_last_insertion;
+
   // The three keys.
   WgKeypair *keys[3];
 
-  WgAddrEntry(uint64 addr_entry_id) : addr_entry_id(addr_entry_id), ref_count(0), next_slot(0) {
+  WgAddrEntry(const IpPort &addr_entry_id) 
+      : addr_entry_id(addr_entry_id), ref_count(0), next_slot(0), time_of_last_insertion(0) {
     keys[0] = keys[1] = keys[2] = NULL;
-    time_of_last_insertion = 0x123456789123456;
   }
+
 };
 
 struct ScramblerSiphashKeys {
@@ -271,10 +300,7 @@ union WgPublicKey {
 };
 
 struct WgPublicKeyHasher {
-  size_t operator()(const WgPublicKey&a) const {
-    uint64 rv = a.u64[0] ^ a.u64[1] ^ a.u64[2] ^ a.u64[3];
-    return (size_t)(rv ^ (rv >> 32));
-  }
+  size_t operator()(const WgPublicKey&a) const;
 };
 
 class WgDevice {
@@ -314,14 +340,12 @@ public:
   bool CheckCookieMac2(Packet *packet);
 
   void CreateCookieMessage(MessageHandshakeCookie *dst, Packet *packet, uint32 remote_key_id);
-  void UpdateKeypairAddrEntry_Locked(uint64 addr_id, WgKeypair *keypair);
   void SecondLoop(uint64 now);
 
   IpToPeerMap &ip_to_peer_map() { return ip_to_peer_map_; }
   WgPeer *first_peer() { return peers_; }
   const uint8 *public_key() const { return s_pub_; }
   WgRateLimit *rate_limiter() { return &rate_limiter_; }
-  std::unordered_map<uint64, WgAddrEntry*> &addr_entry_map() { return addr_entry_lookup_; }
   WgPacketCompressionVer01 *compression_header() { return &compression_header_; }
   bool is_private_key_initialized() { return is_private_key_initialized_; }
 
@@ -333,7 +357,9 @@ public:
 private:
   std::pair<WgPeer*, WgKeypair*> *LookupPeerInKeyIdLookup(uint32 key_id);
   WgKeypair *LookupKeypairByKeyId(uint32 key_id);
-  WgKeypair *LookupKeypairInAddrEntryMap(uint64 addr, uint32 slot);
+
+  void UpdateKeypairAddrEntry_Locked(const IpAddr &addr, WgKeypair *keypair);
+  WgKeypair *LookupKeypairInAddrEntryMap(const IpAddr &addr, uint32 slot);
   // Return the peer matching the |public_key| or NULL
   WgPeer *GetPeerFromPublicKey(const WgPublicKey &pubkey);
   // Create a cookie by inspecting the source address of the |packet|
@@ -357,20 +383,26 @@ private:
   // For hooking
   Delegate *delegate_;
 
+
+  // Keypair IDs are generated randomly by us so no point in wasting cycles on
+  // hashing the random value.
+  struct KeyIdHasher {
+    size_t operator()(uint32 v) const { return v;  }
+  };
+  
   // Lock that protects key_id_lookup_
   WG_DECLARE_RWLOCK(key_id_lookup_lock_);
   // Mapping from key-id to either an active keypair (if keypair is non-NULL),
   // or to a handshake.
-  std::unordered_map<uint32, std::pair<WgPeer*, WgKeypair*> > key_id_lookup_;
+  WG_HASHTABLE_IMPL<uint32, std::pair<WgPeer*, WgKeypair*>, KeyIdHasher> key_id_lookup_;
 
   // Mapping from IPV4 IP/PORT to WgPeer*, so we can find the peer when a key id is
   // not explicitly included.
-  std::unordered_map<uint64, WgAddrEntry*> addr_entry_lookup_;
+  WG_HASHTABLE_IMPL<WgAddrEntry::IpPort, WgAddrEntry*, WgAddrEntry::IpPortHasher> addr_entry_lookup_;
   WG_DECLARE_RWLOCK(addr_entry_lookup_lock_);
 
   // Mapping from peer id to peer. This may be accessed only from MT.
-  std::unordered_map<WgPublicKey, WgPeer*, WgPublicKeyHasher> peer_id_lookup_;
-
+  WG_HASHTABLE_IMPL<WgPublicKey, WgPeer*, WgPublicKeyHasher> peer_id_lookup_;
   // Queue of things scheduled to run on the main thread.
   WG_DECLARE_LOCK(main_thread_scheduled_lock_);
   WgPeer *main_thread_scheduled_, **main_thread_scheduled_last_;

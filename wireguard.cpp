@@ -766,9 +766,7 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
     data += 4, bytes_left -= 4;
     keypair = dev_.LookupKeypairByKeyId(key_id);
   } else {
-    // Lookup the packet source ip and port in the address mapping
-    uint64 addr_id = packet->addr.sin.sin_addr.s_addr | ((uint64)packet->addr.sin.sin_port << 32);
-    keypair = dev_.LookupKeypairInAddrEntryMap(addr_id, ((tag / WG_SHORT_HEADER_KEY_ID) & 3) - 1);
+    keypair = dev_.LookupKeypairInAddrEntryMap(packet->addr, ((tag & WG_SHORT_HEADER_KEY_ID_MASK) / WG_SHORT_HEADER_KEY_ID) - 1);
   }
 
   if (!keypair || !keypair->enabled_features[WG_FEATURE_ID_SHORT_HEADER])
@@ -854,10 +852,8 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
   // Periodically broadcast out the short key 
   if ((tag & WG_SHORT_HEADER_KEY_ID_MASK) == 0x00 && !keypair->did_attempt_remember_ip_port) {
     keypair->did_attempt_remember_ip_port = true;
-    if (keypair->enabled_features[WG_FEATURE_ID_SKIP_KEYID_IN]) {
-      uint64 addr_id = packet->addr.sin.sin_addr.s_addr | ((uint64)packet->addr.sin.sin_port << 32);
-      dev_.UpdateKeypairAddrEntry_Locked(addr_id, keypair);
-    }
+    if (keypair->enabled_features[WG_FEATURE_ID_SKIP_KEYID_IN])
+      dev_.UpdateKeypairAddrEntry_Locked(packet->addr, keypair);
   }
   // Ack header may also signal that we can omit the key id in packets from now on.
   if (tag & WG_SHORT_HEADER_ACK)

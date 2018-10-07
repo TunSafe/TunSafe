@@ -263,20 +263,36 @@ void WgDevice::EraseKeypairAddrEntry_Locked(WgKeypair *kp) {
   }
 }
 
-WgKeypair *WgDevice::LookupKeypairInAddrEntryMap(uint64 addr, uint32 slot) {
+static WgAddrEntry::IpPort ConvertIpAddrToAddrX(const IpAddr &src) {
+  WgAddrEntry::IpPort r;
+  if (src.sin.sin_family == AF_INET) {
+    Write64(r.bytes, src.sin.sin_addr.s_addr);
+    Write64(r.bytes + 8, 0);
+    Write32(r.bytes + 16, src.sin.sin_port);
+  } else {
+    memcpy(r.bytes, &src.sin6.sin6_addr, 16);
+    Write32(r.bytes + 16, (AF_INET6 << 16) + src.sin6.sin6_port);
+  }
+  return r;
+}
+
+WgKeypair *WgDevice::LookupKeypairInAddrEntryMap(const IpAddr &addr, uint32 slot) {
+  // Convert IpAddr to WgAddrEntry::IpPort suitable for use in hash.
+  WgAddrEntry::IpPort addr_x = ConvertIpAddrToAddrX(addr);
   WG_SCOPED_RWLOCK_SHARED(addr_entry_lookup_lock_);
-  auto it = addr_entry_lookup_.find(addr);
+  auto it = addr_entry_lookup_.find(addr_x);
   if (it == addr_entry_lookup_.end())
     return NULL;
   WgAddrEntry *addr_entry = it->second;
   return addr_entry->keys[slot];
 }
 
-void WgDevice::UpdateKeypairAddrEntry_Locked(uint64 addr_id, WgKeypair *keypair) {
+void WgDevice::UpdateKeypairAddrEntry_Locked(const IpAddr &addr, WgKeypair *keypair) {
   assert(keypair->peer->IsPeerLocked());
+  WgAddrEntry::IpPort addr_x = ConvertIpAddrToAddrX(addr);
   {
     WG_SCOPED_RWLOCK_SHARED(addr_entry_lookup_lock_);
-    if (keypair->addr_entry != NULL && keypair->addr_entry->addr_entry_id == addr_id) {
+    if (keypair->addr_entry != NULL && keypair->addr_entry->addr_entry_id == addr_x) {
       keypair->broadcast_short_key = 1;
       return;
     }
@@ -286,10 +302,10 @@ void WgDevice::UpdateKeypairAddrEntry_Locked(uint64 addr_id, WgKeypair *keypair)
   if (keypair->addr_entry != NULL)
     EraseKeypairAddrEntry_Locked(keypair);
 
-  WgAddrEntry **aep = &addr_entry_lookup_[addr_id], *ae;
+  WgAddrEntry **aep = &addr_entry_lookup_[addr_x], *ae;
 
   if ((ae = *aep) == NULL) {
-    *aep = ae = new WgAddrEntry(addr_id);
+    *aep = ae = new WgAddrEntry(addr_x);
   } else {
     // Ensure we don't insert new things in this addr entry too often.
     if (ae->time_of_last_insertion + 1000 * 60 > low_resolution_timestamp_)
@@ -1452,3 +1468,20 @@ bool WgKeypairDecryptPayload(uint8 *dst, size_t src_len,
     return memcmp_crypto(mac, dst + src_len, keypair->auth_tag_length) == 0;
   }
 }
+
+// A random siphash key that can be used for hashing so it gets harder to induce hash collisions.
+struct RandomSiphashKey {
+  RandomSiphashKey() { OsGetRandomBytes((uint8*)&key, sizeof(key)); }
+  siphash_key_t key;
+};
+static RandomSiphashKey random_siphash_key;
+
+size_t WgAddrEntry::IpPortHasher::operator()(const WgAddrEntry::IpPort &a) const {
+  uint32 xx = Read32(a.bytes + 16);
+  return siphash13_2u64(Read64(a.bytes) + xx, Read64(a.bytes + 8) + xx, &random_siphash_key.key);
+}
+
+size_t WgPublicKeyHasher::operator()(const WgPublicKey&a) const {
+  return siphash13_4u64(a.u64[0], a.u64[1], a.u64[2], a.u64[3], &random_siphash_key.key);
+}
+
