@@ -16,7 +16,7 @@
 #
 # June 2015
 #
-# ChaCha20 for ARMv8.
+# chacha20 for ARMv8.
 #
 # Performance in cycles per byte out of large buffer.
 #
@@ -40,7 +40,7 @@ $output=shift;
 
 $0 =~ m/(.*[\/\\])[^\/\\]+$/; $dir=$1;
 ( $xlate="${dir}arm-xlate.pl" and -f $xlate ) or
-( $xlate="${dir}../../perlasm/arm-xlate.pl" and -f $xlate) or
+( $xlate="${dir}../tools/arm-xlate.pl" and -f $xlate) or
 die "can't locate arm-xlate.pl";
 
 open OUT,"| \"$^X\" $xlate $flavour $output";
@@ -120,42 +120,21 @@ my ($a3,$b3,$c3,$d3)=map(($_&~3)+(($_+1)&3),($a2,$b2,$c2,$d2));
 }
 
 $code.=<<___;
-#include "arm_arch.h"
-
 .text
-
-.extern	OPENSSL_armcap_P
 
 .align	5
 .Lsigma:
 .quad	0x3320646e61707865,0x6b20657479622d32		// endian-neutral
 .Lone:
 .long	1,0,0,0
-.LOPENSSL_armcap_P:
-#ifdef	__ILP32__
-.long	OPENSSL_armcap_P-.
-#else
-.quad	OPENSSL_armcap_P-.
-#endif
-.asciz	"ChaCha20 for ARMv8, CRYPTOGAMS by <appro\@openssl.org>"
 
-.globl	ChaCha20_ctr32
-.type	ChaCha20_ctr32,%function
+.globl	chacha20_arm
+.globl	chacha20_neon
+
+.type	chacha20_arm,%function
 .align	5
-ChaCha20_ctr32:
+chacha20_arm:
 	cbz	$len,.Labort
-	adr	@x[0],.LOPENSSL_armcap_P
-	cmp	$len,#192
-	b.lo	.Lshort
-#ifdef	__ILP32__
-	ldrsw	@x[1],[@x[0]]
-#else
-	ldr	@x[1],[@x[0]]
-#endif
-	ldr	w17,[@x[1],@x[0]]
-	tst	w17,#ARMV7_NEON
-	b.ne	ChaCha20_neon
-
 .Lshort:
 	stp	x29,x30,[sp,#-96]!
 	add	x29,sp,#0
@@ -333,7 +312,7 @@ $code.=<<___;
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
 	ret
-.size	ChaCha20_ctr32,.-ChaCha20_ctr32
+.size	chacha20_arm,.-chacha20_arm
 ___
 
 {{{
@@ -374,9 +353,13 @@ my ($a,$b,$c,$d,$t)=@_;
 
 $code.=<<___;
 
-.type	ChaCha20_neon,%function
+.type	chacha20_neon,%function
 .align	5
-ChaCha20_neon:
+chacha20_neon:
+	cbz	x2,.Labort_neon
+	cmp	x2,#192
+	b.lo	.Lshort
+
 	stp	x29,x30,[sp,#-96]!
 	add	x29,sp,#0
 
@@ -684,8 +667,9 @@ $code.=<<___;
 	ldp	x25,x26,[x29,#64]
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
+.Labort_neon:
 	ret
-.size	ChaCha20_neon,.-ChaCha20_neon
+.size	chacha20_neon,.-chacha20_neon
 ___
 {
 my ($T0,$T1,$T2,$T3,$T4,$T5)=@K;
@@ -693,18 +677,6 @@ my ($A0,$B0,$C0,$D0,$A1,$B1,$C1,$D1,$A2,$B2,$C2,$D2,
     $A3,$B3,$C3,$D3,$A4,$B4,$C4,$D4,$A5,$B5,$C5,$D5) = map("v$_.4s",(0..23));
 
 $code.=<<___;
-.type	ChaCha20_512_neon,%function
-.align	5
-ChaCha20_512_neon:
-	stp	x29,x30,[sp,#-96]!
-	add	x29,sp,#0
-
-	adr	@x[0],.Lsigma
-	stp	x19,x20,[sp,#16]
-	stp	x21,x22,[sp,#32]
-	stp	x23,x24,[sp,#48]
-	stp	x25,x26,[sp,#64]
-	stp	x27,x28,[sp,#80]
 
 .L512_or_more_neon:
 	sub	sp,sp,#128+64
@@ -1115,7 +1087,7 @@ $code.=<<___;
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
 	ret
-.size	ChaCha20_512_neon,.-ChaCha20_512_neon
+.size	chacha20_512_neon,.-chacha20_512_neon
 ___
 }
 }}}

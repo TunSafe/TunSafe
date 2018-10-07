@@ -4,7 +4,7 @@
  * Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
  */
 
-//#include <linux/linkage.h>
+#define __ARM_ARCH__ 7
 
 .text
 #if defined(__thumb2__)

@@ -22,7 +22,7 @@
 #include "util.h"
 #include <atlbase.h>
 #include <algorithm>
-#include "crypto/curve25519-donna.h"
+#include "crypto/curve25519/curve25519-donna.h"
 #include "service_win32.h"
 #include "util_win32.h"
 
@@ -651,8 +651,6 @@ void BrowseFile(HWND wnd) {
   if (GetOpenFileName(&ofn))
     ImportFile(szFile);
 }
-
-static const uint8 kCurve25519Basepoint[32] = {9};
 
 static void SetKeyBox(HWND wnd, int ctr, uint8 buf[32]) {
   char base64[WG_PUBLIC_KEY_LEN_BASE64 + 1];

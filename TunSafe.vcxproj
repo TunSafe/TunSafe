@@ -54,7 +54,7 @@
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings">
-    <Import Project="crypto\nasm.props" />
+    <Import Project="crypto\tools\nasm.props" />
   </ImportGroup>
   <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
@@ -178,6 +178,12 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="bit_ops.h" />
+    <ClInclude Include="crypto\blake2s\blake2s-load-sse2.h" />
+    <ClInclude Include="crypto\blake2s\blake2s-load-sse41.h" />
+    <ClInclude Include="crypto\blake2s\blake2s-load-xop.h" />
+    <ClInclude Include="crypto\blake2s\blake2s-round.h" />
+    <ClInclude Include="crypto\blake2s\blake2s-sse-impl.h" />
+    <ClInclude Include="crypto\curve25519\curve25519-donna.h" />
     <ClInclude Include="ip_to_peer_map.h" />
     <ClInclude Include="service_pipe_win32.h" />
     <ClInclude Include="service_win32.h" />
@@ -186,9 +192,9 @@
     <ClInclude Include="tunsafe_config.h" />
     <ClInclude Include="tunsafe_cpu.h" />
     <ClInclude Include="crypto\aesgcm\aes.h" />
-    <ClInclude Include="crypto\blake2s.h" />
+    <ClInclude Include="crypto\blake2s\blake2s.h" />
     <ClInclude Include="crypto\chacha20poly1305.h" />
-    <ClInclude Include="crypto\siphash.h" />
+    <ClInclude Include="crypto\siphash\siphash.h" />
     <ClInclude Include="tunsafe_endian.h" />
     <ClInclude Include="ipzip2\ipzip2.h" />
     <ClInclude Include="netapi.h" />
@@ -212,8 +218,7 @@
     <ClCompile Include="service_win32.cpp" />
     <ClCompile Include="tunsafe_cpu.cpp" />
     <ClCompile Include="crypto\aesgcm\aesgcm.cpp" />
-    <ClCompile Include="crypto\blake2s_sse.cpp" />
-    <ClCompile Include="crypto\siphash.cpp" />
+    <ClCompile Include="crypto\siphash\siphash.cpp" />
     <ClCompile Include="ipzip2\ipzip2.cpp" />
     <ClCompile Include="network_win32_dnsblock.cpp" />
     <ClCompile Include="tunsafe_threading.cpp" />
@@ -221,7 +226,7 @@
     <ClCompile Include="network_win32.cpp" />
     <ClCompile Include="util_win32.cpp" />
     <ClCompile Include="wireguard.cpp" />
-    <ClCompile Include="crypto\blake2s.cpp">
+    <ClCompile Include="crypto\blake2s\blake2s.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
@@ -229,7 +234,7 @@
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="crypto\curve25519-donna.cpp">
+    <ClCompile Include="crypto\curve25519\curve25519-donna.cpp">
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
       <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">NotUsing</PrecompiledHeader>
@@ -255,34 +260,34 @@
     <Image Include="icons\neutral-icon.ico" />
   </ItemGroup>
   <ItemGroup>
-    <NASM Include="crypto\aesgcm\aesni_gcm_x64_nasm.asm">
+    <NASM Include="crypto\aesgcm\aesni_gcm-x64-win.asm">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </NASM>
-    <NASM Include="crypto\aesgcm\aesni_x64_nasm.asm">
+    <NASM Include="crypto\aesgcm\aesni-x64-win.asm">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </NASM>
-    <NASM Include="crypto\aesgcm\ghash_x64_nasm.asm">
+    <NASM Include="crypto\aesgcm\ghash-x64-win.asm">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </NASM>
-    <NASM Include="crypto\chacha20_x64.asm">
+    <NASM Include="crypto\chacha20\chacha20-x64-win.asm">
       <FileType>Document</FileType>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </NASM>
-    <NASM Include="crypto\curve25519_x64_nasm.asm">
+    <NASM Include="crypto\curve25519\curve25519-x64-win.asm">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </NASM>
-    <NASM Include="crypto\poly1305_x64_nasm.asm">
+    <NASM Include="crypto\poly1305\poly1305-x64-win.asm">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">true</ExcludedFromBuild>
     </NASM>
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
-    <Import Project="crypto\nasm.targets" />
+    <Import Project="crypto\tools\nasm.targets" />
   </ImportGroup>
 </Project>

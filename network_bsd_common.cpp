@@ -248,11 +248,6 @@ done:
 }
 #endif  // defined(OS_LINUX)
 
-
-void OsInterruptibleSleep(int millis) {
-  usleep((useconds_t)millis * 1000);
-}
-
 #if defined(OS_MACOSX)
 int open_tun(char *devname, size_t devname_size) {
   struct sockaddr_ctl sc;
@@ -788,14 +783,6 @@ public:
   WireguardProcessor *wg_processor_;
   bool is_connected_;
 };
-
-struct CommandLineOutput {
-  const char *filename_to_load;
-  const char *interface_name;
-  bool daemon;
-};
-
-int HandleCommandLine(int argc, char **argv, CommandLineOutput *output);
 
 int main(int argc, char **argv) {
   CommandLineOutput cmd = {0};

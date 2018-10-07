@@ -1,26 +1,23 @@
-/* SPDX-License-Identifier: OpenSSL OR (BSD-3-Clause OR GPL-2.0)
- *
- * Copyright (C) 2015-2018 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
- * Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
- */
-
-#include <linux/linkage.h>
-
 .text
+
 .align	5
-.Lsigma:
+Lsigma:
 .quad	0x3320646e61707865,0x6b20657479622d32		// endian-neutral
-.Lone:
+Lone:
 .long	1,0,0,0
 
+.globl	_chacha20_arm
+.globl	_chacha20_neon
+
+
 .align	5
-ENTRY(chacha20_arm)
-	cbz	x2,.Labort
-.Lshort:
+_chacha20_arm:
+	cbz	x2,Labort
+Lshort:
 	stp	x29,x30,[sp,#-96]!
 	add	x29,sp,#0
 
-	adr	x5,.Lsigma
+	adr	x5,Lsigma
 	stp	x19,x20,[sp,#16]
 	stp	x21,x22,[sp,#32]
 	stp	x23,x24,[sp,#48]
@@ -41,7 +38,7 @@ ENTRY(chacha20_arm)
 	ror	x30,x30,#32
 #endif
 
-.Loop_outer:
+Loop_outer:
 	mov	w5,w22			// unpack key block
 	lsr	x6,x22,#32
 	mov	w7,w23
@@ -61,7 +58,7 @@ ENTRY(chacha20_arm)
 
 	mov	x4,#10
 	subs	x2,x2,#64
-.Loop:
+Loop:
 	sub	x4,x4,#1
 	add	w5,w5,w9
 	add	w6,w6,w10
@@ -159,7 +156,7 @@ ENTRY(chacha20_arm)
 	ror	w11,w11,#25
 	ror	w12,w12,#25
 	ror	w9,w9,#25
-	cbnz	x4,.Loop
+	cbnz	x4,Loop
 
 	add	w5,w5,w22		// accumulate key block
 	add	x6,x6,x22,lsr#32
@@ -178,7 +175,7 @@ ENTRY(chacha20_arm)
 	add	w20,w20,w30
 	add	x21,x21,x30,lsr#32
 
-	b.lo	.Ltail
+	b.lo	Ltail
 
 	add	x5,x5,x6,lsl#32	// pack
 	add	x7,x7,x8,lsl#32
@@ -219,7 +216,7 @@ ENTRY(chacha20_arm)
 	stp	x17,x20,[x0,#48]
 	add	x0,x0,#64
 
-	b.hi	.Loop_outer
+	b.hi	Loop_outer
 
 	ldp	x19,x20,[x29,#16]
 	add	sp,sp,#64
@@ -228,13 +225,13 @@ ENTRY(chacha20_arm)
 	ldp	x25,x26,[x29,#64]
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
-.Labort:
+Labort:
 	ret
 
 .align	4
-.Ltail:
+Ltail:
 	add	x2,x2,#64
-.Less_than_64:
+Less_than_64:
 	sub	x0,x0,#1
 	add	x1,x1,x2
 	add	x0,x0,x2
@@ -264,13 +261,13 @@ ENTRY(chacha20_arm)
 	stp	x13,x15,[sp,#32]
 	stp	x17,x20,[sp,#48]
 
-.Loop_tail:
+Loop_tail:
 	ldrb	w10,[x1,x2]
 	ldrb	w11,[x4,x2]
 	add	x2,x2,#1
 	eor	w10,w10,w11
 	strb	w10,[x0,x2]
-	cbnz	x2,.Loop_tail
+	cbnz	x2,Loop_tail
 
 	stp	xzr,xzr,[sp,#0]
 	stp	xzr,xzr,[sp,#16]
@@ -285,25 +282,26 @@ ENTRY(chacha20_arm)
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
 	ret
-ENDPROC(chacha20_arm)
+
+
 
 .align	5
-ENTRY(chacha20_neon)
-	cbz	x2,.Labort_neon
+_chacha20_neon:
+	cbz	x2,Labort_neon
 	cmp	x2,#192
-	b.lo	.Lshort
+	b.lo	Lshort
 
 	stp	x29,x30,[sp,#-96]!
 	add	x29,sp,#0
 
-	adr	x5,.Lsigma
+	adr	x5,Lsigma
 	stp	x19,x20,[sp,#16]
 	stp	x21,x22,[sp,#32]
 	stp	x23,x24,[sp,#48]
 	stp	x25,x26,[sp,#64]
 	stp	x27,x28,[sp,#80]
 	cmp	x2,#512
-	b.hs	.L512_or_more_neon
+	b.hs	L512_or_more_neon
 
 	sub	sp,sp,#64
 
@@ -329,7 +327,7 @@ ENTRY(chacha20_neon)
 	add	v29.4s,v28.4s,v31.4s
 	shl	v31.4s,v31.4s,#2			// 1 -> 4
 
-.Loop_outer_neon:
+Loop_outer_neon:
 	mov	w5,w22			// unpack key block
 	lsr	x6,x22,#32
 	mov	v0.16b,v24.16b
@@ -361,7 +359,7 @@ ENTRY(chacha20_neon)
 
 	mov	x4,#10
 	subs	x2,x2,#256
-.Loop_neon:
+Loop_neon:
 	sub	x4,x4,#1
 	add	v0.4s,v0.4s,v1.4s
 	add	w5,w5,w9
@@ -567,7 +565,7 @@ ENTRY(chacha20_neon)
 	ext	v1.16b,v1.16b,v1.16b,#12
 	ext	v5.16b,v5.16b,v5.16b,#12
 	ext	v17.16b,v17.16b,v17.16b,#12
-	cbnz	x4,.Loop_neon
+	cbnz	x4,Loop_neon
 
 	add	w5,w5,w22		// accumulate key block
 	add	v0.4s,v0.4s,v24.4s
@@ -598,7 +596,7 @@ ENTRY(chacha20_neon)
 	add	x21,x21,x30,lsr#32
 	add	v17.4s,v17.4s,v25.4s
 
-	b.lo	.Ltail_neon
+	b.lo	Ltail_neon
 
 	add	x5,x5,x6,lsl#32	// pack
 	add	x7,x7,x8,lsl#32
@@ -663,7 +661,7 @@ ENTRY(chacha20_neon)
 	eor	v19.16b,v19.16b,v3.16b
 	st1	{v16.16b,v17.16b,v18.16b,v19.16b},[x0],#64
 
-	b.hi	.Loop_outer_neon
+	b.hi	Loop_outer_neon
 
 	ldp	x19,x20,[x29,#16]
 	add	sp,sp,#64
@@ -674,10 +672,10 @@ ENTRY(chacha20_neon)
 	ldp	x29,x30,[sp],#96
 	ret
 
-.Ltail_neon:
+Ltail_neon:
 	add	x2,x2,#256
 	cmp	x2,#64
-	b.lo	.Less_than_64
+	b.lo	Less_than_64
 
 	add	x5,x5,x6,lsl#32	// pack
 	add	x7,x7,x8,lsl#32
@@ -717,10 +715,10 @@ ENTRY(chacha20_neon)
 	stp	x13,x15,[x0,#32]
 	stp	x17,x20,[x0,#48]
 	add	x0,x0,#64
-	b.eq	.Ldone_neon
+	b.eq	Ldone_neon
 	sub	x2,x2,#64
 	cmp	x2,#64
-	b.lo	.Less_than_128
+	b.lo	Less_than_128
 
 	ld1	{v20.16b,v21.16b,v22.16b,v23.16b},[x1],#64
 	eor	v0.16b,v0.16b,v20.16b
@@ -728,10 +726,10 @@ ENTRY(chacha20_neon)
 	eor	v2.16b,v2.16b,v22.16b
 	eor	v3.16b,v3.16b,v23.16b
 	st1	{v0.16b,v1.16b,v2.16b,v3.16b},[x0],#64
-	b.eq	.Ldone_neon
+	b.eq	Ldone_neon
 	sub	x2,x2,#64
 	cmp	x2,#64
-	b.lo	.Less_than_192
+	b.lo	Less_than_192
 
 	ld1	{v20.16b,v21.16b,v22.16b,v23.16b},[x1],#64
 	eor	v4.16b,v4.16b,v20.16b
@@ -739,41 +737,41 @@ ENTRY(chacha20_neon)
 	eor	v6.16b,v6.16b,v22.16b
 	eor	v7.16b,v7.16b,v23.16b
 	st1	{v4.16b,v5.16b,v6.16b,v7.16b},[x0],#64
-	b.eq	.Ldone_neon
+	b.eq	Ldone_neon
 	sub	x2,x2,#64
 
 	st1	{v16.16b,v17.16b,v18.16b,v19.16b},[sp]
-	b	.Last_neon
+	b	Last_neon
 
-.Less_than_128:
+Less_than_128:
 	st1	{v0.16b,v1.16b,v2.16b,v3.16b},[sp]
-	b	.Last_neon
-.Less_than_192:
+	b	Last_neon
+Less_than_192:
 	st1	{v4.16b,v5.16b,v6.16b,v7.16b},[sp]
-	b	.Last_neon
+	b	Last_neon
 
 .align	4
-.Last_neon:
+Last_neon:
 	sub	x0,x0,#1
 	add	x1,x1,x2
 	add	x0,x0,x2
 	add	x4,sp,x2
 	neg	x2,x2
 
-.Loop_tail_neon:
+Loop_tail_neon:
 	ldrb	w10,[x1,x2]
 	ldrb	w11,[x4,x2]
 	add	x2,x2,#1
 	eor	w10,w10,w11
 	strb	w10,[x0,x2]
-	cbnz	x2,.Loop_tail_neon
+	cbnz	x2,Loop_tail_neon
 
 	stp	xzr,xzr,[sp,#0]
 	stp	xzr,xzr,[sp,#16]
 	stp	xzr,xzr,[sp,#32]
 	stp	xzr,xzr,[sp,#48]
 
-.Ldone_neon:
+Ldone_neon:
 	ldp	x19,x20,[x29,#16]
 	add	sp,sp,#64
 	ldp	x21,x22,[x29,#32]
@@ -781,9 +779,11 @@ ENTRY(chacha20_neon)
 	ldp	x25,x26,[x29,#64]
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
+Labort_neon:
 	ret
 
-.L512_or_more_neon:
+
+L512_or_more_neon:
 	sub	sp,sp,#128+64
 
 	ldp	x22,x23,[x5]		// load sigma
@@ -819,7 +819,7 @@ ENTRY(chacha20_neon)
 
 	sub	x2,x2,#512			// not typo
 
-.Loop_outer_512_neon:
+Loop_outer_512_neon:
 	mov	v0.16b,v24.16b
 	mov	v4.16b,v24.16b
 	mov	v8.16b,v24.16b
@@ -865,7 +865,7 @@ ENTRY(chacha20_neon)
 
 	mov	x4,#5
 	subs	x2,x2,#512
-.Loop_upper_neon:
+Loop_upper_neon:
 	sub	x4,x4,#1
 	add	v0.4s,v0.4s,v1.4s
 	add	w5,w5,w9
@@ -1275,7 +1275,7 @@ ENTRY(chacha20_neon)
 	ext	v13.16b,v13.16b,v13.16b,#12
 	ext	v17.16b,v17.16b,v17.16b,#12
 	ext	v21.16b,v21.16b,v21.16b,#12
-	cbnz	x4,.Loop_upper_neon
+	cbnz	x4,Loop_upper_neon
 
 	add	w5,w5,w22		// accumulate key block
 	add	x6,x6,x22,lsr#32
@@ -1350,7 +1350,7 @@ ENTRY(chacha20_neon)
 	lsr	x21,x30,#32
 
 	mov	x4,#5
-.Loop_lower_neon:
+Loop_lower_neon:
 	sub	x4,x4,#1
 	add	v0.4s,v0.4s,v1.4s
 	add	w5,w5,w9
@@ -1760,7 +1760,7 @@ ENTRY(chacha20_neon)
 	ext	v13.16b,v13.16b,v13.16b,#12
 	ext	v17.16b,v17.16b,v17.16b,#12
 	ext	v21.16b,v21.16b,v21.16b,#12
-	cbnz	x4,.Loop_lower_neon
+	cbnz	x4,Loop_lower_neon
 
 	add	w5,w5,w22		// accumulate key block
 	ldp	q24,q25,[sp,#0]
@@ -1896,7 +1896,7 @@ ENTRY(chacha20_neon)
 	add	v29.4s,v29.4s,v0.4s
 	add	v30.4s,v30.4s,v0.4s
 
-	b.hs	.Loop_outer_512_neon
+	b.hs	Loop_outer_512_neon
 
 	adds	x2,x2,#512
 	ushr	v0.4s,v31.4s,#2			// 4 -> 1
@@ -1910,14 +1910,14 @@ ENTRY(chacha20_neon)
 	stp	q24,q31,[sp,#32]
 	stp	q24,q31,[sp,#64]
 
-	b.eq	.Ldone_512_neon
+	b.eq	Ldone_512_neon
 
 	cmp	x2,#192
 	sub	v27.4s,v27.4s,v0.4s			// -= 1
 	sub	v28.4s,v28.4s,v0.4s
 	sub	v29.4s,v29.4s,v0.4s
 	add	sp,sp,#128
-	b.hs	.Loop_outer_neon
+	b.hs	Loop_outer_neon
 
 	eor	v25.16b,v25.16b,v25.16b
 	eor	v26.16b,v26.16b,v26.16b
@@ -1925,9 +1925,9 @@ ENTRY(chacha20_neon)
 	eor	v28.16b,v28.16b,v28.16b
 	eor	v29.16b,v29.16b,v29.16b
 	eor	v30.16b,v30.16b,v30.16b
-	b	.Loop_outer
+	b	Loop_outer
 
-.Ldone_512_neon:
+Ldone_512_neon:
 	ldp	x19,x20,[x29,#16]
 	add	sp,sp,#128+64
 	ldp	x21,x22,[x29,#32]
@@ -1935,6 +1935,5 @@ ENTRY(chacha20_neon)
 	ldp	x25,x26,[x29,#64]
 	ldp	x27,x28,[x29,#80]
 	ldp	x29,x30,[sp],#96
-.Labort_neon:
 	ret
-ENDPROC(chacha20_neon)
+

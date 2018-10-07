@@ -26,8 +26,6 @@ https://blake2.net.
 #define BLAKE2S_WITH_ASM 1
 #endif  // BLAKE2S_WITH_ASM
 
-void blake2s_compress_sse(blake2s_state *S, const uint8_t block[BLAKE2S_BLOCKBYTES]);
-
 #if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L)
 #if   defined(_MSC_VER)
 #define BLAKE2_INLINE __inline
@@ -245,6 +243,12 @@ static void blake2s_compress(blake2s_state *S, const uint8_t in[BLAKE2S_BLOCKBYT
 
 #undef G
 #undef ROUND
+
+
+#if defined(ARCH_CPU_X86_FAMILY)
+#include "blake2s-sse-impl.h"
+#endif
+
 
 static inline void blake2s_compress_impl(blake2s_state *S, const uint8_t block[BLAKE2S_BLOCKBYTES]) {
 #if defined(ARCH_CPU_X86_64) && BLAKE2S_WITH_ASM

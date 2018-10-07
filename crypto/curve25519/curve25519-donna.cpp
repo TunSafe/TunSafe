@@ -48,6 +48,7 @@
 
 #include <string.h>
 #include <stdint.h>
+#include "curve25519-donna.h"
 
 #ifdef _MSC_VER
 #define inline __inline
@@ -56,6 +57,8 @@
 typedef uint8_t u8;
 typedef int32_t s32;
 typedef int64_t limb;
+
+const uint8 kCurve25519Basepoint[32] = {9};
 
 /* Field element representation:
  *

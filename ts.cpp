@@ -1,7 +1,7 @@
 #include "stdafx.h"
 #include "tunsafe_types.h"
 #include "netapi.h"
-#include "crypto/curve25519-donna.h"
+#include "crypto/curve25519/curve25519-donna.h"
 #include "util.h"
 #include "wireguard_proto.h"
 #include <string.h>
@@ -34,8 +34,6 @@
 #define ANSI_FG_MAGENTA "\x1b[35m"
 #define ANSI_FG_CYAN "\x1b[36m"
 #define ANSI_FG_WHITE "\x1b[37m"
-
-static const uint8 kCurve25519Basepoint[32] = {9};
 
 #if defined(OS_WIN)
 #define EXENAME "ts"
@@ -757,12 +755,6 @@ static int HandleStopCommand(int argc, char **argv) {
 }
 #endif  // defined(OS_WIN)
 
-
-struct CommandLineOutput {
-  const char *filename_to_load;
-  const char *interface_name;
-  bool daemon;
-};
 
 // Returns -1 on invalid subcommand
 int HandleCommandLine(int argc, char **argv, CommandLineOutput *output) {

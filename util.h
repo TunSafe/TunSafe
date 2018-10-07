@@ -48,3 +48,10 @@ uint64 OsGetMilliseconds();
 void InitOsxGetMilliseconds();
 void OsInterruptibleSleep(int millis);
 void OsGetTimestampTAI64N(uint8 dst[12]);
+
+struct CommandLineOutput {
+  const char *filename_to_load;
+  const char *interface_name;
+  bool daemon;
+};
+int HandleCommandLine(int argc, char **argv, CommandLineOutput *output);

@@ -11,7 +11,7 @@
  */
 #include "stdafx.h"
 
-#include "crypto/siphash.h"
+#include "crypto/siphash/siphash.h"
 #include "tunsafe_endian.h"
 
 #define SIPROUND \

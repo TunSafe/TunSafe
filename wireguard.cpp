@@ -5,8 +5,8 @@
 #include "netapi.h"
 #include "wireguard_proto.h"
 #include "crypto/chacha20poly1305.h"
-#include "crypto/blake2s.h"
-#include "crypto/siphash.h"
+#include "crypto/blake2s/blake2s.h"
+#include "crypto/siphash/siphash.h"
 #include "tunsafe_endian.h"
 #include <algorithm>
 #include <assert.h>

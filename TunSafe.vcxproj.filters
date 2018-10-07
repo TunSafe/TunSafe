@@ -14,6 +14,15 @@
     <Filter Include="crypto\aesgcm">
       <UniqueIdentifier>{d31b1b9f-4a2e-42d4-a26c-7c3daa4ccbe3}</UniqueIdentifier>
     </Filter>
+    <Filter Include="crypto\blake2s">
+      <UniqueIdentifier>{45ab50f7-cde8-4d0b-9756-5bfa3b9a28db}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="crypto\curve25519">
+      <UniqueIdentifier>{6adfd763-0197-437b-b7f6-2ffdd1e8e508}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="crypto\chacha20poly1305">
+      <UniqueIdentifier>{1ca37c7b-e91e-4648-9584-7d0c73d8e416}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -41,12 +50,6 @@
     <ClInclude Include="network_win32_api.h">
       <Filter>Source Files\Win32</Filter>
     </ClInclude>
-    <ClInclude Include="crypto\chacha20poly1305.h">
-      <Filter>crypto</Filter>
-    </ClInclude>
-    <ClInclude Include="crypto\blake2s.h">
-      <Filter>crypto</Filter>
-    </ClInclude>
     <ClInclude Include="wireguard_config.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -55,9 +58,6 @@
     </ClInclude>
     <ClInclude Include="ipzip2\ipzip2.h">
       <Filter>Source Files</Filter>
-    </ClInclude>
-    <ClInclude Include="crypto\siphash.h">
-      <Filter>crypto</Filter>
     </ClInclude>
     <ClInclude Include="tunsafe_types.h">
       <Filter>Source Files</Filter>
@@ -95,6 +95,31 @@
     <ClInclude Include="service_win32_constants.h">
       <Filter>Source Files\Win32</Filter>
     </ClInclude>
+    <ClInclude Include="crypto\siphash\siphash.h" />
+    <ClInclude Include="crypto\blake2s\blake2s.h">
+      <Filter>crypto\blake2s</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\blake2s\blake2s-load-sse2.h">
+      <Filter>crypto\blake2s</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\blake2s\blake2s-load-sse41.h">
+      <Filter>crypto\blake2s</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\blake2s\blake2s-load-xop.h">
+      <Filter>crypto\blake2s</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\blake2s\blake2s-round.h">
+      <Filter>crypto\blake2s</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\blake2s\blake2s-sse-impl.h">
+      <Filter>crypto\blake2s</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\curve25519\curve25519-donna.h">
+      <Filter>crypto\curve25519</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\chacha20poly1305.h">
+      <Filter>crypto\chacha20poly1305</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -118,26 +143,11 @@
     <ClCompile Include="network_win32.cpp">
       <Filter>Source Files\Win32</Filter>
     </ClCompile>
-    <ClCompile Include="crypto\blake2s.cpp">
-      <Filter>crypto</Filter>
-    </ClCompile>
-    <ClCompile Include="crypto\blake2s_sse.cpp">
-      <Filter>crypto</Filter>
-    </ClCompile>
-    <ClCompile Include="crypto\chacha20poly1305.cpp">
-      <Filter>crypto</Filter>
-    </ClCompile>
-    <ClCompile Include="crypto\curve25519-donna.cpp">
-      <Filter>crypto</Filter>
-    </ClCompile>
     <ClCompile Include="wireguard_config.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="ipzip2\ipzip2.cpp">
       <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="crypto\siphash.cpp">
-      <Filter>crypto</Filter>
     </ClCompile>
     <ClCompile Include="crypto\aesgcm\aesgcm.cpp">
       <Filter>crypto\aesgcm</Filter>
@@ -163,6 +173,18 @@
     <ClCompile Include="service_pipe_win32.cpp">
       <Filter>Source Files\Win32</Filter>
     </ClCompile>
+    <ClCompile Include="crypto\siphash\siphash.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\blake2s\blake2s.cpp">
+      <Filter>crypto\blake2s</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\curve25519\curve25519-donna.cpp">
+      <Filter>crypto\curve25519</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\chacha20poly1305.cpp">
+      <Filter>crypto\chacha20poly1305</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="TunSafe.rc" />
@@ -174,23 +196,23 @@
     <Image Include="downarrow.bmp" />
   </ItemGroup>
   <ItemGroup>
-    <NASM Include="crypto\chacha20_x64.asm">
-      <Filter>crypto</Filter>
-    </NASM>
-    <NASM Include="crypto\curve25519_x64_nasm.asm">
-      <Filter>crypto</Filter>
-    </NASM>
-    <NASM Include="crypto\poly1305_x64_nasm.asm">
-      <Filter>crypto</Filter>
-    </NASM>
-    <NASM Include="crypto\aesgcm\aesni_gcm_x64_nasm.asm">
+    <NASM Include="crypto\aesgcm\aesni_gcm-x64-win.asm">
       <Filter>crypto\aesgcm</Filter>
     </NASM>
-    <NASM Include="crypto\aesgcm\aesni_x64_nasm.asm">
+    <NASM Include="crypto\aesgcm\aesni-x64-win.asm">
       <Filter>crypto\aesgcm</Filter>
     </NASM>
-    <NASM Include="crypto\aesgcm\ghash_x64_nasm.asm">
+    <NASM Include="crypto\aesgcm\ghash-x64-win.asm">
       <Filter>crypto\aesgcm</Filter>
+    </NASM>
+    <NASM Include="crypto\curve25519\curve25519-x64-win.asm">
+      <Filter>crypto\curve25519</Filter>
+    </NASM>
+    <NASM Include="crypto\chacha20\chacha20-x64-win.asm">
+      <Filter>crypto\chacha20poly1305</Filter>
+    </NASM>
+    <NASM Include="crypto\poly1305\poly1305-x64-win.asm">
+      <Filter>crypto\chacha20poly1305</Filter>
     </NASM>
   </ItemGroup>
 </Project>

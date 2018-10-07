@@ -1,20 +1,21 @@
-/* SPDX-License-Identifier: OpenSSL OR (BSD-3-Clause OR GPL-2.0)
- *
- * Copyright (C) 2015-2018 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
- * Copyright 2016 The OpenSSL Project Authors. All Rights Reserved.
- */
-
-#include <linux/linkage.h>
 .text
 
+// forward "declarations" are required for Apple
+.globl	_poly1305_blocks_arm
+.globl	_poly1305_emit_arm
+.globl	_poly1305_blocks_neon
+.globl	_poly1305_emit_neon
+
+.globl	_poly1305_init_arm
+
 .align	5
-ENTRY(poly1305_init_arm)
+_poly1305_init_arm:
 	cmp	x1,xzr
 	stp	xzr,xzr,[x0]		// zero hash value
 	stp	xzr,xzr,[x0,#16]	// [along with is_base2_26]
 
 	csel	x0,xzr,x0,eq
-	b.eq	.Lno_key
+	b.eq	Lno_key
 
 	ldp	x7,x8,[x1]		// load key
 	mov	x9,#0xfffffffc0fffffff
@@ -28,23 +29,24 @@ ENTRY(poly1305_init_arm)
 	and	x8,x8,x9		// &=0ffffffc0ffffffc
 	stp	x7,x8,[x0,#32]	// save key value
 
-.Lno_key:
+Lno_key:
 	ret
-ENDPROC(poly1305_init_arm)
+
+
 
 .align	5
-ENTRY(poly1305_blocks_arm)
+_poly1305_blocks_arm:
 	ands	x2,x2,#-16
-	b.eq	.Lno_data
+	b.eq	Lno_data
 
 	ldp	x4,x5,[x0]		// load hash value
 	ldp	x7,x8,[x0,#32]	// load key value
 	ldr	x6,[x0,#16]
 	add	x9,x8,x8,lsr#2	// s1 = r1 + (r1 >> 2)
-	b	.Loop
+	b	Loop
 
 .align	5
-.Loop:
+Loop:
 	ldp	x10,x11,[x1],#16	// load input
 	sub	x2,x2,#16
 #ifdef	__ARMEB__
@@ -86,17 +88,18 @@ ENTRY(poly1305_blocks_arm)
 	adcs	x5,x13,xzr
 	adc	x6,x6,xzr
 
-	cbnz	x2,.Loop
+	cbnz	x2,Loop
 
 	stp	x4,x5,[x0]		// store hash value
 	str	x6,[x0,#16]
 
-.Lno_data:
+Lno_data:
 	ret
-ENDPROC(poly1305_blocks_arm)
+
+
 
 .align	5
-ENTRY(poly1305_emit_arm)
+_poly1305_emit_arm:
 	ldp	x4,x5,[x0]		// load hash base 2^64
 	ldr	x6,[x0,#16]
 	ldp	x10,x11,[x2]	// load nonce
@@ -123,10 +126,10 @@ ENTRY(poly1305_emit_arm)
 	stp	x4,x5,[x1]		// write result
 
 	ret
-ENDPROC(poly1305_emit_arm)
+
 
 .align	5
-__poly1305_mult:
+poly1305_mult:
 	mul	x12,x4,x7		// h0*r0
 	umulh	x13,x4,x7
 
@@ -160,7 +163,10 @@ __poly1305_mult:
 
 	ret
 
-__poly1305_splat:
+
+
+.align	5
+poly1305_splat:
 	and	x12,x4,#0x03ffffff	// base 2^64 -> base 2^26
 	ubfx	x13,x4,#26,#26
 	extr	x14,x5,x4,#52
@@ -184,28 +190,30 @@ __poly1305_splat:
 
 	ret
 
+
+
 .align	5
-ENTRY(poly1305_blocks_neon)
+_poly1305_blocks_neon:
 	ldr	x17,[x0,#24]
 	cmp	x2,#128
-	b.hs	.Lblocks_neon
-	cbz	x17,poly1305_blocks_arm
+	b.hs	Lblocks_neon
+	cbz	x17,_poly1305_blocks_arm
 
-.Lblocks_neon:
+Lblocks_neon:
 	stp	x29,x30,[sp,#-80]!
 	add	x29,sp,#0
 
 	ands	x2,x2,#-16
-	b.eq	.Lno_data_neon
+	b.eq	Lno_data_neon
 
-	cbz	x17,.Lbase2_64_neon
+	cbz	x17,Lbase2_64_neon
 
 	ldp	w10,w11,[x0]		// load hash value base 2^26
 	ldp	w12,w13,[x0,#8]
 	ldr	w14,[x0,#16]
 
 	tst	x2,#31
-	b.eq	.Leven_neon
+	b.eq	Leven_neon
 
 	ldp	x7,x8,[x0,#32]	// load key value
 
@@ -237,10 +245,10 @@ ENTRY(poly1305_blocks_neon)
 	adcs	x5,x5,x13
 	adc	x6,x6,x3
 
-	bl	__poly1305_mult
+	bl	poly1305_mult
 	ldr	x30,[sp,#8]
 
-	cbz	x3,.Lstore_base2_64_neon
+	cbz	x3,Lstore_base2_64_neon
 
 	and	x10,x4,#0x03ffffff	// base 2^64 -> base 2^26
 	ubfx	x11,x4,#26,#26
@@ -249,28 +257,28 @@ ENTRY(poly1305_blocks_neon)
 	ubfx	x13,x5,#14,#26
 	extr	x14,x6,x5,#40
 
-	cbnz	x2,.Leven_neon
+	cbnz	x2,Leven_neon
 
 	stp	w10,w11,[x0]		// store hash value base 2^26
 	stp	w12,w13,[x0,#8]
 	str	w14,[x0,#16]
-	b	.Lno_data_neon
+	b	Lno_data_neon
 
 .align	4
-.Lstore_base2_64_neon:
+Lstore_base2_64_neon:
 	stp	x4,x5,[x0]		// store hash value base 2^64
 	stp	x6,xzr,[x0,#16]	// note that is_base2_26 is zeroed
-	b	.Lno_data_neon
+	b	Lno_data_neon
 
 .align	4
-.Lbase2_64_neon:
+Lbase2_64_neon:
 	ldp	x7,x8,[x0,#32]	// load key value
 
 	ldp	x4,x5,[x0]		// load hash value base 2^64
 	ldr	x6,[x0,#16]
 
 	tst	x2,#31
-	b.eq	.Linit_neon
+	b.eq	Linit_neon
 
 	ldp	x12,x13,[x1],#16	// load input
 	sub	x2,x2,#16
@@ -283,9 +291,9 @@ ENTRY(poly1305_blocks_neon)
 	adcs	x5,x5,x13
 	adc	x6,x6,x3
 
-	bl	__poly1305_mult
+	bl	poly1305_mult
 
-.Linit_neon:
+Linit_neon:
 	and	x10,x4,#0x03ffffff	// base 2^64 -> base 2^26
 	ubfx	x11,x4,#26,#26
 	extr	x12,x5,x4,#52
@@ -310,35 +318,35 @@ ENTRY(poly1305_blocks_neon)
 	mov	x5,x8
 	mov	x6,xzr
 	add	x0,x0,#48+12
-	bl	__poly1305_splat
+	bl	poly1305_splat
 
-	bl	__poly1305_mult		// r^2
+	bl	poly1305_mult		// r^2
 	sub	x0,x0,#4
-	bl	__poly1305_splat
+	bl	poly1305_splat
 
-	bl	__poly1305_mult		// r^3
+	bl	poly1305_mult		// r^3
 	sub	x0,x0,#4
-	bl	__poly1305_splat
+	bl	poly1305_splat
 
-	bl	__poly1305_mult		// r^4
+	bl	poly1305_mult		// r^4
 	sub	x0,x0,#4
-	bl	__poly1305_splat
+	bl	poly1305_splat
 	ldr	x30,[sp,#8]
 
 	add	x16,x1,#32
-	adr	x17,.Lzeros
+	adr	x17,Lzeros
 	subs	x2,x2,#64
 	csel	x16,x17,x16,lo
 
 	mov	x4,#1
 	str	x4,[x0,#-24]		// set is_base2_26
 	sub	x0,x0,#48		// restore original x0
-	b	.Ldo_neon
+	b	Ldo_neon
 
 .align	4
-.Leven_neon:
+Leven_neon:
 	add	x16,x1,#32
-	adr	x17,.Lzeros
+	adr	x17,Lzeros
 	subs	x2,x2,#64
 	csel	x16,x17,x16,lo
 
@@ -353,7 +361,7 @@ ENTRY(poly1305_blocks_neon)
 	fmov	d27,x13
 	fmov	d28,x14
 
-.Ldo_neon:
+Ldo_neon:
 	ldp	x8,x12,[x16],#16	// inp[2:3] (or zero)
 	ldp	x9,x13,[x16],#48
 
@@ -427,10 +435,10 @@ ENTRY(poly1305_blocks_neon)
 	fmov	d13,x12
 	ushr	v31.2d,v31.2d,#38
 
-	b.ls	.Lskip_loop
+	b.ls	Lskip_loop
 
 .align	4
-.Loop_neon:
+Loop_neon:
 	////////////////////////////////////////////////////////////////
 	// ((inp[0]*r^4+inp[2]*r^2+inp[4])*r^4+inp[6]*r^2
 	// ((inp[1]*r^4+inp[3]*r^2+inp[5])*r^3+inp[7]*r
@@ -616,9 +624,9 @@ ENTRY(poly1305_blocks_neon)
 	add	v25.2s,v25.2s,v29.2s		// h0 -> h1
 	add	v28.2s,v28.2s,v30.2s		// h3 -> h4
 
-	b.hi	.Loop_neon
+	b.hi	Loop_neon
 
-.Lskip_loop:
+Lskip_loop:
 	dup	v16.2d,v16.d[0]
 	add	v11.2s,v11.2s,v26.2s
 
@@ -626,7 +634,7 @@ ENTRY(poly1305_blocks_neon)
 	// multiply (inp[0:1]+hash) or inp[2:3] by r^2:r^1
 
 	adds	x2,x2,#32
-	b.ne	.Long_tail
+	b.ne	Long_tail
 
 	dup	v16.2d,v11.d[0]
 	add	v14.2s,v9.2s,v24.2s
@@ -634,7 +642,7 @@ ENTRY(poly1305_blocks_neon)
 	add	v15.2s,v10.2s,v25.2s
 	add	v18.2s,v13.2s,v28.2s
 
-.Long_tail:
+Long_tail:
 	dup	v14.2d,v14.d[0]
 	umull2	v19.2d,v16.4s,v6.4s
 	umull2	v22.2d,v16.4s,v1.4s
@@ -669,7 +677,7 @@ ENTRY(poly1305_blocks_neon)
 	umlal2	v20.2d,v18.4s,v4.4s
 	umlal2	v21.2d,v18.4s,v6.4s
 
-	b.eq	.Lshort_tail
+	b.eq	Lshort_tail
 
 	////////////////////////////////////////////////////////////////
 	// (hash+inp[0:1])*r^4:r^3 and accumulate
@@ -708,7 +716,7 @@ ENTRY(poly1305_blocks_neon)
 	umlal	v20.2d,v13.2s,v4.2s
 	umlal	v21.2d,v13.2s,v6.2s
 
-.Lshort_tail:
+Lshort_tail:
 	////////////////////////////////////////////////////////////////
 	// horizontal add
 
@@ -759,15 +767,16 @@ ENTRY(poly1305_blocks_neon)
 	st4	{v19.s,v20.s,v21.s,v22.s}[0],[x0],#16
 	st1	{v23.s}[0],[x0]
 
-.Lno_data_neon:
+Lno_data_neon:
 	ldr	x29,[sp],#80
 	ret
-ENDPROC(poly1305_blocks_neon)
+
+
 
 .align	5
-ENTRY(poly1305_emit_neon)
+_poly1305_emit_neon:
 	ldr	x17,[x0,#24]
-	cbz	x17,poly1305_emit_arm
+	cbz	x17,_poly1305_emit_arm
 
 	ldp	w10,w11,[x0]		// load hash value base 2^26
 	ldp	w12,w13,[x0,#8]
@@ -813,8 +822,8 @@ ENTRY(poly1305_emit_neon)
 	stp	x4,x5,[x1]		// write result
 
 	ret
-ENDPROC(poly1305_emit_neon)
+
 
 .align	5
-.Lzeros:
+Lzeros:
 .long	0,0,0,0,0,0,0,0

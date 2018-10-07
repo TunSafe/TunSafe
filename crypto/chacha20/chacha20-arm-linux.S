@@ -6,6 +6,8 @@
 
 /*#include <linux/linkage.h>*/
 
+#define __ARM_ARCH__ 7
+
 .text
 #if defined(__thumb2__) || defined(__clang__)
 .syntax	unified
