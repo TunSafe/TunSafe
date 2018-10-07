@@ -7,12 +7,9 @@ extern "C" {
 
 // To work with Unicode version of NSIS, please use TCHAR-type
 // functions for accessing the variables and the stack.
-
 unsigned char buffer[4096];
 
-// sk[4, 213, 116, 80, 117, 4, 70, 166, 244, 214, 234, 159, 197, 101, 182, 177, 106, 180, 68, 125, 51, 32, 159, 77, 27, 151, 233, 91, 109, 184, 147, 235]
-// pk[79, 236, 107, 197, 85, 239, 235, 109, 123, 181, 230, 115, 206, 112, 218, 80, 174, 167, 119, 187, 113, 153, 17, 115, 77, 100, 154, 84, 181, 194, 254, 99]
-static const unsigned char pk[32] = {79, 236, 107, 197, 85, 239, 235, 109, 123, 181, 230, 115, 206, 112, 218, 80, 174, 167, 119, 187, 113, 153, 17, 115, 77, 100, 154, 84, 181, 194, 254, 99};
+#include "../../../misc/config/installer_signing_key_pub.h"
 
 int CheckFile(char *file) {
   sha512_state ctx;

@@ -7,14 +7,10 @@ import base64
 import sys
 import zipfile
 import re
+import json
 
-MSBUILD_PATH = r"C:\Dev\VS2017\MSBuild\15.0\Bin\MSBuild.exe"
-NSIS_PATH = r'C:\Dev\NSIS\makeNSIS.EXE'
-
-
-SIGNTOOL_PATH = r'c:\Program Files (x86)\Windows Kits\10\bin\10.0.15063.0\x86\signtool.exe'
-SIGNTOOL_KEY_PATH = "" # path to key file
-SIGNTOOL_PASS = "" # password
+CONFIG = json.loads(open('../misc/config/build_py_conf.json', 'r').read())
+SIGNTOOL_PASS = str(win32crypt.CryptUnprotectData(base64.b64decode(CONFIG["SIGNTOOL_ENC_PASS"]), None, None, None, 0)[1].decode('utf-16-le'))
 
 def RmTree(path):
   try:
@@ -34,7 +30,7 @@ def CopyFile(src, dst):
 
 def SignExe(src):
   print ('Signing %s' % src)
-  cmd = r'""c:\Program Files (x86)\Windows Kits\10\bin\10.0.15063.0\x86\signtool.exe" sign /f "%s" /p %s /t http://timestamp.verisign.com/scripts/timstamp.dll "%s"' % (SIGNTOOL_KEY_PATH, SIGNTOOL_PASS, src)
+  cmd = r'""%s" sign /f "%s" /p %s /t http://timestamp.verisign.com/scripts/timstamp.dll "%s"' % (CONFIG["SIGNTOOL_PATH"], CONFIG["SIGNTOOL_KEY_PATH"], SIGNTOOL_PASS, src)
   #cmd = r'""c:\Program Files (x86)\Windows Kits\10\bin\10.0.15063.0\x86\signtool.exe" sign %s ' % (SIGNTOOL_KEY_PATH, )
   x = os.system(cmd)
   if x:
@@ -53,36 +49,45 @@ def GetVersion():
 
 command = sys.argv[1]
 
-BASE = r'D:\Code\TunSafe'
-
+BASE = os.getcwd()
 
 if command == 'build_tap':
-  Run(r'%s /V4 installer\tap\tap-windows6.nsi'  % NSIS_PATH)
+  Run(r'%s /V4 installer\tap\tap-windows6.nsi'  % CONFIG["NSIS_PATH"])
   SignExe(r'installer\tap\TunSafe-TAP-9.21.2.exe')
   sys.exit(0)
 
 if 1:
-  RmTree(BASE + r'\Win32\Release')
-  RmTree(BASE + r'\x64\Release')
-  Run('%s TunSafe.sln /t:Clean;Rebuild /p:Configuration=Release /p:Platform=x64' % MSBUILD_PATH)
-  Run('%s TunSafe.sln /t:Clean;Rebuild /p:Configuration=Release /p:Platform=Win32' % MSBUILD_PATH)
+  RmTree(BASE + r'\build')
+  Run('%s TunSafe.sln /t:Clean;Rebuild /p:Configuration=Release /m /p:Platform=x64' % CONFIG["MSBUILD_PATH"])
+  Run('%s TunSafe.sln /t:Clean;Rebuild /p:Configuration=Release /m /p:Platform=Win32' % CONFIG["MSBUILD_PATH"])
 
 if 1:
-  CopyFile(BASE + r'\Win32\Release\TunSafe.exe',
-           BASE + r'\installer\x86\TunSafe.exe')
-
+  try:
+    os.mkdir(BASE + r'\installer\x86')
+  except FileExistsError:
+    pass
+  CopyFile(BASE + r'\build\Win32_Release\TunSafe.exe', BASE + r'\installer\x86\TunSafe.exe')
+  CopyFile(BASE + r'\build\Win32_Release\ts.exe', BASE + r'\installer\x86\ts.exe')
   SignExe(BASE + r'\installer\x86\TunSafe.exe')
-  CopyFile(BASE + r'\x64\Release\TunSafe.exe',
-           BASE + r'\installer\x64\TunSafe.exe')
+  SignExe(BASE + r'\installer\x86\ts.exe')
+
+  try:
+    os.mkdir(BASE + r'\installer\x64')
+  except FileExistsError:
+    pass
+  CopyFile(BASE + r'\build\x64_Release\TunSafe.exe',   BASE + r'\installer\x64\TunSafe.exe')
+  CopyFile(BASE + r'\build\x64_Release\ts.exe',   BASE + r'\installer\x64\ts.exe')
   SignExe(BASE + r'\installer\x64\TunSafe.exe')
+  SignExe(BASE + r'\installer\x64\ts.exe')
 
 VERSION = GetVersion()
 
-Run(r'%s /V4 -DPRODUCT_VERSION=%s installer\tunsafe.nsi ' % (NSIS_PATH, VERSION))
+Run(r'%s /V4 -DPRODUCT_VERSION=%s installer\tunsafe.nsi ' % (CONFIG["NSIS_PATH"], VERSION))
 SignExe(BASE + r'\installer\TunSafe-%s.exe' % VERSION)
 
 zipf = zipfile.ZipFile(BASE + '\installer\TunSafe-%s-x86.zip' % VERSION, 'w', zipfile.ZIP_DEFLATED)
 zipf.write(BASE + r'\installer\x86\TunSafe.exe', 'TunSafe.exe')
+zipf.write(BASE + r'\installer\x86\ts.exe', 'ts.exe')
 zipf.write(BASE + r'\installer\License.txt', 'License.txt')
 zipf.write(BASE + r'\installer\ChangeLog.txt', 'ChangeLog.txt')
 zipf.write(BASE + r'\installer\TunSafe.conf', 'Config\\TunSafe.conf')
@@ -90,6 +95,7 @@ zipf.close()
 
 zipf = zipfile.ZipFile(BASE + '\installer\TunSafe-%s-x64.zip' % VERSION, 'w', zipfile.ZIP_DEFLATED)
 zipf.write(BASE + r'\installer\x64\TunSafe.exe', 'TunSafe.exe')
+zipf.write(BASE + r'\installer\x64\ts.exe', 'ts.exe')
 zipf.write(BASE + r'\installer\License.txt', 'License.txt')
 zipf.write(BASE + r'\installer\ChangeLog.txt', 'ChangeLog.txt')
 zipf.write(BASE + r'\installer\TunSafe.conf', 'Config\\TunSafe.conf')

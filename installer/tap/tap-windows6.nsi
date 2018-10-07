@@ -59,6 +59,7 @@ Name "${PRODUCT_NAME}"
 !define MUI_TEXT_LICENSE_TITLE "Welcome to the TunSafe-TAP installer"
 
 #!insertmacro MUI_PAGE_WELCOME
+!define MUI_PAGE_CUSTOMFUNCTION_PRE dirPre
 !insertmacro MUI_PAGE_LICENSE "COPYING"
 #!insertmacro MUI_PAGE_COMPONENTS
 !define MUI_PAGE_CUSTOMFUNCTION_PRE dirPre
