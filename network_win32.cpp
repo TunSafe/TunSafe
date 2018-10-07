@@ -289,8 +289,8 @@ static bool AddRoute(int family,
     if (undo_array)
       undo_array->push_back(row);
 
-    RINFO("Added Route %s  =>  %s", print_ip_prefix(buf1, family, dest, dest_prefix),
-          print_ip_prefix(buf2, family, gateway, -1));
+    RINFO("Added Route %s  =>  %s%s", print_ip_prefix(buf1, family, dest, dest_prefix),
+          print_ip_prefix(buf2, family, gateway, -1), (error == ERROR_OBJECT_ALREADY_EXISTS) ? " (already exists)" : "");
     return true;
   }
   RINFO("AddRoute failed (%d) %s  =>  %s", error, print_ip_prefix(buf1, family, dest, dest_prefix),
