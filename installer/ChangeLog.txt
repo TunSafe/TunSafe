@@ -1,3 +1,10 @@
+2018-10-08 - TunSafe v1.4
+
+Changes:
+1.Show a couple of more error strings when failing to edit registry.
+2.Allow # comments in config file inside of a line
+3.Enable persistent keepalive timer on sent handshakes
+
 2018-08-11 - TunSafe v1.4-rc1
 
 Changes:
