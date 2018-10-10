@@ -3,6 +3,8 @@
 #pragma once
 
 #define TUNSAFE_VERSION_STRING "TunSafe 1.4"
+#define TUNSAFE_VERSION_STRING_LONG "TunSafe 1.4.1"
+
 
 #define WITH_HANDSHAKE_EXT 0
 #define WITH_SHORT_HEADERS 0
