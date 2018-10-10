@@ -888,8 +888,10 @@ void TunsafeServiceImpl::HandleDisconnect() {
 void TunsafeServiceImpl::OnGraphAvailable() {
   if (want_graph_type_ != 0xffffffff) {
     LinearizedGraph *graph = backend_->GetGraph(want_graph_type_);
-    if (graph)
+    if (graph) {
       message_handler_.WritePacket(SERVICE_MSG_GRAPH, (uint8*)graph, graph->total_size);
+      free(graph);
+    }
   }
 }
 
