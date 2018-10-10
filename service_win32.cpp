@@ -805,8 +805,10 @@ void TunsafeServiceServer::HandleDisconnect() {
 void TunsafeServiceServer::OnGraphAvailable() {
   if (want_graph_type_ != 0xffffffff) {
     LinearizedGraph *graph = service_backend_->backend_->GetGraph(want_graph_type_);
-    if (graph)
+    if (graph) {
       connection_->WritePacket(TS_SERVICE_MSG_GRAPH, (uint8*)graph, graph->total_size);
+      free(graph);
+    }
   }
 }
 

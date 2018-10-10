@@ -788,8 +788,9 @@ enum {
 };
 
 static void UpdateGraphReq() {
-  if (g_backend && (g_current_tab != 1 || !g_ui_visible))
-    g_backend->GetGraph(0);
+  if (g_backend && (g_current_tab != 1 || !g_ui_visible)) {
+    free(g_backend->GetGraph(-1));
+  }
 }
 
 static void UpdateTabSelection() {
