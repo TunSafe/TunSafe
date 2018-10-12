@@ -15,7 +15,13 @@
 #include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <sys/time.h>
 #endif
+
+
+#if defined(OS_MACOSX)
+#include <mach/mach_time.h>
+#endif  // OS_MACOSX
 
 #include <vector>
 #include <algorithm>
@@ -451,6 +457,8 @@ void InitOsxGetMilliseconds() {
 }
 
 uint64 OsGetMilliseconds() {
+  assert(initclock != 0);
+
   uint64_t clock = mach_absolute_time() - initclock;
   return clock * (uint64_t)timebase.numer / (uint64_t)timebase.denom;
 }

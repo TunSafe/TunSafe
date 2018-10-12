@@ -30,6 +30,11 @@ enum {
 #define CHACHA20_WITH_AVX512 1
 #endif
 
+#ifndef CHACHA20_WITH_ASM
+#define CHACHA20_WITH_ASM 1
+#endif  // CHACHA20_WITH_ASM
+
+
 extern "C" {
 void _cdecl hchacha20_ssse3(uint8 *derived_key, const uint8 *nonce, const uint8 *key);
 void _cdecl chacha20_ssse3(uint8 *out, const uint8 *in, size_t len, const uint32 key[8], const uint32 counter[4]);
@@ -55,9 +60,6 @@ void poly1305_blocks_neon(void *ctx, const uint8 *inp, size_t len, uint32 padbit
 void poly1305_emit_neon(void *ctx, uint8 mac[16], const uint32 nonce[4]);
 
 }
-
-
-
 
 struct chacha20_ctx {
 	uint32 state[CHACHA20_BLOCK_SIZE / sizeof(uint32)];
@@ -158,7 +160,7 @@ SAFEBUFFERS static void hchacha20_generic(uint8 derived_key[CHACHA20POLY1305_KEY
 
 static inline void hchacha20(uint8 derived_key[CHACHA20POLY1305_KEYLEN], const uint8 nonce[16], const uint8 key[CHACHA20POLY1305_KEYLEN])
 {
-#if defined(ARCH_CPU_X86_64) && defined(COMPILER_MSVC)
+#if defined(ARCH_CPU_X86_64) && defined(COMPILER_MSVC) && CHACHA20_WITH_ASM
 	if (X86_PCAP_SSSE3) {
 		hchacha20_ssse3(derived_key, nonce, key);
 		return;
@@ -181,7 +183,7 @@ SAFEBUFFERS static void chacha20_crypt(struct chacha20_ctx *ctx, uint8 *dst, con
   if (bytes == 0)
     return;
 
-#if defined(ARCH_CPU_X86_64)
+#if defined(ARCH_CPU_X86_64) && CHACHA20_WITH_ASM
 #if CHACHA20_WITH_AVX512
 	if (X86_PCAP_AVX512F) {
 		chacha20_avx512(dst, src, bytes, &ctx->state[4], &ctx->state[12]);
@@ -207,7 +209,7 @@ SAFEBUFFERS static void chacha20_crypt(struct chacha20_ctx *ctx, uint8 *dst, con
   }
 #endif  // defined(ARCH_CPU_X86_64)
 
-#if defined(ARCH_CPU_ARM_FAMILY)
+#if defined(ARCH_CPU_ARM_FAMILY) && CHACHA20_WITH_ASM
   if (ARM_PCAP_NEON) {
     chacha20_neon(dst, src, bytes, &ctx->state[4], &ctx->state[12]);
   } else {
@@ -240,7 +242,7 @@ struct poly1305_ctx {
 	size_t num;
 };
 
-#if !(defined(CONFIG_X86_64) || defined(CONFIG_ARM) || defined(CONFIG_ARM64) || (defined(CONFIG_MIPS) && defined(CONFIG_64BIT)))
+#if !(defined(CONFIG_X86_64) || defined(CONFIG_ARM) || defined(CONFIG_ARM64) || (defined(CONFIG_MIPS) && defined(CONFIG_64BIT))) || !CHACHA20_WITH_ASM
 struct poly1305_internal {
 	uint32 h[5];
 	uint32 r[4];
@@ -408,9 +410,9 @@ SAFEBUFFERS static void poly1305_init(struct poly1305_ctx *ctx, const uint8 key[
 	ctx->nonce[2] = ReadLE32(&key[24]);
 	ctx->nonce[3] = ReadLE32(&key[28]);
 
-#if defined(ARCH_CPU_X86_64)
+#if defined(ARCH_CPU_X86_64) && CHACHA20_WITH_ASM
 	poly1305_init_x86_64(ctx->opaque, key);
-#elif defined(ARCH_CPU_ARM_FAMILY)
+#elif defined(ARCH_CPU_ARM_FAMILY) && CHACHA20_WITH_ASM
 	poly1305_init_arm(ctx->opaque, key);
 #elif defined(CONFIG_MIPS) && defined(CONFIG_64BIT)
 	poly1305_init_mips(ctx->opaque, key);
@@ -422,7 +424,7 @@ SAFEBUFFERS static void poly1305_init(struct poly1305_ctx *ctx, const uint8 key[
 
 static inline void poly1305_blocks(void *ctx, const uint8 *inp, size_t len, uint32 padbit)
 {
-#if defined(ARCH_CPU_X86_64)
+#if defined(ARCH_CPU_X86_64) && CHACHA20_WITH_ASM
 #if CHACHA20_WITH_AVX512
 	if(X86_PCAP_AVX512F)
 		poly1305_blocks_avx512(ctx, inp, len, padbit);
@@ -434,7 +436,7 @@ static inline void poly1305_blocks(void *ctx, const uint8 *inp, size_t len, uint
     poly1305_blocks_avx(ctx, inp, len, padbit);
   else
 		poly1305_blocks_x86_64(ctx, inp, len, padbit);
-#elif defined(ARCH_CPU_ARM_FAMILY)
+#elif defined(ARCH_CPU_ARM_FAMILY) && CHACHA20_WITH_ASM
   if (ARM_PCAP_NEON)
     poly1305_blocks_neon(ctx, inp, len, padbit);
   else
@@ -446,12 +448,12 @@ static inline void poly1305_blocks(void *ctx, const uint8 *inp, size_t len, uint
 
 static inline void poly1305_emit(void *ctx, uint8 mac[16], const uint32 nonce[4])
 {
-#if defined(ARCH_CPU_X86_64)
+#if defined(ARCH_CPU_X86_64) && CHACHA20_WITH_ASM
   if (X86_PCAP_AVX)
     poly1305_emit_avx(ctx, mac, nonce);
   else
     poly1305_emit_x86_64(ctx, mac, nonce);
-#elif defined(ARCH_CPU_ARM_FAMILY)
+#elif defined(ARCH_CPU_ARM_FAMILY) && CHACHA20_WITH_ASM
   if (ARM_PCAP_NEON)
     poly1305_emit_neon(ctx, mac, nonce);
   else

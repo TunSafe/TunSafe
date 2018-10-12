@@ -66,11 +66,11 @@ bool ParseCidrAddr(char *s, WgCidrAddr *out) {
   char *slash = strchr(s, '/');
   if (!slash)
     return false;
-
+  
   *slash = 0;
   int e = atoi(slash + 1);
   if (e < 0) return false;
-
+  
   if (inet_pton(AF_INET, s, out->addr) == 1) {
     if (e > 32) return false;
     out->cidr = e;
@@ -93,16 +93,16 @@ class DnsResolverThread : private Thread::Runner {
 public:
   DnsResolverThread();
   ~DnsResolverThread();
-
+  
   // Resolve the hostname and store the result in |result|.
   // The function will block until it's resolved. If the cancellation
   // token or becomes signalled, the call will fail.
   bool Resolve(const char *hostname, IpAddr *result, DnsResolverCanceller *token);
-
+  
 private:
   virtual void ThreadMain();
   void StartThread();
-
+  
   struct Entry {
     enum {
       // Set when it's been posted to the job queue
@@ -112,10 +112,10 @@ private:
       // Set when the original thread has cancelled and worker thread should delete
       CANCELLED = 2,
     };
-
+    
     Entry() : hostname(NULL) {}
     ~Entry() { free(hostname); }
-
+    
     char *hostname;
     IpAddr *result;
     Entry *next;
@@ -147,7 +147,7 @@ void DnsResolverCanceller::Cancel() {
 bool DnsResolverThread::Resolve(const char *hostname, IpAddr *result, DnsResolverCanceller *token) {
   if (token->cancel_)
     return false;
-
+  
   Entry *e = new Entry;
   e->hostname = _strdup(hostname);
   e->result = result;
@@ -155,7 +155,7 @@ bool DnsResolverThread::Resolve(const char *hostname, IpAddr *result, DnsResolve
   e->state = Entry::POSTED;
   e->condvar = &token->condvar_;
   result->sin.sin_family = 0;
-
+  
   // Push it to the queue and start thread
   g_dns_mutex.Acquire();
   Entry **p = &entry_;
@@ -240,19 +240,19 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
   int attempt = 0;
   static const uint8 retry_delays[] = {1, 2, 3, 5, 10};
   char buf[kSizeOfAddress];
-
+  
   memset(result, 0, sizeof(IpAddr));
-
+  
   // First check cache
   for (auto it = cache_.begin(); it != cache_.end(); ++it) {
     if (it->name == hostname) {
-
+      
       *result = it->ip;
       RINFO("Resolved %s to %s%s", hostname, PrintIpAddr(*result, buf), " (cached)");
       return true;
     }
   }
-
+  
 #if defined(OS_WIN)
   // Then disable dns blocker (otherwise the windows dns client service can't resolve)
   if (dns_blocker_ && dns_blocker_->IsActive()) {
@@ -260,7 +260,7 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
     dns_blocker_->RestoreDns();
   }
 #endif  // defined(OS_WIN)
-
+  
   for (;;) {
     if (g_dnsresolver_thread.Resolve(hostname, result, &token_)) {
       // add to cache
@@ -270,11 +270,11 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
     }
     if (token_.is_cancelled())
       return false;
-
+    
     RINFO("Unable to resolve %s. Trying again in %d second(s)", hostname, retry_delays[attempt]);
     if (!InterruptibleSleep(retry_delays[attempt] * 1000, &token_))
       return false;
-
+    
     if (attempt != ARRAY_SIZE(retry_delays) - 1)
       attempt++;
   }
@@ -284,7 +284,7 @@ bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver)
   size_t len = strlen(si) + 1;
   char *s = (char*)alloca(len);
   memcpy(s, si, len);
-
+  
   memset(sin, 0, sizeof(IpAddr));
   if (*s == '[') {
     char *end = strchr(s, ']');
@@ -303,7 +303,7 @@ bool ParseSockaddrInWithPort(const char *si, IpAddr *sin, DnsResolver *resolver)
   char *x = strchr(s, ':');
   if (!x) return false;
   *x = 0;
-
+  
   if (inet_pton(AF_INET, s, &sin->sin.sin_addr) == 1) {
     sin->sin.sin_family = AF_INET;
   } else if (!resolver) {
@@ -335,7 +335,7 @@ public:
   WgFileParser(WireguardProcessor *wg, DnsResolver *resolver) : wg_(wg), dns_resolver_(resolver) {}
   bool ParseFlag(const char *group, const char *key, char *value);
   WireguardProcessor *wg_;
-
+  
   void FinishGroup();
   struct Peer {
     WgPublicKey pub;
@@ -414,7 +414,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
   IpAddr sin;
   std::vector<char*> ss;
   bool ciphermode = false;
-
+  
   if (strcmp(group, "[Interface]") == 0) {
     if (key == NULL) return true;
     if (strcmp(key, "PrivateKey") == 0) {
@@ -501,7 +501,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       goto err;
     }
   } else if (strcmp(group, "[Peer]") == 0) {
-    if (key == NULL) { 
+    if (key == NULL) {
       if (!had_interface_) {
         RERROR("Missing [Interface].PrivateKey.");
         return false;
@@ -562,7 +562,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       goto err;
     }
   } else {
-err:
+  err:
     return false;
   }
   return true;
@@ -577,25 +577,21 @@ static bool ContainsNonAsciiCharacter(const char *buf, size_t size) {
   return false;
 }
 
-bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsResolver *dns_resolver) {
-  char buf[1024];
+bool ParseWireGuardConfigString(WireguardProcessor *wg, char *buf, size_t buf_size, DnsResolver *dns_resolver) {
   char group[32] = {0};
-
+  
   WgFileParser file_parser(wg, dns_resolver);
-
-  RINFO("Loading file: %s", filename);
-
-  FILE *f = fopen(filename, "r");
-  if (!f) {
-    RERROR("Unable to open: %s", filename);
-    return false;
-  }
-
-  while (fgets(buf, sizeof(buf), f)) {
-    size_t len = strlen(buf);
-
+  
+  const char *buf_end = buf + buf_size;
+  for (;;) {
+    char *nl = (char*)memchr(buf, '\n', buf_end - buf);
+    if (nl)
+      *nl = 0;
+    
+    size_t len = (nl ? nl : buf_end) - buf;	
+    
     if (ContainsNonAsciiCharacter(buf, len)) {
-      RERROR("File is not a config file: %s", filename);
+      RERROR("File is not a config file");
       return false;
     }
     
@@ -606,44 +602,71 @@ bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsR
     }
     while (len && is_space(buf[len - 1]))
       buf[--len] = 0;
-
-    if (buf[0] == '\0')
-      continue;
-
+    
     if (buf[0] == '[') {
       if (len < sizeof(group)) {
         memcpy(group, buf, len + 1);
         if (!file_parser.ParseFlag(group, NULL, NULL)) {
           RERROR("Error parsing %s", group);
-          fclose(f);
           return false;
         }
       }
-      continue;
+    } else if (buf[0] != '\0') {
+      char *sep = strchr(buf, '=');
+      if (!sep) {
+        RERROR("Missing = on line: %s", buf);
+        return false;
+      }
+      char *sepe = sep;
+      while (sepe > buf && is_space(sepe[-1]))
+        sepe--;
+      *sepe = 0;
+      
+      // trim space after =
+      do sep++; while (is_space(*sep));
+      
+      if (!file_parser.ParseFlag(group, buf, sep)) {
+        RERROR("Error parsing %s.%s = %s", group, buf, sep);
+        return false;
+      }
     }
-    char *sep = strchr(buf, '=');
-    if (!sep) {
-      RERROR("Missing = on line: %s", buf);
-      continue;
-    }
-    char *sepe = sep;
-    while (sepe > buf && is_space(sepe[-1]))
-      sepe--;
-    *sepe = 0;
-
-    // trim space after =
-    do sep++; while (is_space(*sep));
-
-    if (!file_parser.ParseFlag(group, buf, sep)) {
-      RERROR("Error parsing %s.%s = %s", group, buf, sep);
-      fclose(f);
-      return false;
-    }
+    if (!nl)
+      break;
+    buf = nl + 1;
   }
   file_parser.FinishGroup();
-  fclose(f);
   return true;
 }
+
+static bool LoadFileWithMaximumSize(const char *filename, std::string *result, size_t max_size) {
+  FILE *f = fopen(filename, "rb");
+  if (!f) return false;
+  fseek(f, 0, SEEK_END);
+  size_t n;
+  long x = ftell(f);
+  fseek(f, 0, SEEK_SET);
+  if (x < 0 || x > max_size) goto error;
+  result->resize((size_t)x);
+  n = fread(&(*result)[0], 1, x, f);
+  if (n != x) goto error;
+  fclose(f);
+  return true;
+error:
+  fclose(f);
+  return false;
+}
+
+
+bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsResolver *dns_resolver) {
+  std::string temp;
+  RINFO("Loading file: %s", filename);
+  if (!LoadFileWithMaximumSize(filename, &temp, 1024 * 1024)) {
+    RERROR("Unable to open: %s", filename);
+    return false;
+  }
+  return ParseWireGuardConfigString(wg, &temp[0], temp.size(), dns_resolver);
+}
+
 
 
 static void CmsgAppendFmt(std::string *result, const char *fmt, ...) {
@@ -667,7 +690,7 @@ static void CmsgAppendHex(std::string *result, const char *key, const void *data
 
 void WgConfig::HandleConfigurationProtocolGet(WireguardProcessor *proc, std::string *result) {
   char buf[kSizeOfAddress];
-
+  
   CmsgAppendHex(result, "private_key", proc->dev_.s_priv_, sizeof(proc->dev_.s_priv_));
   if (proc->listen_port_)
     CmsgAppendFmt(result, "listen_port=%d", proc->listen_port_);
@@ -675,10 +698,10 @@ void WgConfig::HandleConfigurationProtocolGet(WireguardProcessor *proc, std::str
     CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(proc->tun_addr_, buf));
   if (proc->tun6_addr_.size == 128)
     CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(proc->tun6_addr_, buf));
-
+  
   for (WgPeer *peer = proc->dev_.peers_; peer; peer = peer->next_peer_) {
     WG_SCOPED_LOCK(peer->lock_);
-
+    
     CmsgAppendHex(result, "public_key", peer->s_remote_.bytes, sizeof(peer->s_remote_));
     if (!IsOnlyZeros(peer->preshared_key_, sizeof(peer->preshared_key_)))
       CmsgAppendHex(result, "preshared_key", peer->preshared_key_, sizeof(peer->preshared_key_));
@@ -692,7 +715,7 @@ void WgConfig::HandleConfigurationProtocolGet(WireguardProcessor *proc, std::str
       CmsgAppendFmt(result, "endpoint=%s:%d", PrintIpAddr(peer->endpoint_, buf), htons(peer->endpoint_.sin.sin_port));
     else if (peer->endpoint_.sin.sin_family == AF_INET6)
       CmsgAppendFmt(result, "endpoint=[%s]:%d", PrintIpAddr(peer->endpoint_, buf), htons(peer->endpoint_.sin6.sin6_port));
-
+    
     if (peer->last_complete_handskake_timestamp_) {
       uint64 millis_since = OsGetMilliseconds() - peer->last_complete_handskake_timestamp_;
       uint64 when = time(NULL) - millis_since / 1000;
@@ -712,12 +735,12 @@ bool WgConfig::HandleConfigurationProtocolMessage(WireguardProcessor *proc, cons
   IpAddr sin;
   uint8 buf32[32];
   assert(proc->dev().IsMainThread());
-
+  
   result->clear();
-
+  
   if (!ParseConfigKeyValue(&message_copy[0], &kv))
     return false;
-
+  
   for (auto it : kv) {
     char *key = it.first, *value = it.second;
     if (strcmp(key, "get") == 0) {
@@ -780,7 +803,7 @@ bool WgConfig::HandleConfigurationProtocolMessage(WireguardProcessor *proc, cons
       goto getout_fail;
     }
   }
-
+  
   // reconfigure the tun interface?
   if (did_set_address) {
     proc->ConfigureTun();
@@ -788,7 +811,7 @@ bool WgConfig::HandleConfigurationProtocolMessage(WireguardProcessor *proc, cons
   
   result->append("errno=0\n\n");
   return true;
-
+  
 getout_fail:
   (*result) = "errno=1\n\n";
   return false;

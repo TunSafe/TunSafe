@@ -22,6 +22,10 @@ https://blake2.net.
 #include "blake2s.h"
 #include "crypto_ops.h"
 
+#ifndef BLAKE2S_WITH_ASM
+#define BLAKE2S_WITH_ASM 1
+#endif  // BLAKE2S_WITH_ASM
+
 void blake2s_compress_sse(blake2s_state *S, const uint8_t block[BLAKE2S_BLOCKBYTES]);
 
 #if !defined(__cplusplus) && (!defined(__STDC_VERSION__) || __STDC_VERSION__ < 199901L)
@@ -242,8 +246,8 @@ static void blake2s_compress(blake2s_state *S, const uint8_t in[BLAKE2S_BLOCKBYT
 #undef G
 #undef ROUND
 
-  static inline void blake2s_compress_impl(blake2s_state *S, const uint8_t block[BLAKE2S_BLOCKBYTES]) {
-#if defined(ARCH_CPU_X86_64)
+static inline void blake2s_compress_impl(blake2s_state *S, const uint8_t block[BLAKE2S_BLOCKBYTES]) {
+#if defined(ARCH_CPU_X86_64) && BLAKE2S_WITH_ASM
   blake2s_compress_sse(S, block);
 #else
   blake2s_compress(S, block);
