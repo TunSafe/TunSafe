@@ -140,6 +140,15 @@ void DnsResolverCanceller::Cancel() {
   g_dns_mutex.Release();
 }
 
+void DnsResolverCanceller::CancelSleepOnce() {
+  g_dns_mutex.Acquire();
+  cancel_sleep_once_ = true;
+  condvar_.Wake();
+  g_dns_mutex.Release();
+}
+
+
+
 bool DnsResolverThread::Resolve(const char *hostname, IpAddr *result, DnsResolverCanceller *token) {
   if (token->cancel_)
     return false;
@@ -188,15 +197,23 @@ void DnsResolverThread::ThreadMain() {
     struct addrinfo hints = {0};
     hints.ai_family = PF_UNSPEC;
     hints.ai_socktype = SOCK_DGRAM;
+    // AI_V4MAPPED doesn't work on Android?!
+#if defined(OS_IOS)
     hints.ai_flags = AI_DEFAULT;
+#else
+    hints.ai_flags = AI_ADDRCONFIG ;
+#endif
     ai = NULL;
-    if (getaddrinfo(e->hostname, NULL, &hints, &ai) != 0)
+    int r =  getaddrinfo(e->hostname, NULL, &hints, &ai);
+    if (r != 0)
       ai = NULL;
+//    RINFO("r=%d errno=%d, %s", r, errno, gai_strerror(r));
     //    he = gethostbyname(e->hostname);
     g_dns_mutex.Acquire();
     if (e->state == Entry::CANCELLED) {
       delete e;
     } else {
+//      RINFO("ai=%p, family=%d", ai, ai ? ai->ai_family : -1);
       if (ai) {
         e->result->sin.sin_family = ai->ai_family;
         e->result->sin.sin_port = 0;
@@ -228,6 +245,11 @@ static bool InterruptibleSleep(int delay, DnsResolverCanceller *token) {
   g_dns_mutex.Acquire();
   uint32 time_at_start = (uint32)OsGetMilliseconds();
   while (delay > 0 && !token->cancel_) {
+    if (token->cancel_sleep_once_) {
+      token->cancel_sleep_once_ = false;
+      delay = 0;
+      break;
+    }
     token->condvar_.WaitTimed(&g_dns_mutex, delay);
     uint32 now = (uint32)OsGetMilliseconds();
     delay -= (now - time_at_start);
@@ -249,9 +271,10 @@ void DnsResolver::ClearCache() {
 }
 
 bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
-  int attempt = 0;
-  static const uint8 retry_delays[] = {1, 2, 3, 5, 10};
+  static const uint8 retry_delays[] = {1, 2, 3, 5, 10, 20, 40, 60, 120, 180, 255};
   char buf[kSizeOfAddress];
+
+  retry_attempt_ = 0;
 
   memset(result, 0, sizeof(IpAddr));
 
@@ -283,13 +306,18 @@ bool DnsResolver::Resolve(const char *hostname, IpAddr *result) {
     if (token_.is_cancelled())
       return false;
 
-    RINFO("Unable to resolve %s. Trying again in %d second(s)", hostname, retry_delays[attempt]);
-    if (!InterruptibleSleep(retry_delays[attempt] * 1000, &token_))
+    RINFO("Unable to resolve %s. Trying again in %d second(s)", hostname, retry_delays[retry_attempt_]);
+    if (!InterruptibleSleep(retry_delays[retry_attempt_] * 1000, &token_))
       return false;
 
-    if (attempt != ARRAY_SIZE(retry_delays) - 1)
-      attempt++;
+    if (retry_attempt_ != ARRAY_SIZE(retry_delays) - 1)
+      retry_attempt_++;
   }
+}
+
+void DnsResolver::RetryNow() {
+  retry_attempt_ = 0;
+  token_.CancelSleepOnce();
 }
 
 // Parse an IPV4 address into sin, doing NAT64 translation if applicable (on IOS)

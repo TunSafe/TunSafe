@@ -8,12 +8,14 @@ class DnsBlocker;
 
 class DnsResolverCanceller {
 public:
-  DnsResolverCanceller() : cancel_(false) {}
+  DnsResolverCanceller() : cancel_(false), cancel_sleep_once_(false) {}
   void Cancel();
+  void CancelSleepOnce();
   void Reset() { cancel_ = false; }
   bool is_cancelled() { return cancel_; }
 public:
   bool cancel_;
+  bool cancel_sleep_once_;
   ConditionVariable condvar_;
 };
 
@@ -25,6 +27,7 @@ public:
   bool Resolve(const char *hostname, IpAddr *result);
   void ClearCache();
 
+  void RetryNow();
   void Cancel() { token_.Cancel(); }
   void ResetCancel() { token_.Reset(); }
 private:
@@ -36,6 +39,7 @@ private:
   std::vector<Entry> cache_;
   DnsBlocker *dns_blocker_;
   DnsResolverCanceller token_;
+  int retry_attempt_;
 };
 
 #endif  // TUNSAFE_DNSRESOLVE_H_

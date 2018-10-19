@@ -123,6 +123,9 @@
     <ClInclude Include="tunsafe_ipaddr.h">
       <Filter>Source Files</Filter>
     </ClInclude>
+    <ClInclude Include="tunsafe_dnsresolve.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
