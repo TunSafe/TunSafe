@@ -1061,7 +1061,7 @@ static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
   return FALSE;
 }
 
-void PushLine(const char *s) {
+void PushLine(int type, const char *s) {
   size_t l = strlen(s);
   char buf[64];
   SYSTEMTIME t;

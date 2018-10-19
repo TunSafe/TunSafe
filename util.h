@@ -8,7 +8,7 @@ bool base64_decode(uint8 *in, size_t inLen, uint8 *out, size_t *outLen);
 bool IsOnlyZeros(const uint8 *data, size_t data_size);
 
 int RunCommand(const char *fmt, ...);
-typedef void Logger(const char *msg);
+typedef void Logger(int type, const char *msg);
 extern Logger *g_logger;
 
 

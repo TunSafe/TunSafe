@@ -244,7 +244,7 @@ void printhex(const char *name, const void *a, size_t l) {
 }
 #endif
 
-typedef void Logger(const char *msg);
+typedef void Logger(int type, const char *msg);
 Logger *g_logger;
 
 #undef RERROR
@@ -259,7 +259,7 @@ void RERROR(const char *msg, ...) {
   vsnprintf(buf, sizeof(buf), msg, va);
   va_end(va);
   if (g_logger) {
-    g_logger(buf);
+    g_logger(1, buf);
   } else {
     fputs(buf, stderr);
     fputs("\n", stderr);
@@ -274,7 +274,7 @@ void RINFO(const char *msg, ...) {
   vsnprintf(buf, sizeof(buf), msg, va);
   va_end(va);
   if (g_logger) {
-    g_logger(buf);
+    g_logger(0, buf);
   } else {
     fputs(buf, stderr);
     fputs("\n", stderr);

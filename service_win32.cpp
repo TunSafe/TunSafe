@@ -840,7 +840,7 @@ bool TunsafeServiceServer::AuthenticateUser() {
   return rv;
 }
 
-static void PushServiceLine(const char *s) {
+static void PushServiceLine(int type, const char *s) {
   if (g_service) {
     char buf[64];
     SYSTEMTIME t;
