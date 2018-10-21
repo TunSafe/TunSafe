@@ -1,13 +1,34 @@
-2018-??-?? - TunSafe v1.4-rc2
+2018-10-21 - TunSafe v1.5-rc1
 
 Changes:
 1.The kill switch is now remembered across computer restarts and
   is deactivated when disconnecting. Without this behavior, the 
   kill switch is unusable when auto connecting on Windows startup.
-2.Allow multiple DNS servers
-3.Show a couple of more error strings when failing to edit registry.
-4.Allow # comments in config file inside of a line
-5.Enable persistent keepalive timer on sent handshakes
+2.The kill switch is now optionally turned off on disconnect,
+  and a button is shown in the UI to turn off the kill switch.
+3.The kill switch can be configured to don't block local networks,
+  this is used only for the firewall based kill switch.
+4.Allow multiple DNS servers
+5.Now the 'tunsafe' command line tool exists, which supports
+  wg compatible configuration and statistics printing. The names
+  of the adapters are the same as the adapters in the Control
+  Panel network settings. It's used only when TunSafe runs
+  in service mode.
+6.The 'tunsafe' command line tool supports multiple wireguard
+  sessions simultaneously using different tun interfaces.
+7.Optimize IpToPeerMap for faster lookup using a trie.
+8.Print a notice if a route we're trying to add already exists,
+  perhaps will make it easier to debug issues.
+9.Resolve DNS queries using a background thread, to make it
+  possible to interrupt slow DNS queries.
+10.IPv6 endpoint was printed incorrectly on the Advanced tab
+
+2018-10-08 - TunSafe v1.4
+
+Changes:
+1.Show a couple of more error strings when failing to edit registry.
+2.Allow # comments in config file inside of a line
+3.Enable persistent keepalive timer on sent handshakes
 
 2018-08-11 - TunSafe v1.4-rc1
 
