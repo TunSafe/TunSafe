@@ -56,13 +56,14 @@ enum InternetBlockState {
   kBlockInternet_Route = 1,
   kBlockInternet_Firewall = 2,
   kBlockInternet_Both = 3,
+  kBlockInternet_TypeMask = 0xf,
 
   kBlockInternet_BlockOnDisconnect = 16,
-
-  // An unspecified value that uses either route or firewall
-  kBlockInternet_DefaultOn = 254,
+  kBlockInternet_AllowLocalNetworks = 32,
 
   kBlockInternet_Default = 255,
+
+  kBlockInternet_Active = 256,
 };
 
 class WireguardProcessor {

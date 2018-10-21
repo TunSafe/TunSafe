@@ -36,12 +36,11 @@ enum {
 static uint8 internet_route_blocking_state;
 static SLIST_HEADER freelist_head;
 static HKEY g_hklm_reg_key;
-static uint8 g_killswitch_curr = 255, g_killswitch_want;
+static uint8 g_killswitch_curr, g_killswitch_want, g_killswitch_currconn;
 
 bool g_allow_pre_post;
 
-static InternetBlockState GetInternetBlockState(bool *is_activated);
-static void DeactivateKillSwitch(InternetBlockState want);
+static void DeactivateKillSwitch(uint32 want);
 
 Packet *AllocPacket() {
   Packet *packet = (Packet*)InterlockedPopEntrySList(&freelist_head);
@@ -1280,15 +1279,9 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
     dns_blocker_->RestoreDns();
   }
   
-  // Cache the state of internet blocking
-  GetInternetBlockState(NULL);
-
-  uint8 ibs = config.internet_blocking;
-  if (ibs == kBlockInternet_Default || ibs == kBlockInternet_DefaultOn) {
-    uint8 new_ibs = (g_killswitch_want & (kBlockInternet_Firewall | kBlockInternet_Route));
-    ibs = (new_ibs == kBlockInternet_Off && ibs == kBlockInternet_DefaultOn) ? kBlockInternet_Firewall : new_ibs;
-  }
-
+  g_killswitch_currconn = config.internet_blocking;
+  uint8 ibs = (g_killswitch_currconn == kBlockInternet_Default) ? g_killswitch_want : g_killswitch_currconn;
+  
   bool block_all_traffic_route = (ibs & kBlockInternet_Route) != 0;
 
   RouteInfo ri, ri6;
@@ -1318,24 +1311,36 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
     if (ConvertInterfaceIndexToLuid(1, &localhost_luid) || localhost_luid.Info.IfType != 24) {
       RERROR("Unable to get localhost luid - while adding route based blocking.");
     } else {
-      uint32 dst[4] = {0};
-      if (!AddMultipleCatchallRoutes(AF_INET, 1, (uint8*)&dst, localhost_luid, NULL))
-        RERROR("Unable to add routes for route based blocking.");
-      if (config.ipv6_cidr) {
-        if (!AddMultipleCatchallRoutes(AF_INET6, 1, (uint8*)&dst, localhost_luid, NULL))
-          RERROR("Unable to add IPv6 routes for route based blocking.");
-      }
       g_killswitch_curr |= kBlockInternet_Route;
+
+      uint32 dst[4] = {0};
+      if (!AddMultipleCatchallRoutes(AF_INET, 1, (uint8*)&dst, localhost_luid, NULL)) {
+        RERROR("Unable to add routes for route based blocking.");
+        DeactivateKillSwitch(0);
+        return false;
+      }
+      if (config.ipv6_cidr) {
+        if (!AddMultipleCatchallRoutes(AF_INET6, 1, (uint8*)&dst, localhost_luid, NULL)) {
+          RERROR("Unable to add IPv6 routes for route based blocking.");
+          DeactivateKillSwitch(0);
+          return false;
+        }
+      }
     }
   }
 
   if (ibs & kBlockInternet_Firewall) {
     RINFO("Blocking all regular Internet traffic using firewall rules");
-    if (AddKillSwitchFirewall(ri.found_default_adapter ? &ri.default_adapter : NULL, interface_luid_, config.ipv6_cidr != 0))
-      g_killswitch_curr |= kBlockInternet_Firewall;
+    g_killswitch_curr |= kBlockInternet_Firewall;
+
+    if (!AddKillSwitchFirewall(interface_luid_, config.ipv6_cidr != 0, (ibs & kBlockInternet_AllowLocalNetworks) != 0)) {
+      RERROR("Unable to activate firewall based kill switch");
+      DeactivateKillSwitch(0);
+      return false;
+    }
   }
 
-  DeactivateKillSwitch((InternetBlockState)ibs);
+  DeactivateKillSwitch(ibs);
 
   // Configure default route?
   if (config.use_ipv4_default_route) {
@@ -2018,6 +2023,17 @@ TunsafeBackend::~TunsafeBackend() {
   
 }
 
+static bool GetKillSwitchRouteActive() {
+  RouteInfo ri;
+  return (GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, TRUE, NULL, &ri) && ri.found_null_routes == 2);
+}
+
+static void RemoveKillSwitchRoute() {
+  RouteInfo ri;
+  GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, FALSE, NULL, &ri);
+  GetDefaultRouteAndDeleteOldRoutes(AF_INET6, NULL, FALSE, NULL, &ri);
+}
+
 TunsafeBackendWin32::TunsafeBackendWin32(Delegate *delegate) : delegate_(delegate), dns_resolver_(&dns_blocker_) {
   memset(&stats_, 0, sizeof(stats_));
   wg_processor_ = NULL;
@@ -2029,6 +2045,8 @@ TunsafeBackendWin32::TunsafeBackendWin32(Delegate *delegate) : delegate_(delegat
   if (g_hklm_reg_key == NULL) {
     RegCreateKeyEx(HKEY_LOCAL_MACHINE, "Software\\TunSafe", NULL, NULL, 0, KEY_ALL_ACCESS, NULL, &g_hklm_reg_key, NULL);
     g_killswitch_want = RegReadInt(g_hklm_reg_key, "KillSwitch", 0);
+    g_killswitch_curr = GetKillSwitchRouteActive() * kBlockInternet_Route +
+                        GetKillSwitchFirewallActive() * kBlockInternet_Firewall;
   }
   delegate_->OnStateChanged();
 }
@@ -2089,6 +2107,7 @@ void TunsafeBackendWin32::Stop() {
 void TunsafeBackendWin32::Start(const char *config_file) {
   StopInner(true);
   dns_resolver_.ResetCancel();
+  g_killswitch_currconn = kBlockInternet_Default;
   is_started_ = true;
   memset(public_key_, 0, sizeof(public_key_));
   SetStatus(kStatusInitializing);
@@ -2118,7 +2137,8 @@ void TunsafeBackendWin32::StopInner(bool is_restart) {
     status_ = kStatusStopped;
     packet_processor_.Reset();
 
-    if (!is_restart && !(g_killswitch_want & kBlockInternet_BlockOnDisconnect))
+    uint8 wanted_ibs = (g_killswitch_currconn == kBlockInternet_Default) ? g_killswitch_want : g_killswitch_currconn;
+    if (!is_restart && !(wanted_ibs & kBlockInternet_BlockOnDisconnect))
       DeactivateKillSwitch(kBlockInternet_Off);
   }
 }
@@ -2154,35 +2174,13 @@ LinearizedGraph *TunsafeBackendWin32::GetGraph(int type) {
   return graph;
 }
 
-static bool GetKillSwitchRouteActive() {
-  RouteInfo ri;
-  return (GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, TRUE, NULL, &ri) && ri.found_null_routes == 2);
+InternetBlockState TunsafeBackendWin32::GetInternetBlockState() {
+  return (InternetBlockState)(g_killswitch_want | (g_killswitch_curr ? kBlockInternet_Active : 0));
 }
 
-static void RemoveKillSwitchRoute() {
-  RouteInfo ri;
-  GetDefaultRouteAndDeleteOldRoutes(AF_INET, NULL, FALSE, NULL, &ri);
-  GetDefaultRouteAndDeleteOldRoutes(AF_INET6, NULL, FALSE, NULL, &ri);
-}
-
-static InternetBlockState GetInternetBlockState(bool *is_activated) {
-  // Read the value only once.
-  if (g_killswitch_curr == 255) {
-    g_killswitch_curr = GetKillSwitchRouteActive() * kBlockInternet_Route +
-                        GetKillSwitchFirewallActive() * kBlockInternet_Firewall;
-  }
-  if (is_activated)
-    *is_activated = g_killswitch_curr != 0;
-  return (InternetBlockState)g_killswitch_want;
-}
-
-InternetBlockState TunsafeBackendWin32::GetInternetBlockState(bool *is_activated) {
-  return ::GetInternetBlockState(is_activated);
-}
-
-static void DeactivateKillSwitch(InternetBlockState want) {
+static void DeactivateKillSwitch(uint32 want) {
   // Disable blocking without reconnecting
-  int maybeon = g_killswitch_curr | g_killswitch_want;
+  uint32 maybeon = g_killswitch_curr;
   if ((maybeon & kBlockInternet_Route) > (want & kBlockInternet_Route)) {
     if (g_killswitch_curr & kBlockInternet_Route) {
       g_killswitch_curr &= ~kBlockInternet_Route;
@@ -2200,14 +2198,16 @@ static void DeactivateKillSwitch(InternetBlockState want) {
 }
 
 void TunsafeBackendWin32::SetInternetBlockState(InternetBlockState want) {
-  GetInternetBlockState(NULL); // ensure cache is read
-
-  if (worker_thread_ == NULL && !(want & kBlockInternet_BlockOnDisconnect))
+  if (worker_thread_ == NULL && !(want & kBlockInternet_BlockOnDisconnect) || !(want & kBlockInternet_Active))
     DeactivateKillSwitch(kBlockInternet_Off);
   else
     DeactivateKillSwitch(want);
-  g_killswitch_want = want;
-  RegWriteInt(g_hklm_reg_key, "KillSwitch", (int)want);
+
+  int value = want & 0xff;
+  g_killswitch_want = value;
+  RegWriteInt(g_hklm_reg_key, "KillSwitch", (int)value);
+
+  delegate_->OnStateChanged();
 }
 
 void TunsafeBackendWin32::SetServiceStartupFlags(uint32 flags) {

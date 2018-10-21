@@ -97,8 +97,9 @@ public:
   virtual void RequestStats(bool enable) = 0;
   virtual void ResetStats() = 0;
 
-  virtual InternetBlockState GetInternetBlockState(bool *is_activated) = 0;
+  virtual InternetBlockState GetInternetBlockState() = 0;
   virtual void SetInternetBlockState(InternetBlockState s) = 0;
+
   virtual void SetServiceStartupFlags(uint32 flags) = 0;
   virtual std::string GetConfigFileName() = 0;
   virtual LinearizedGraph *GetGraph(int type) = 0;

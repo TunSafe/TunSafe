@@ -218,7 +218,7 @@ public:
   virtual void Stop() override;
   virtual void RequestStats(bool enable) override;
   virtual void ResetStats() override;
-  virtual InternetBlockState GetInternetBlockState(bool *is_activated) override;
+  virtual InternetBlockState GetInternetBlockState() override;
   virtual void SetInternetBlockState(InternetBlockState s) override;
   virtual void SetServiceStartupFlags(uint32 flags) override;
   virtual LinearizedGraph *GetGraph(int type) override;
@@ -248,7 +248,7 @@ private:
 
   HANDLE worker_thread_;
   bool want_periodic_stats_;
-  
+
   Delegate *delegate_;
   char *config_file_;
 

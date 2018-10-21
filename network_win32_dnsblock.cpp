@@ -159,7 +159,7 @@ void DnsBlocker::RestoreDns() {
   }
 }
 
-static bool RemovePersistentInternetBlockingInner(HANDLE handle) {
+static bool RemovePersistentInternetBlockingInner(HANDLE handle, bool destroy_sublayer) {
   FWPM_FILTER_ENUM_TEMPLATE0 enum_template = {0};
   HANDLE enum_handle = NULL;
   DWORD err;
@@ -184,7 +184,7 @@ static bool RemovePersistentInternetBlockingInner(HANDLE handle) {
       }
       for (UINT32 i = 0; i < num_returned; i++) {
         FWPM_FILTER0 *cur_filter = filter[i];
-        if (memcmp(&cur_filter->subLayerKey, &TUNSAFE_GLOBAL_BLOCK_SUBLAYER, sizeof(GUID)) == 0) {
+        if (memcmp(&cur_filter->subLayerKey, &TUNSAFE_GLOBAL_BLOCK_SUBLAYER, sizeof(GUID)) == 0 && (destroy_sublayer || cur_filter->numFilterConditions != 0)) {
           err = FwpmFilterDeleteById0(handle, cur_filter->filterId);
           if (err != 0)
             RERROR("FwpmFilterDeleteById0 failed: %d", err);
@@ -197,10 +197,12 @@ static bool RemovePersistentInternetBlockingInner(HANDLE handle) {
     enum_handle = NULL;
   }
 
-  err = FwpmSubLayerDeleteByKey0(handle, &TUNSAFE_GLOBAL_BLOCK_SUBLAYER);
-  if (err != 0 && err != FWP_E_SUBLAYER_NOT_FOUND) {
-    RERROR("FwpmSubLayerDeleteByKey0 failed: %d", err);
-    goto getout;
+  if (destroy_sublayer) {
+    err = FwpmSubLayerDeleteByKey0(handle, &TUNSAFE_GLOBAL_BLOCK_SUBLAYER);
+    if (err != 0 && err != FWP_E_SUBLAYER_NOT_FOUND) {
+      RERROR("FwpmSubLayerDeleteByKey0 failed: %d", err);
+      goto getout;
+    }
   }
 
 getout:
@@ -210,7 +212,16 @@ getout:
   return false;
 }
 
-bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &luid_to_allow, bool also_ipv6) {
+struct LastKillswitchSettings {
+  NET_LUID luid_to_allow;
+  bool also_ipv6;
+  bool allow_local_networks;
+};
+
+static LastKillswitchSettings last_killswitch_settings;
+
+
+bool AddKillSwitchFirewall(const NET_LUID &luid_to_allow, bool also_ipv6, bool allow_local_networks) {
   FWPM_SUBLAYER0 *sublayer_p = NULL;
   FWP_BYTE_BLOB *fwp_appid = NULL;
   FWPM_FILTER0 filter;
@@ -219,6 +230,11 @@ bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &lu
   HANDLE handle = NULL;
   bool success = false;
 
+  LastKillswitchSettings new_settings;
+  new_settings.luid_to_allow = luid_to_allow;
+  new_settings.also_ipv6 = also_ipv6;
+  new_settings.allow_local_networks = allow_local_networks;
+  
   {
     FWPM_SESSION0 session = {0};
     err = FwpmEngineOpen0(NULL, RPC_C_AUTHN_WINNT, NULL, &session, &handle);
@@ -231,6 +247,9 @@ bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &lu
   if (FwpmSubLayerGetByKey0(handle, &TUNSAFE_GLOBAL_BLOCK_SUBLAYER, &sublayer_p) == 0) {
     // The sublayer already exists
     FwpmFreeMemory0((void **)&sublayer_p);
+
+    if (memcmp(&last_killswitch_settings, &new_settings, sizeof(new_settings)) != 0)
+      RemovePersistentInternetBlockingInner(handle, false);
   } else {
     // Add new sublayer
     FWPM_SUBLAYER0 sublayer = {0};
@@ -273,49 +292,72 @@ bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &lu
   filter.weight.uint8 = 14;
   if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 2))
     goto getout;
+
   // Permit everything that's loopback
   filter_condition[0].fieldKey = FWPM_CONDITION_INTERFACE_TYPE;
   filter_condition[0].conditionValue.type = FWP_UINT32;
   filter_condition[0].conditionValue.uint32 = 24;
   filter_condition[0].matchType = FWP_MATCH_EQUAL;
   filter.weight.uint8 = 13;
-  if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 2))
+  if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 3))
     goto getout;
 
-  // Permit all queries on the DHCP port (It uses 68 on the local side and 67 on the remote side)
-  if (default_interface) {
-    filter_condition[2].fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
-    filter_condition[2].matchType = FWP_MATCH_EQUAL;
-    filter_condition[2].conditionValue.type = FWP_UINT16;
-    filter_condition[2].conditionValue.uint16 = 68;
-    filter_condition[1].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
-    filter_condition[1].matchType = FWP_MATCH_EQUAL;
-    filter_condition[1].conditionValue.type = FWP_UINT16;
-    filter_condition[1].conditionValue.uint16 = 67;
-    filter.numFilterConditions = 3;
-    filter_condition[0].fieldKey = FWPM_CONDITION_IP_LOCAL_INTERFACE;
-    filter_condition[0].conditionValue.type = FWP_UINT64;
-    filter_condition[0].conditionValue.uint64 = (uint64*)&default_interface->Value;
-    filter_condition[0].matchType = FWP_MATCH_EQUAL;
-    filter.weight.uint8 = 12;
-    if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 2))
-      goto getout;
+  // Permit everything going out to local networks
+  //  '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'
+  if (allow_local_networks) {
+    static const FWP_V4_ADDR_AND_MASK kLocalNetworkAddrMask[3] = {
+      {0x0A000000, 0xff000000}, // 10.0.0.0/8
+      {0xAC100000, 0xfff00000}, // 172.16.0.0/12
+      {0xC0A80000, 0xffff0000}, // 192.168.0.0/16
+    };
+    for (int i = 0; i < 3; i++) {
+      FWP_V4_ADDR_AND_MASK addr_mask = kLocalNetworkAddrMask[i];
+      filter.numFilterConditions = 1;
+      filter_condition[0].fieldKey = FWPM_CONDITION_IP_REMOTE_ADDRESS;
+      filter_condition[0].conditionValue.type = FWP_V4_ADDR_MASK;
+      filter_condition[0].conditionValue.v4AddrMask = &addr_mask;
+      filter_condition[0].matchType = FWP_MATCH_EQUAL;
+      filter.weight.uint8 = 12;
+      if (!FwpmFilterAddCheckedAleConnect(handle, &filter, false, 4))
+        goto getout;
+    }
   }
+
+  // Permit all queries on the DHCP port (It uses 68 on the local side and 67 on the remote side)
+  filter_condition[2].fieldKey = FWPM_CONDITION_IP_LOCAL_PORT;
+  filter_condition[2].matchType = FWP_MATCH_EQUAL;
+  filter_condition[2].conditionValue.type = FWP_UINT16;
+  filter_condition[2].conditionValue.uint16 = 68;
+  filter_condition[1].fieldKey = FWPM_CONDITION_IP_REMOTE_PORT;
+  filter_condition[1].matchType = FWP_MATCH_EQUAL;
+  filter_condition[1].conditionValue.type = FWP_UINT16;
+  filter_condition[1].conditionValue.uint16 = 67;
+  filter.numFilterConditions = 3;
+  filter_condition[0].fieldKey = FWPM_CONDITION_IP_PROTOCOL;
+  filter_condition[0].conditionValue.type = FWP_UINT8;
+  filter_condition[0].conditionValue.uint8 = 17; // UDP
+  filter_condition[0].matchType = FWP_MATCH_EQUAL;
+  filter.weight.uint8 = 12;
+  if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 5))
+    goto getout;
 
   // Block the rest
   filter.numFilterConditions = 0;
   filter.weight.type = FWP_EMPTY;
   filter.action.type = FWP_ACTION_BLOCK;
-  if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 3))
+  if (!FwpmFilterAddCheckedAleConnect(handle, &filter, also_ipv6, 6))
     goto getout;
 
   success = true;
+  last_killswitch_settings = new_settings;
 
 getout:
+  if (!success)
+    memset(&last_killswitch_settings, 0, sizeof(last_killswitch_settings));
+
   if (handle != NULL) {
-    // delete the layer on failure
     if (!success)
-      RemovePersistentInternetBlockingInner(handle);
+      RemovePersistentInternetBlockingInner(handle, true);
     FwpmEngineClose0(handle);
     handle = NULL;
   }
@@ -345,7 +387,7 @@ void RemoveKillSwitchFirewall() {
     goto getout;
   }
   
-  RemovePersistentInternetBlockingInner(handle);
+  RemovePersistentInternetBlockingInner(handle, true);
 
 getout:
   if (handle != NULL) {

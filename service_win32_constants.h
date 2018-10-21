@@ -1,7 +1,7 @@
 #pragma once
 
 #define TUNSAFE_PIPE_NAME "\\\\.\\pipe\\TunSafe\\ServiceControl"
-#define TUNSAFE_SERVICE_PROTOCOL_VERSION 20180916001
+#define TUNSAFE_SERVICE_PROTOCOL_VERSION 20181021001
 
 enum {
   TS_SERVICE_REQ_LOGIN = 0,

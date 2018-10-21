@@ -18,6 +18,6 @@ public:
   bool also_ipv6_;
 };
 
-bool AddKillSwitchFirewall(const NET_LUID *default_interface, const NET_LUID &luid_to_allow, bool also_ipv6);
+bool AddKillSwitchFirewall(const NET_LUID &luid_to_allow, bool also_ipv6, bool allow_local_networks);
 void RemoveKillSwitchFirewall();
 bool GetKillSwitchFirewallActive();

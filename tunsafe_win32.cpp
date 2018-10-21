@@ -220,7 +220,11 @@ public:
       }
     }
 
+    uint32 state = g_backend->GetInternetBlockState();
     bool running = g_backend->is_started();
+
+    ShowWindow(GetDlgItem(g_ui_window, ID_BTN_KILLSWITCH), (!running || (state & kBlockInternet_Both) == 0) && (state & kBlockInternet_Active) ? SW_SHOW : SW_HIDE);
+      
     SetDlgItemText(g_ui_window, ID_START, running ? "Re&connect" : "&Connect");
     InvalidatePaintbox();
     EnableWindow(GetDlgItem(g_ui_window, ID_STOP), running);
@@ -813,6 +817,7 @@ enum {
 
 static const WindowSizingItem kWindowSizing[] = {
   {ID_START,WSI_LEFT | WSI_RIGHT},
+  {ID_BTN_KILLSWITCH, WSI_LEFT | WSI_RIGHT},
   {ID_STOP,WSI_LEFT | WSI_RIGHT},
   {ID_EDITCONF,WSI_LEFT | WSI_RIGHT},
   {IDC_PAINTBOX,WSI_RIGHT},
@@ -909,22 +914,33 @@ static void HandleClickedItem(HWND hWnd, int wParam) {
   case IDSETT_BLOCKINTERNET_FIREWALL:
   case IDSETT_BLOCKINTERNET_BOTH:
   {
-    uint32 old_state = g_backend->GetInternetBlockState(NULL);
+    uint32 old_state = g_backend->GetInternetBlockState();
     uint32 new_state = wParam - IDSETT_BLOCKINTERNET_OFF;
 
-    if ((old_state & kBlockInternet_Both) == kBlockInternet_Off && new_state != kBlockInternet_Off) {
+    if ((old_state & kBlockInternet_TypeMask) == kBlockInternet_Off && new_state != kBlockInternet_Off) {
       if (MessageBoxA(g_ui_window, "Warning! All Internet traffic will be blocked while TunSafe is active. Only traffic through TunSafe will be allowed.\r\n\r\nThe blocking is activated the next time TunSafe connects.\r\n\r\nDo you want to continue?", "TunSafe", MB_ICONWARNING | MB_OKCANCEL) == IDCANCEL)
         return;
     }
-    g_backend->SetInternetBlockState((InternetBlockState)(new_state | (old_state & kBlockInternet_BlockOnDisconnect)));
+    g_backend->SetInternetBlockState((InternetBlockState)(new_state | (old_state & ~kBlockInternet_TypeMask)));
 
     if ((~old_state & new_state) && g_backend->is_started())
       StartTunsafeBackend(UIW_START);
     return;
   }
   case IDSETT_BLOCKINTERNET_DISCONN: {
-    uint32 old_state = g_backend->GetInternetBlockState(NULL);
-    g_backend->SetInternetBlockState((InternetBlockState)(old_state ^ kBlockInternet_BlockOnDisconnect));
+    g_backend->SetInternetBlockState((InternetBlockState)(g_backend->GetInternetBlockState() ^ kBlockInternet_BlockOnDisconnect));
+    return;
+  }
+
+  case IDSETT_BLOCKINTERNET_ALLOWLOCAL: {
+    g_backend->SetInternetBlockState((InternetBlockState)(g_backend->GetInternetBlockState() ^ kBlockInternet_AllowLocalNetworks));
+    if (g_backend->is_started())
+      StartTunsafeBackend(UIW_START);
+    return;
+  }
+
+  case ID_BTN_KILLSWITCH: {
+    g_backend->SetInternetBlockState((InternetBlockState)(g_backend->GetInternetBlockState() & ~kBlockInternet_Active));
     return;
   }
 
@@ -1030,11 +1046,11 @@ static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
     CheckMenuItem(menu, IDSETT_SERVICE_MINIMIZE_AUTO, MF_CHECKED * !!(g_startup_flags & kStartupFlag_MinimizeToTrayWhenWindowsStarts));
     CheckMenuItem(menu, IDSETT_PREPOST, g_allow_pre_post ? MF_CHECKED : 0);
 
-    bool is_activated = false;
-    int value = g_backend->GetInternetBlockState(&is_activated);
+    int value = g_backend->GetInternetBlockState();
     CheckMenuRadioItem(menu, IDSETT_BLOCKINTERNET_OFF, IDSETT_BLOCKINTERNET_BOTH, IDSETT_BLOCKINTERNET_OFF + (value & kBlockInternet_Both), MF_BYCOMMAND);
     CheckMenuRadioItem(menu, IDSETT_SERVICE_OFF, IDSETT_SERVICE_BACKGROUND, IDSETT_SERVICE_OFF + (g_startup_flags & 3), MF_BYCOMMAND);
     CheckMenuItem(menu, IDSETT_BLOCKINTERNET_DISCONN, (value & kBlockInternet_BlockOnDisconnect) ? MF_CHECKED : 0);
+    CheckMenuItem(menu, IDSETT_BLOCKINTERNET_ALLOWLOCAL, (value & kBlockInternet_AllowLocalNetworks) ? MF_CHECKED : 0);
     break;
   }
 
@@ -1690,6 +1706,8 @@ static bool CreateMainWindow() {
   hwndPaintBox = GetDlgItem(g_ui_window, IDC_PAINTBOX);
   hwndGraphBox = GetDlgItem(g_ui_window, IDC_GRAPHBOX);
   hwndAdvancedBox = GetDlgItem(g_ui_window, IDC_ADVANCEDBOX);
+
+  SetWindowLong(hwndPaintBox, GWL_STYLE, GetWindowLong(hwndPaintBox, GWL_STYLE) | WS_CLIPSIBLINGS);
 
   SetWindowLong(hwndEdit, GWL_EXSTYLE, GetWindowLong(hwndEdit, GWL_EXSTYLE) &~ WS_EX_CLIENTEDGE);
 

@@ -589,13 +589,11 @@ void TunsafeServiceBackend::SendStateUpdate(TunsafeServiceServer *filter) {
     return;
 
   uint8 *temp = new uint8[current_filename_.size() + 1 + sizeof(ServiceState)];
-  bool is_activated;
 
   memset(temp, 0, sizeof(ServiceState));
   ServiceState *ss = (ServiceState *)temp;
   ss->is_started = backend_->is_started();
-  ss->internet_block_state = backend_->GetInternetBlockState(&is_activated);
-  ss->internet_block_state_active = is_activated;
+  ss->internet_block_state = backend_->GetInternetBlockState();
   ss->ipv4_ip = backend_->GetIP();
   memcpy(ss->public_key, backend_->public_key(), 32);
   memcpy(temp + sizeof(ServiceState), current_filename_.c_str(), current_filename_.size() + 1);
@@ -763,10 +761,9 @@ bool TunsafeServiceServer::HandleMessage(int type, uint8 *data, size_t size) {
     break;
 
   case TS_SERVICE_REQ_SET_INTERNET_BLOCKSTATE:
-    if (size < 1)
+    if (size < 2)
       return false;
-    service_backend_->backend_->SetInternetBlockState((InternetBlockState)data[0]);
-    service_backend_->OnStateChanged();
+    service_backend_->backend_->SetInternetBlockState((InternetBlockState)Read16(data));
     break;
 
   case TS_SERVICE_REQ_RESETSTATS:
@@ -934,15 +931,13 @@ void TunsafeServiceClient::ResetStats() {
   connection_->WritePacket(TS_SERVICE_REQ_RESETSTATS, NULL, 0);
 }
 
-InternetBlockState TunsafeServiceClient::GetInternetBlockState(bool *is_activated) {
-  if (is_activated)
-    *is_activated = service_state_.internet_block_state_active;
+InternetBlockState TunsafeServiceClient::GetInternetBlockState() {
   return (InternetBlockState)service_state_.internet_block_state;
 }
 
 void TunsafeServiceClient::SetInternetBlockState(InternetBlockState s) {
-  uint8 v = (uint8)s;
-  connection_->WritePacket(TS_SERVICE_REQ_SET_INTERNET_BLOCKSTATE, &v, 1);
+  uint16 v = (uint16)s;
+  connection_->WritePacket(TS_SERVICE_REQ_SET_INTERNET_BLOCKSTATE, (uint8*)&v, sizeof(v));
 }
 
 void TunsafeServiceClient::SetServiceStartupFlags(uint32 flags) {

@@ -60,10 +60,11 @@ BEGIN
     PUSHBUTTON      "&Connect",ID_START,247,3,50,14
     PUSHBUTTON      "&Disconnect",ID_STOP,247,19,50,14
     PUSHBUTTON      "&Edit Config",ID_EDITCONF,247,35,50,14
+    PUSHBUTTON      "Turn Off &Kill Switch",ID_BTN_KILLSWITCH,154,19,90,14,WS_CLIPSIBLINGS
     CONTROL         "",IDC_RICHEDIT21,"RichEdit20A",ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP,167,180,40,16
     CONTROL         "",IDC_ADVANCEDBOX,"AdvancedBox",0x0,105,181,35,15
     CONTROL         "",IDC_GRAPHBOX,"GraphBox",0x0,239,181,35,15
-    CONTROL         "",IDC_PAINTBOX,"PaintBox",0x0,4,0,240,44
+    CONTROL         "",IDC_PAINTBOX,"PaintBox",0x0,4,0,240,44,0x4000000L
     CONTROL         "",IDC_TAB,"SysTabControl32",WS_TABSTOP,4,49,293,122
 END
 
@@ -166,6 +167,7 @@ BEGIN
             MENUITEM "Yes, &Both Methods",          IDSETT_BLOCKINTERNET_BOTH
             MENUITEM SEPARATOR
             MENUITEM "Block While &Disconnected",   IDSETT_BLOCKINTERNET_DISCONN
+            MENUITEM "Allow Traffic to &Local Networks", IDSETT_BLOCKINTERNET_ALLOWLOCAL
         END
         POPUP "&Service Mode"
         BEGIN

@@ -140,23 +140,28 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       wg_->SetDnsBlocking(v);
     } else if (strcmp(key, "BlockInternet") == 0) {
       uint8 v = kBlockInternet_Default;
-      
       SplitString(value, ',', &ss);
       for (size_t i = 0; i < ss.size(); i++) {
-        if (strcmp(ss[i], "route") == 0) {
+        const char *s = ss[i];
+        if (strcmp(s, "route") == 0) {
           if (v & 128) v = 0;
           v |= kBlockInternet_Route;
-        } else if (strcmp(ss[i], "firewall") == 0) {
+        } else if (strcmp(s, "firewall") == 0 || strcmp(s, "on") == 0) {
           if (v & 128) v = 0;
           v |= kBlockInternet_Firewall;
-        } else if (strcmp(ss[i], "off") == 0)
+        } else if (strcmp(s, "off") == 0) {
           v = 0;
-        else if (strcmp(ss[i], "on") == 0)
-          v = kBlockInternet_DefaultOn;
-        else if (strcmp(ss[i], "default") == 0)
+        } else if (strcmp(s, "default") == 0) {
           v = kBlockInternet_Default;
-        else
+        } else if (strcmp(s, "persist") == 0) {
+          if (v & 128) v = 0;
+          v |= kBlockInternet_BlockOnDisconnect;
+        } else if (strcmp(s, "allow_local") == 0) {
+          if (v & 128) v = 0;
+          v |= kBlockInternet_AllowLocalNetworks;
+        } else {
           RERROR("Unknown mode in BlockInternet: %s", ss[i]);
+        }
       }
       
       wg_->SetInternetBlocking((InternetBlockState)v);

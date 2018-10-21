@@ -162,9 +162,9 @@ private:
 
 struct ServiceState {
   uint8 is_started : 1;
-  uint8 internet_block_state_active : 1;
-  uint8 internet_block_state;
-  uint8 reserved[26 + 64];
+  uint8 reserved1;
+  uint16 internet_block_state;
+  uint8 reserved[24 + 64];
   uint32 ipv4_ip;
   uint8 public_key[32];
 };
@@ -184,7 +184,7 @@ public:
   virtual void Stop();
   virtual void RequestStats(bool enable);
   virtual void ResetStats();
-  virtual InternetBlockState GetInternetBlockState(bool *is_activated);
+  virtual InternetBlockState GetInternetBlockState();
   virtual void SetInternetBlockState(InternetBlockState s);
   virtual std::string GetConfigFileName();
   virtual void SetServiceStartupFlags(uint32 flags);

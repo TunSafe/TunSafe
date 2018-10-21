@@ -28,6 +28,8 @@
 #define IDSETT_SERVICE_CONNECT_AUTO     24
 #define IDSETT_SERVICE_MINIMIZE_AUTO    25
 #define IDSETT_BLOCKINTERNET_DISCONN    26
+#define IDSETT_BLOCKINTERNET_ALLOWLOCAL 27
+#define ID_BTN_KILLSWITCH               28
 #define IDC_PAINTBOX                    30
 #define IDC_GRAPHBOX                    31
 #define IDC_ADVANCEDBOX                 32
@@ -41,13 +43,12 @@
 #define IDC_PUBLIC_KEY                  109
 #define IDC_TAB                         110
 
-
 // Next default values for new objects
 // 
 #ifdef APSTUDIO_INVOKED
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        113
-#define _APS_NEXT_COMMAND_VALUE         40026
+#define _APS_NEXT_COMMAND_VALUE         40030
 #define _APS_NEXT_CONTROL_VALUE         1016
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
