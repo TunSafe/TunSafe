@@ -3,9 +3,8 @@
 #ifndef TINYVPN_NETAPI_H_
 #define TINYVPN_NETAPI_H_
 
-#include "stdafx.h"
 #include "tunsafe_types.h"
-
+#include "tunsafe_ipaddr.h"
 #include <vector>
 #include <string>
 
@@ -17,17 +16,6 @@
 #endif
 
 #pragma warning (disable: 4200)
-
-union IpAddr {
-  sockaddr_in sin;
-  sockaddr_in6 sin6;
-};
-
-struct WgCidrAddr {
-  uint8 addr[16];
-  uint8 size;
-  uint8 cidr;
-};
 
 struct Packet {
   union {

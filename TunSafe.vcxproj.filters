@@ -120,6 +120,9 @@
     <ClInclude Include="crypto\chacha20poly1305.h">
       <Filter>crypto\chacha20poly1305</Filter>
     </ClInclude>
+    <ClInclude Include="tunsafe_ipaddr.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -184,6 +187,9 @@
     </ClCompile>
     <ClCompile Include="crypto\chacha20poly1305.cpp">
       <Filter>crypto\chacha20poly1305</Filter>
+    </ClCompile>
+    <ClCompile Include="tunsafe_ipaddr.cpp">
+      <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

@@ -9,6 +9,7 @@
 #include "network_win32_dnsblock.h"
 #include "wireguard_config.h"
 #include "tunsafe_threading.h"
+#include "tunsafe_dnsresolve.h"
 #include <functional>
 
 enum {

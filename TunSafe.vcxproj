@@ -202,6 +202,7 @@
     <ClInclude Include="network_win32_dnsblock.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="stdafx.h" />
+    <ClInclude Include="tunsafe_ipaddr.h" />
     <ClInclude Include="tunsafe_threading.h" />
     <ClInclude Include="tunsafe_types.h" />
     <ClInclude Include="util_win32.h" />
@@ -221,6 +222,7 @@
     <ClCompile Include="crypto\siphash\siphash.cpp" />
     <ClCompile Include="ipzip2\ipzip2.cpp" />
     <ClCompile Include="network_win32_dnsblock.cpp" />
+    <ClCompile Include="tunsafe_ipaddr.cpp" />
     <ClCompile Include="tunsafe_threading.cpp" />
     <ClCompile Include="util.cpp" />
     <ClCompile Include="network_win32.cpp" />

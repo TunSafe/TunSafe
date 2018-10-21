@@ -13,6 +13,7 @@
 #include "tunsafe_threading.cpp"
 #include "tunsafe_cpu.cpp"
 #include "ip_to_peer_map.cpp"
+#include "tunsafe_ipaddr.cpp"
 #include "crypto/curve25519/curve25519-donna.cpp"
 #include "crypto/chacha20poly1305.cpp"
 #include "crypto/blake2s/blake2s.cpp"
