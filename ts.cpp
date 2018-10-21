@@ -36,7 +36,7 @@
 #define ANSI_FG_WHITE "\x1b[37m"
 
 #if defined(OS_WIN)
-#define EXENAME "ts"
+#define EXENAME "tunsafe"
 
 static bool SendMessageToService(HANDLE pipe, int message, const void *data, size_t data_size) {
   uint8 *temp = new uint8[data_size + 5];
@@ -607,7 +607,7 @@ static int HandleSetCommand(int argc, char **argv) {
   char hexkey[65];
 
   if (argc == 0) {
-    fprintf(stderr, "Usage: ts set <interface> [address <address>] [listen-port <port>] [private-key <file path>] "
+    fprintf(stderr, "Usage: " EXENAME " set <interface> [address <address>] [listen-port <port>] [private-key <file path>] "
             "[peer <base64 public key> [remove] [preshared-key <file path>] [endpoint <ip>:<port>] "
             "[persistent-keepalive <interval seconds>] [allowed-ips <ip1>/<cidr1>[,<ip2>/<cidr2>]] ]");
     return 1;

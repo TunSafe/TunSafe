@@ -57,12 +57,12 @@ Section "TunSafe Client" SecTunSafe
 		DetailPrint "Installing 64-bit version of TunSafe."
 		SetOutPath "$INSTDIR"
 		File "x64\TunSafe.exe"
-		File "x64\ts.exe"
+		File "x64\TunSafe.com"
 	${Else}
 		DetailPrint "Installing 32-bit version of TunSafe."
 		SetOutPath "$INSTDIR"
 		File "x86\TunSafe.exe"
-		File "x86\ts.exe"
+		File "x86\TunSafe.com"
 	${EndIf}
 	File "License.txt"
 	File "ChangeLog.txt"

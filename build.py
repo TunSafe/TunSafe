@@ -67,18 +67,18 @@ if 1:
   except FileExistsError:
     pass
   CopyFile(BASE + r'\build\Win32_Release\TunSafe.exe', BASE + r'\installer\x86\TunSafe.exe')
-  CopyFile(BASE + r'\build\Win32_Release\ts.exe', BASE + r'\installer\x86\ts.exe')
+  CopyFile(BASE + r'\build\Win32_Release\ts.exe', BASE + r'\installer\x86\TunSafe.com')
   SignExe(BASE + r'\installer\x86\TunSafe.exe')
-  SignExe(BASE + r'\installer\x86\ts.exe')
+  SignExe(BASE + r'\installer\x86\TunSafe.com')
 
   try:
     os.mkdir(BASE + r'\installer\x64')
   except FileExistsError:
     pass
   CopyFile(BASE + r'\build\x64_Release\TunSafe.exe',   BASE + r'\installer\x64\TunSafe.exe')
-  CopyFile(BASE + r'\build\x64_Release\ts.exe',   BASE + r'\installer\x64\ts.exe')
+  CopyFile(BASE + r'\build\x64_Release\ts.exe',   BASE + r'\installer\x64\TunSafe.com')
   SignExe(BASE + r'\installer\x64\TunSafe.exe')
-  SignExe(BASE + r'\installer\x64\ts.exe')
+  SignExe(BASE + r'\installer\x64\TunSafe.com')
 
 VERSION = GetVersion()
 
@@ -87,7 +87,7 @@ SignExe(BASE + r'\installer\TunSafe-%s.exe' % VERSION)
 
 zipf = zipfile.ZipFile(BASE + '\installer\TunSafe-%s-x86.zip' % VERSION, 'w', zipfile.ZIP_DEFLATED)
 zipf.write(BASE + r'\installer\x86\TunSafe.exe', 'TunSafe.exe')
-zipf.write(BASE + r'\installer\x86\ts.exe', 'ts.exe')
+zipf.write(BASE + r'\installer\x86\TunSafe.com', 'TunSafe.com')
 zipf.write(BASE + r'\installer\License.txt', 'License.txt')
 zipf.write(BASE + r'\installer\ChangeLog.txt', 'ChangeLog.txt')
 zipf.write(BASE + r'\installer\TunSafe.conf', 'Config\\TunSafe.conf')
@@ -95,7 +95,7 @@ zipf.close()
 
 zipf = zipfile.ZipFile(BASE + '\installer\TunSafe-%s-x64.zip' % VERSION, 'w', zipfile.ZIP_DEFLATED)
 zipf.write(BASE + r'\installer\x64\TunSafe.exe', 'TunSafe.exe')
-zipf.write(BASE + r'\installer\x64\ts.exe', 'ts.exe')
+zipf.write(BASE + r'\installer\x64\TunSafe.com', 'TunSafe.com')
 zipf.write(BASE + r'\installer\License.txt', 'License.txt')
 zipf.write(BASE + r'\installer\ChangeLog.txt', 'ChangeLog.txt')
 zipf.write(BASE + r'\installer\TunSafe.conf', 'Config\\TunSafe.conf')
