@@ -440,12 +440,18 @@ void ConfigMenuBuilder::Recurse() {
         break;
       if (wfd_.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
         buf_[bufpos_ - 1] = '\\';
+        int old_nfiles = nfiles_;
         depth_++;
         if (depth_ < 16)
           Recurse();
         depth_--;
+        // Remove directory if it had no files
+        if (old_nfiles == nfiles_)
+          nfiles_--;
+
         if (nfiles_ == MAX_CONFIG_FILES)
           break;
+
       }
       bufpos_ = old_bufpos;
     } while (FindNextFile(handle, &wfd_));
