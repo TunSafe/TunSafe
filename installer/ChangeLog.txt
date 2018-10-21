@@ -24,6 +24,7 @@ Changes:
 10.IPv6 endpoint was printed incorrectly on the Advanced tab
 11.Show an error message and drop packets if the TUN queue grows
    too large. This is a problem with the TAP NDIS6 driver on Win7.
+12.Bundle the TunSafe-TAP installer instead of downloading it.
 
 2018-10-08 - TunSafe v1.4
 

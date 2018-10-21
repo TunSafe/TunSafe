@@ -49,7 +49,7 @@ Name "${PRODUCT_NAME}"
 !insertmacro MUI_LANGUAGE "English"
 
 LangString DESC_SecTAP ${LANG_ENGLISH} "Install the TunSafe client."
-LangString DESC_SecTapAdapter ${LANG_ENGLISH} "Download and Install the TunSafe-TAP Virtual Ethernet Adapter (GPL)."
+LangString DESC_SecTapAdapter ${LANG_ENGLISH} "Install the TunSafe-TAP Virtual Ethernet Adapter (GPL)."
 
 Section "TunSafe Client" SecTunSafe
 	SetOverwrite on
@@ -76,34 +76,9 @@ SectionEnd
 Section "TunSafe-TAP Ethernet Adapter (GPL)" SecTapAdapter
 	SetOverwrite on
 
-	Delete "$INSTDIR\tunsafe-tap-installer.exe"
- 	NSISdl::download http://tunsafe.com/downloads/TunSafe-TAP-auto.exe "$INSTDIR\TunSafe-TAP Installer.exe"
-	Pop $R0 ;Get the return value
-  ${Unless} $R0 == "success"
-		MessageBox MB_ICONEXCLAMATION "An error occurred while downloading the TunSafe-TAP Virtual Ethernet Adapter. The installer will now abort."
-		SetErrorLevel 1
-	  Quit
-	${EndUnless}
+	SetOutPath "$INSTDIR"
 
- 	NSISdl::download http://tunsafe.com/downloads/TunSafe-TAP-auto.exe.sig "$INSTDIR\TunSafe-TAP Installer.exe.sig"
-  ${Unless} $R0 == "success"
-  	Delete "$INSTDIR\TunSafe-TAP Installer.exe.sig"
-		MessageBox MB_ICONEXCLAMATION "An error occurred while downloading the TunSafe-TAP Virtual Ethernet Adapter. The installer will now abort."
-		SetErrorLevel 1
-	  Quit
-	${EndUnless}
-
-	SignPlugin::myFunction "$INSTDIR\TunSafe-TAP Installer.exe"
-	Pop $R1 ;Get the return value
-
-	Delete "$INSTDIR\TunSafe-TAP Installer.exe.sig"
-
-	${Unless} $R1 = 0
-		MessageBox MB_ICONEXCLAMATION "The TunSafe-TAP installer that was downloaded is broken (error $R1). The installer will now abort."
-		SetErrorLevel 1
-	  Quit
-	${EndUnless}
-
+	File "tap\TunSafe-TAP Installer.exe"
 
  	HideWindow
 	# Launch TunSafe-TAP installer
