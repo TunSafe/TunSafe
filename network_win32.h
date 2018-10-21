@@ -157,6 +157,9 @@ private:
   Mutex mutex_;
 
   bool exit_thread_;
+  bool did_show_tun_queue_warning_;
+
+  int wqueue_size_;
 
   // All packets queued for writing
   Packet *wqueue_, **wqueue_end_;

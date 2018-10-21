@@ -22,6 +22,8 @@ Changes:
 9.Resolve DNS queries using a background thread, to make it
   possible to interrupt slow DNS queries.
 10.IPv6 endpoint was printed incorrectly on the Advanced tab
+11.Show an error message and drop packets if the TUN queue grows
+   too large. This is a problem with the TAP NDIS6 driver on Win7.
 
 2018-10-08 - TunSafe v1.4
 

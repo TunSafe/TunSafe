@@ -26,6 +26,9 @@ enum {
   HARD_MAXIMUM_QUEUE_SIZE = 102400,
   MAX_BYTES_IN_UDP_OUT_QUEUE = 256 * 1024,
   MAX_BYTES_IN_UDP_OUT_QUEUE_SMALL = (256 + 64) * 1024,
+
+  // On Windows 7 with NDIS6 sometimes the tun queue blows up.
+  HARD_MAXIMUM_TUN_QUEUE_SIZE = 16384,
 };
 
 enum {
@@ -1569,11 +1572,13 @@ bool TunWin32Adapter::RunPrePostCommand(const std::vector<std::string> &vec) {
 TunWin32Iocp::TunWin32Iocp(DnsBlocker *blocker, TunsafeBackendWin32 *backend) : adapter_(blocker, backend->guid_), backend_(backend) {
   wqueue_end_ = &wqueue_;
   wqueue_ = NULL;
+  wqueue_size_ = 0;
 
   thread_ = NULL;
   completion_port_handle_ = NULL;
   packet_handler_ = NULL;
   exit_thread_ = false;
+  did_show_tun_queue_warning_ = false;
 }
 
 TunWin32Iocp::~TunWin32Iocp() {
@@ -1716,6 +1721,7 @@ void TunWin32Iocp::ThreadMain() {
         pending_writes = wqueue_;
         wqueue_end_ = &wqueue_;
         wqueue_ = NULL;
+        wqueue_size_ = 0;
         mutex_.Release();
         if (!pending_writes)
           break;
@@ -1785,6 +1791,17 @@ void TunWin32Iocp::StopThread() {
 void TunWin32Iocp::WriteTunPacket(Packet *packet) {
   packet->next = NULL;
   mutex_.Acquire();
+  if (wqueue_size_ >= HARD_MAXIMUM_TUN_QUEUE_SIZE) {
+    mutex_.Release();
+    FreePacket(packet);
+    if (!did_show_tun_queue_warning_) {
+      did_show_tun_queue_warning_ = true;
+      RERROR("TUN Queue Overload! This might happen if you use the NDIS6 driver on Windows 7.");
+    }
+    return;
+  }
+  wqueue_size_++;
+
   Packet *was_empty = wqueue_;
   *wqueue_end_ = packet;
   wqueue_end_ = &packet->next;
