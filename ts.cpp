@@ -198,10 +198,41 @@ static bool GetInterfaceList(std::string *result) {
   CloseHandle(pipe);
   return rv;
 }
+
+// Supports stripping ansi colors
+static bool g_supports_ansi_color;
+static void ansi_printf(const char *s, ...) {
+  va_list va;
+  va_start(va, s);
+  if (g_supports_ansi_color) {
+    vprintf(s, va);
+  } else {
+    char buf[1024];
+    vsnprintf(buf, sizeof(buf), s, va);
+    char *s = buf, *d = s, c;
+    for (; (c = *s) != 0;) {
+      if (c == '\x1b' && s[1] == '[') {
+        s += 2;
+        while ((c = *s) >= '0' && c <= '9')
+          s++;
+        if (c == 'm')
+          s++;
+      } else {
+        *d++ = c;
+        s++;
+      }
+    }
+    *d = 0;
+    fputs(buf, stdout);
+  }
+  va_end(va);
+}
+
 #endif  // defined(OS_WIN)
 
 #if defined(OS_POSIX)
 #define EXENAME "tunsafe"
+#define ansi_printf printf
 
 static const char *GetGuidFromInterfaceName(const char *name) {
   return name;
@@ -474,16 +505,16 @@ getout_fail:
 
   const char *interfacename = (devname[0] == '{') ? GetInterfaceNameFromGuid(devname) : devname;
 
-  printf(ANSI_RESET ANSI_FG_GREEN ANSI_BOLD "interface" ANSI_RESET ": " ANSI_FG_GREEN "%s" ANSI_RESET "\n",
+  ansi_printf(ANSI_RESET ANSI_FG_GREEN ANSI_BOLD "interface" ANSI_RESET ": " ANSI_FG_GREEN "%s" ANSI_RESET "\n",
          interfacename);
   if (base64key[0]) {
-    printf("  " ANSI_BOLD "public key" ANSI_RESET ": %s\n"
+    ansi_printf("  " ANSI_BOLD "public key" ANSI_RESET ": %s\n"
            "  " ANSI_BOLD "private key" ANSI_RESET ": (hidden)\n", base64key);
   }
   if (listen_port)
-    printf("  " ANSI_BOLD "listening port" ANSI_RESET ": %d\n", listen_port);
+    ansi_printf("  " ANSI_BOLD "listening port" ANSI_RESET ": %d\n", listen_port);
   if (ips.size())
-    printf("  " ANSI_BOLD "address" ANSI_RESET ": %s\n", ips.c_str());
+    ansi_printf("  " ANSI_BOLD "address" ANSI_RESET ": %s\n", ips.c_str());
 
   const char *endpoint = NULL;
   uint64 rx_bytes, tx_bytes, last_handshake_time_sec;
@@ -525,21 +556,21 @@ getout_fail:
     if (i == kv.size() - 1 || strcmp(kv[i + 1].first, "public_key") == 0) {
       if (!base64key[0])
         goto getout_fail;
-      printf("\n" ANSI_FG_YELLOW ANSI_BOLD "peer" ANSI_RESET ": " ANSI_FG_YELLOW "%s" ANSI_RESET "\n", base64key);
+      ansi_printf("\n" ANSI_FG_YELLOW ANSI_BOLD "peer" ANSI_RESET ": " ANSI_FG_YELLOW "%s" ANSI_RESET "\n", base64key);
       if (base64psk[0])
-        printf("  " ANSI_BOLD "preshared key" ANSI_RESET ": (hidden)\n");
+        ansi_printf("  " ANSI_BOLD "preshared key" ANSI_RESET ": (hidden)\n");
       if (endpoint)
-        printf("  " ANSI_BOLD "endpoint" ANSI_RESET ": %s\n", endpoint);
-      printf("  " ANSI_BOLD "allowed ips" ANSI_RESET ": %s\n", ips.size() ? ips.c_str() : "(none)");
+        ansi_printf("  " ANSI_BOLD "endpoint" ANSI_RESET ": %s\n", endpoint);
+      ansi_printf("  " ANSI_BOLD "allowed ips" ANSI_RESET ": %s\n", ips.size() ? ips.c_str() : "(none)");
       if (last_handshake_time_sec)
-        printf("  " ANSI_BOLD "latest handshake" ANSI_RESET ": %s\n", PrintHandshake(text, sizeof(text), last_handshake_time_sec));
+        ansi_printf("  " ANSI_BOLD "latest handshake" ANSI_RESET ": %s\n", PrintHandshake(text, sizeof(text), last_handshake_time_sec));
       if (tx_bytes | rx_bytes) {
-        printf("  " ANSI_BOLD "transfer" ANSI_RESET ": %s received, ", FormatTransferPart(text, sizeof(text), rx_bytes));
-        printf("%s sent\n", FormatTransferPart(text, sizeof(text), tx_bytes));
+        ansi_printf("  " ANSI_BOLD "transfer" ANSI_RESET ": %s received, ", FormatTransferPart(text, sizeof(text), rx_bytes));
+        ansi_printf("%s sent\n", FormatTransferPart(text, sizeof(text), tx_bytes));
       }
       if (persistent_keepalive) {
         PrintTime(text, sizeof(text), persistent_keepalive);
-        printf("  " ANSI_BOLD "persistent keepalive" ANSI_RESET ": every %s\n", text);
+        ansi_printf("  " ANSI_BOLD "persistent keepalive" ANSI_RESET ": every %s\n", text);
       }
       clear_state = true;
     }
@@ -564,7 +595,7 @@ static int HandleShowCommand(int argc, char **argv) {
     bool want_newline = false;
     for (char *interfac : interfaces) {
       if (want_newline)
-        printf("\n");
+        ansi_printf("\n");
       want_newline = true;
       if (ShowUserFriendlyForDevice(interfac))
         return 1;
@@ -577,7 +608,7 @@ static int HandleShowCommand(int argc, char **argv) {
     for (char *interfac : interfaces) {
       const char *name = GetInterfaceNameFromGuid(interfac);
       if (name)
-        printf("%s\n", name);
+        ansi_printf("%s\n", name);
     }
   } else {
     return ShowUserFriendlyForDevice(argv[0]);
@@ -705,7 +736,7 @@ static int HandleLogCommand() {
   std::string reply;
 
   while (pipe != NULL && ReadMessageFromService(pipe, &message_code, &reply) && message_code == TS_SERVICE_MSG_LOGLINE)
-    printf("%s\n", reply.c_str());
+    ansi_printf("%s\n", reply.c_str());
 
   CloseHandle(pipe);
   return 0;
@@ -821,7 +852,7 @@ start_usage:
     }
     OsGetRandomBytes(key, 32);
     curve25519_normalize(key);
-    printf("%s\n", base64_encode(key, 32, base64buf, sizeof(base64buf), NULL));
+    ansi_printf("%s\n", base64_encode(key, 32, base64buf, sizeof(base64buf), NULL));
 
   } else if (!strcmp(subcommand, "genpsk")) {
     if (argc != 0) {
@@ -829,7 +860,7 @@ start_usage:
       return 1;
     }
     OsGetRandomBytes(key, 32);
-    printf("%s\n", base64_encode(key, 32, base64buf, sizeof(base64buf), NULL));
+    ansi_printf("%s\n", base64_encode(key, 32, base64buf, sizeof(base64buf), NULL));
   } else if (!strcmp(subcommand, "pubkey")) {
     char base64[WG_PUBLIC_KEY_LEN_BASE64 + 2];
     size_t n = fread(base64, 1, sizeof(base64), stdin);
@@ -844,11 +875,11 @@ start_usage:
       return 1;
     }
     curve25519_donna(key, key, kCurve25519Basepoint);
-    printf("%s\n", base64_encode(key, 32, base64buf, sizeof(base64buf), NULL));
+    ansi_printf("%s\n", base64_encode(key, 32, base64buf, sizeof(base64buf), NULL));
   } else if (!strcmp(subcommand, "--help")) {
     ShowHelp();
   } else if (!strcmp(subcommand, "--version")) {
-    printf("%s\n", TUNSAFE_VERSION_STRING);
+    ansi_printf("%s\n", TUNSAFE_VERSION_STRING);
   } else {
     if (argc == 0) {
       if (output)
@@ -862,8 +893,31 @@ start_usage:
 }
 
 #if defined(OS_WIN)
+
+// This is ugly but all 3rd party terminals I found hide cmd.exe
+static bool ConsoleSupportsColorCodes() {
+  HWND wnd = GetConsoleWindow();
+  return wnd && !(GetWindowLong(wnd, GWL_STYLE) & WS_VISIBLE);
+}
+
 // This is integrated into the main tunsafe binary on posix systems
 int main(int argc, char **argv) {
+
+  // Enable color codes on Windows 10+
+  HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+  DWORD dwMode = 0;
+  GetConsoleMode(hOut, &dwMode);
+  dwMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+  SetConsoleMode(hOut, dwMode);
+
+  // Use colors depending on TUNSAFE_COLOR
+  const char *env = getenv("TUNSAFE_COLOR");
+  if (env) {
+    g_supports_ansi_color = atoi(env) != 0;
+  } else {
+    g_supports_ansi_color = GetConsoleMode(hOut, &dwMode) && (dwMode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) || ConsoleSupportsColorCodes();
+  }
+
   int rv = HandleCommandLine(argc, argv, NULL);
   if (rv == -1) {
     fprintf(stderr, "Invalid subcommand '%s'\n", argv[1]);
