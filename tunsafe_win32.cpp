@@ -266,8 +266,6 @@ static MyBackendDelegate my_procdel;
 static void CreateLocalOrRemoteBackend(bool remote) {
   delete g_backend;
 
-  g_first_state_msg = false;
-
   if (!remote) {
     g_backend = CreateNativeTunsafeBackend(g_backend_delegate);
   } else {
