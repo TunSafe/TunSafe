@@ -901,7 +901,7 @@ static void HandleClickedItem(HWND hWnd, int wParam) {
   case IDSETT_BROWSE_FILES:BrowseFiles(); break;
   case IDSETT_OPEN_FILE: BrowseFile(hWnd); break;
   case IDSETT_ABOUT:
-    MessageBoxA(g_ui_window, TUNSAFE_VERSION_STRING "\r\n\r\nCopyright © 2018, Ludvig Strigeus\r\n\r\nThanks for choosing TunSafe!\r\n\r\nThis version was built on " __DATE__ " " __TIME__, "About TunSafe", MB_ICONINFORMATION);
+    MessageBoxA(g_ui_window, TUNSAFE_VERSION_STRING_LONG "\r\n\r\nCopyright © 2018, Ludvig Strigeus\r\n\r\nThanks for choosing TunSafe!\r\n\r\nThis version was built on " __DATE__ " " __TIME__, "About TunSafe", MB_ICONINFORMATION);
     break;
   case IDSETT_KEYPAIR:
     DialogBox(g_hinstance, MAKEINTRESOURCE(IDD_DIALOG2), hWnd, &KeyPairDlgProc);
