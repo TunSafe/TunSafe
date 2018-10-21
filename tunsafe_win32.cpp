@@ -1521,7 +1521,11 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
     if (ps->endpoint.sin.sin_family == 0)
       return "";
     PrintIpAddr(ps->endpoint, ip);
-    snprintf(buffer, 256, "%s:%d", ip, htons(ps->endpoint.sin.sin_port));
+    if (ps->endpoint.sin.sin_family == AF_INET6) {
+      snprintf(buffer, 256, "[%s]:%d", ip, htons(ps->endpoint.sin.sin_port));
+    } else {
+      snprintf(buffer, 256, "%s:%d", ip, htons(ps->endpoint.sin.sin_port));
+    }
     return buffer;
   }
     
