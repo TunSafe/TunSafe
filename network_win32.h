@@ -118,7 +118,7 @@ private:
   
   int old_ipv4_metric_, old_ipv6_metric_;
 
-  WgCidrAddr old_ipv6_address_;
+  std::vector<WgCidrAddr> old_ipv6_address_;
 
   NET_LUID interface_luid_;
 

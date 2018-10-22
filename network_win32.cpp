@@ -310,7 +310,7 @@ struct RouteInfo {
   uint8 found_null_routes;
 };
 
-static inline bool IsRouteOriginatingFromNullRoute(MIB_IPFORWARD_ROW2 *row) {
+static bool IsRouteOriginatingFromNullRoute(MIB_IPFORWARD_ROW2 *row) {
   if (!(row->InterfaceLuid.Info.IfType == 24 && row->Protocol == MIB_IPPROTO_NETMGMT && row->DestinationPrefix.PrefixLength == 1))
     return false;
   if (row->NextHop.si_family == AF_INET) {
@@ -322,14 +322,25 @@ static inline bool IsRouteOriginatingFromNullRoute(MIB_IPFORWARD_ROW2 *row) {
   return false;
 }
 
-static inline bool IsRouteTheAddressOfTheServer(int family, MIB_IPFORWARD_ROW2 *row, uint8 *old_endpoint_to_delete) {
-  if (!(row->Protocol == MIB_IPPROTO_NETMGMT && row->DestinationPrefix.Prefix.si_family == family))
+static bool IsDestinationRouteEqualTo(MIB_IPFORWARD_ROW2 *row, const WgCidrAddr *addr) {
+  if (addr->size == 32) {
+    return row->DestinationPrefix.Prefix.si_family == AF_INET &&
+            row->DestinationPrefix.PrefixLength == addr->cidr &&
+            memcmp(&row->DestinationPrefix.Prefix.Ipv4.sin_addr, addr->addr, 4) == 0;
+
+  } else if (addr->size == 128) {
+    return row->DestinationPrefix.Prefix.si_family == AF_INET6 &&
+           row->DestinationPrefix.PrefixLength == addr->cidr &&
+           memcmp(&row->DestinationPrefix.Prefix.Ipv6.sin6_addr, addr->addr, 16) == 0;
+  } else {
     return false;
-  if (family == AF_INET) {
-    return (row->DestinationPrefix.PrefixLength == 32 && memcmp(&row->DestinationPrefix.Prefix.Ipv4.sin_addr, old_endpoint_to_delete, 4) == 0);
-  } else if (family == AF_INET6) {
-    return (row->DestinationPrefix.PrefixLength == 128 && memcmp(&row->DestinationPrefix.Prefix.Ipv6.sin6_addr, old_endpoint_to_delete, 16) == 0);
   }
+}
+
+static bool IsDestinationRouteEqualToAny(MIB_IPFORWARD_ROW2 *row, const std::vector<WgCidrAddr> &addr) {
+  for (const WgCidrAddr &x : addr)
+    if (IsDestinationRouteEqualTo(row, &x))
+      return true;
   return false;
 }
 
@@ -343,17 +354,18 @@ static void DeleteRouteOrPrintErr(MIB_IPFORWARD_ROW2 *row) {
               (void*)&row->DestinationPrefix.Prefix.Ipv6.sin6_addr, row->DestinationPrefix.PrefixLength));
 }
 
-static bool GetDefaultRouteAndDeleteOldRoutes(int family, const NET_LUID *InterfaceLuid, bool keep_null_routes, uint8 *old_endpoint_to_delete, RouteInfo *ri) {
+static bool GetDefaultRouteAndDeleteOldRoutes(int family, const NET_LUID *InterfaceLuid, bool keep_null_routes, const std::vector<WgCidrAddr> *old_endpoint_to_delete, RouteInfo *ri) {
   MIB_IPFORWARD_TABLE2 *table = NULL;
 
   assert(family == AF_INET || family == AF_INET6);
+
+  ri->found_default_adapter = false;
+  ri->found_null_routes = 0;
 
   if (GetIpForwardTable2(family, &table))
     return false;
   DWORD rv = 0;
   DWORD gw_metric = 0xffffffff;
-  ri->found_default_adapter = false;
-  ri->found_null_routes = 0;
   for (unsigned i = 0; i < table->NumEntries; i++) {
     MIB_IPFORWARD_ROW2 *row = &table->Table[i];
     if (InterfaceLuid && memcmp(&row->InterfaceLuid, InterfaceLuid, sizeof(NET_LUID)) == 0) {
@@ -378,8 +390,8 @@ static bool GetDefaultRouteAndDeleteOldRoutes(int family, const NET_LUID *Interf
   if (old_endpoint_to_delete && ri->found_default_adapter) {
     for (unsigned i = 0; i < table->NumEntries; i++) {
       MIB_IPFORWARD_ROW2 *row = &table->Table[i];
-      if (memcmp(&row->InterfaceLuid, &ri->default_adapter, sizeof(NET_LUID)) == 0) {
-        if (IsRouteTheAddressOfTheServer(family, row, old_endpoint_to_delete))
+      if (row->Protocol == MIB_IPPROTO_NETMGMT && memcmp(&row->InterfaceLuid, &ri->default_adapter, sizeof(NET_LUID)) == 0) {
+        if (IsDestinationRouteEqualToAny(row, *old_endpoint_to_delete))
           DeleteRouteOrPrintErr(row);
       }
     }
@@ -1008,31 +1020,45 @@ static void AssignIpv6Address(const void *new_address, int new_cidr, WgCidrAddr 
   memcpy(target->addr, new_address, 16);
 }
 
+static int IsIpv6AddressInList(const std::vector<WgCidrAddr> &addresses, const void *ipv6_addr, int cidr) {
+  int i = 0;
+  for (auto it = addresses.begin(); it != addresses.end(); ++it, i++) {
+    if (it->size == 128 && it->cidr == cidr && memcmp(it->addr, ipv6_addr, 16) == 0)
+      return i;
+  }
+  return -1;
+}
+
 // Set new_cidr to 0 to clear it.
-static bool SetIPV6AddressOnInterface(NET_LUID *InterfaceLuid, const uint8 new_address[16], int new_cidr, WgCidrAddr *old_address) {
+static bool SetIPV6AddressOnInterface(NET_LUID *InterfaceLuid, const std::vector<WgCidrAddr> &addresses, std::vector<WgCidrAddr> *old_address) {
   NETIO_STATUS Status;
   PMIB_UNICASTIPADDRESS_TABLE table = NULL;
 
   if (old_address)
-    memset(old_address, 0, sizeof(WgCidrAddr));
+    old_address->clear();
 
   Status = GetUnicastIpAddressTable(AF_INET6, &table);
   if (Status != 0) {
     RERROR("GetUnicastAddressTable Failed. Error %d\n", Status);
     return false;
   }
-
-  bool found_row = false;
+  uint64 matching_addr = 0;
   for (int i = 0; i < (int)table->NumEntries; i++) {
     MIB_UNICASTIPADDRESS_ROW *row = &table->Table[i];
     if (!memcmp(&row->InterfaceLuid, InterfaceLuid, sizeof(NET_LUID))) {
       if (row->PrefixOrigin == 1 && row->SuffixOrigin == 1) {
-        if (row->OnLinkPrefixLength == new_cidr && !memcmp(&row->Address.Ipv6.sin6_addr, new_address, 16)) {
-          found_row = true;
+        if (old_address) {
+          WgCidrAddr tmp;
+          AssignIpv6Address(&row->Address.Ipv6.sin6_addr, row->OnLinkPrefixLength, &tmp);
+          old_address->push_back(tmp);
+        }
+
+        int idx = IsIpv6AddressInList(addresses, &row->Address.Ipv6.sin6_addr, row->OnLinkPrefixLength);
+        if (idx >= 0 && idx < 64) {
+          matching_addr |= (uint64)1 << idx;
+          RINFO("Using IPv6 address: %s/%d", PrintIPV6((uint8*)&row->Address.Ipv6.sin6_addr), row->OnLinkPrefixLength);
           continue;
         }
-        if (old_address != NULL)
-          AssignIpv6Address(&row->Address.Ipv6.sin6_addr, row->OnLinkPrefixLength, old_address);
         Status = DeleteUnicastIpAddressEntry(row);
         if (Status)
           RERROR("Error %d deleting IPv6 address: %s/%d", Status, PrintIPV6((uint8*)&row->Address.Ipv6.sin6_addr), row->OnLinkPrefixLength);
@@ -1043,43 +1069,50 @@ static bool SetIPV6AddressOnInterface(NET_LUID *InterfaceLuid, const uint8 new_a
   }
   FreeMibTable(table);
 
-  if (found_row) {
-    RINFO("Using IPv6 address: %s/%d", PrintIPV6(new_address), new_cidr);
-    return true;
+  // Add all ipv6 addresses that were not already set.
+  bool success = true;
+  int i = 0;
+  for (auto it = addresses.begin(); it != addresses.end(); ++it, i++) {
+    // skip it because of wrong type or already set?
+    if (it->size != 128 || i < 64 && (matching_addr & ((uint64)1 << i)))
+      continue;
+
+    MIB_UNICASTIPADDRESS_ROW Row;
+    InitializeUnicastIpAddressEntry(&Row);
+    Row.OnLinkPrefixLength = it->cidr;
+    Row.Address.si_family = AF_INET6;
+    memcpy(&Row.Address.Ipv6.sin6_addr, it->addr, 16);
+    Row.InterfaceLuid = *InterfaceLuid;
+    Status = CreateUnicastIpAddressEntry(&Row);
+    if (Status != 0) {
+      RERROR("Error %d setting IPv6 address: %s/%d", Status, PrintIPV6(it->addr), it->cidr);
+      success = false;
+    } else {
+      RINFO("Added IPV6 Address: %s/%d", PrintIPV6(it->addr), it->cidr);
+    }
   }
-
-  if (!IsIpv6AddressSet(new_address))
-    return true;
-
-  if (old_address != NULL)
-    old_address->size = 128;
-
-  MIB_UNICASTIPADDRESS_ROW Row;
-  InitializeUnicastIpAddressEntry(&Row);
-  Row.OnLinkPrefixLength = new_cidr;
-  Row.Address.si_family = AF_INET6;
-  memcpy(&Row.Address.Ipv6.sin6_addr, new_address, 16);
-  Row.InterfaceLuid = *InterfaceLuid;
-  Status = CreateUnicastIpAddressEntry(&Row);
-  if (Status != 0) {
-    RERROR("Error %d setting IPv6 address: %s/%d", Status, PrintIPV6(new_address), new_cidr);
-    return false;
-  }
-  RINFO("Set IPV6 Address to: %s/%d", PrintIPV6(new_address), new_cidr);
-  return true;
+  return success;
 }
 
 static bool SetIPV6DnsOnInterface(NET_LUID *InterfaceLuid, const IpAddr *new_address, size_t new_address_size) {
   char buf[128];
   char ipv6[128];
+  bool isfirst = true;
   NET_IFINDEX InterfaceIndex;
   if (ConvertInterfaceLuidToIndex(InterfaceLuid, &InterfaceIndex))
     return false;
   if (new_address_size) {
     for (size_t i = 0; i < new_address_size; i++) {
+      if (new_address[i].sin.sin_family != AF_INET6)
+        continue;
       if (!inet_ntop(AF_INET6, (void*)&new_address[i].sin6.sin6_addr, ipv6, sizeof(ipv6)))
         return false;
-      snprintf(buf, sizeof(buf), "netsh interface ipv6 %s dns name=%d static %s validate=no", (i == 0) ? "set" : "add", InterfaceIndex, ipv6);
+      if (isfirst) {
+        isfirst = false;
+        snprintf(buf, sizeof(buf), "netsh interface ipv6 set dnsservers name=%d static %s validate=no", InterfaceIndex, ipv6);
+      } else {
+        snprintf(buf, sizeof(buf), "netsh interface ipv6 add dnsservers name=%d %s validate=no", InterfaceIndex, ipv6);
+      }
       if (!RunNetsh(buf))
         return false;
     }
@@ -1127,7 +1160,6 @@ static bool AddMultipleCatchallRoutes(int inet, int bits, const uint8 *target, c
 TunWin32Adapter::TunWin32Adapter(DnsBlocker *dns_blocker, const char guid[ADAPTER_GUID_SIZE]) {
   handle_ = NULL;
   dns_blocker_ = dns_blocker;
-  old_ipv6_address_.size = 0;
   old_ipv6_metric_ = kMetricNone;
   old_ipv4_metric_ = kMetricNone;
   has_dns6_setting_ = false;
@@ -1162,6 +1194,22 @@ bool TunWin32Adapter::OpenAdapter(TunsafeBackendWin32 *backend, DWORD open_flags
   return (handle_ != NULL);
 }
 
+static inline bool CheckFirstNbitsEquals(const byte *a, const byte *b, size_t n) {
+  return memcmp(a, b, n >> 3) == 0 && ((n & 7) == 0 || !((a[n >> 3] ^ b[n >> 3]) & (0xff << (8 - (n & 7)))));
+}
+
+static bool IsWgCidrAddrSubsetOf(const WgCidrAddr &inner, const WgCidrAddr &outer) {
+  return inner.size == outer.size && inner.cidr >= outer.cidr &&
+    CheckFirstNbitsEquals(inner.addr, outer.addr, outer.cidr);
+}
+
+static bool IsWgCidrAddrSubsetOfAny(const WgCidrAddr &inner, const std::vector<WgCidrAddr> &addr) {
+  for (auto &a : addr)
+    if (IsWgCidrAddrSubsetOf(inner, a))
+      return true;
+  return false;
+}
+
 bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, TunInterface::TunConfigOut *out) {
   DWORD len, err;
   
@@ -1175,14 +1223,28 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
   pre_down_ = std::move(config.pre_post_commands.pre_down);
   post_down_ = std::move(config.pre_post_commands.post_down);
 
-  uint32 netmask = CidrToNetmaskV4(config.cidr);
+  const WgCidrAddr *ipv4_addr = NULL;
+  const WgCidrAddr *ipv6_addr = NULL;
+  for (auto it = config.addresses.begin(); it != config.addresses.end(); ++it) {
+    if (it->size == 32 && ipv4_addr == NULL)
+      ipv4_addr = &*it;
+    else if (it->size == 128 && ipv6_addr == NULL)
+      ipv6_addr = &*it;
+  }
+  if (ipv4_addr == NULL) {
+    RERROR("The TUN adapter on Windows requires an IPv4 address");
+    return false;
+  }
+  
+  uint32 ipv4_netmask = CidrToNetmaskV4(ipv4_addr->cidr);
+  uint32 ipv4_ip = ReadBE32(ipv4_addr->addr);
 
   // Set TAP-Windows TUN subnet mode
   if (1) {
     uint32 v[3];
-    v[0] = htonl(config.ip);
-    v[1] = htonl(config.ip & netmask);
-    v[2] = htonl(netmask);
+    v[0] = htonl(ipv4_ip);
+    v[1] = htonl(ipv4_ip & ipv4_netmask);
+    v[2] = htonl(ipv4_netmask);
     if (!DeviceIoControl(handle_, TAP_IOCTL_CONFIG_TUN, v, sizeof(v), v, sizeof(v), &len, NULL)) {
       RERROR("DeviceIoControl(TAP_IOCTL_CONFIG_TUN) failed");
       return false;
@@ -1192,9 +1254,9 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
   // Set DHCP IP/netmask
   {
     uint32 v[4];
-    v[0] = htonl(config.ip);
-    v[1] = htonl(netmask);
-    v[2] = htonl((config.ip | ~netmask) - 1); // x.x.x.254
+    v[0] = htonl(ipv4_ip);
+    v[1] = htonl(ipv4_netmask);
+    v[2] = htonl((ipv4_ip | ~ipv4_netmask) - 1); // x.x.x.254
     v[3] = 31536000;                         // One year
     if (!DeviceIoControl(handle_, TAP_IOCTL_CONFIG_DHCP_MASQ, v, sizeof(v), v, sizeof(v), &len, NULL)) {
       RERROR("DeviceIoControl(TAP_IOCTL_CONFIG_DHCP_MASQ) failed");
@@ -1202,21 +1264,28 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
     }
   }
 
-  // Set DHCP config string
-  if (config.ipv4_dns.size()) {
+  // Extract and set IPv4 DNS servers through DHCP
+  {
     enum { kMaxDnsServers = 4 };
     uint8 dhcp_options[2 + kMaxDnsServers * 4]; // max 4 dns servers
-    size_t num_dns = std::min<size_t>(config.ipv4_dns.size(), kMaxDnsServers);
-    dhcp_options[0] = 6;
-    dhcp_options[1] = (uint8)(num_dns * 4);
-    for(size_t i = 0; i < num_dns; i++)
-      memcpy(&dhcp_options[2 + i * 4], &config.ipv4_dns[i].sin.sin_addr, num_dns * 4);
-    DWORD dhcp_options_size = (DWORD)(num_dns * 4 + 2);
-    byte output[10];
-    if (!DeviceIoControl(handle_, TAP_IOCTL_CONFIG_DHCP_SET_OPT,
+    uint32 num_dns = 0;
+    for (auto it = config.dns.begin(); it != config.dns.end(); ++it) {
+      if (it->sin.sin_family != AF_INET)
+        continue;
+      memcpy(&dhcp_options[2 + num_dns * 4], &it->sin.sin_addr, 4);
+      if (++num_dns == kMaxDnsServers)
+        break;
+    }
+    if (num_dns != 0) {
+      dhcp_options[0] = 6;
+      dhcp_options[1] = (uint8)(num_dns * 4);
+      DWORD dhcp_options_size = (DWORD)(num_dns * 4 + 2);
+      byte output[10];
+      if (!DeviceIoControl(handle_, TAP_IOCTL_CONFIG_DHCP_SET_OPT,
         (void*)dhcp_options, dhcp_options_size, output, sizeof(output), &len, NULL)) {
-      RERROR("DeviceIoControl(TAP_IOCTL_CONFIG_DHCP_SET_OPT) failed");
-      return false;
+        RERROR("DeviceIoControl(TAP_IOCTL_CONFIG_DHCP_SET_OPT) failed");
+        return false;
+      }
     }
   }
 
@@ -1246,7 +1315,7 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
     err = SetMtuOnNetworkAdapter(&interface_luid_, AF_INET, config.mtu);
     if (err)
       RERROR("SetMtuOnNetworkAdapter IPv4 failed: %d", err);
-    if (config.ipv6_cidr) {
+    if (ipv6_addr) {
       err = SetMtuOnNetworkAdapter(&interface_luid_, AF_INET6, config.mtu);
       if (err)
         RERROR("SetMtuOnNetworkAdapter IPv6 failed: %d", err);
@@ -1254,18 +1323,22 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
   }
 
   has_dns6_setting_ = false;
-  if (config.ipv6_cidr) {
-    SetIPV6AddressOnInterface(&interface_luid_, config.ipv6_address, config.ipv6_cidr, &old_ipv6_address_);
+  if (ipv6_addr) {
+    SetIPV6AddressOnInterface(&interface_luid_, config.addresses, &old_ipv6_address_);
 
-    if (config.ipv6_dns.size()) {
-      has_dns6_setting_ = true;
-      if (!SetIPV6DnsOnInterface(&interface_luid_, config.ipv6_dns.data(), config.ipv6_dns.size())) {
-        RERROR("SetIPV6DnsOnInterface: failed");
+    // Check if we have at least one ipv6 setting
+    for (auto it = config.dns.begin(); it != config.dns.end(); ++it) {
+      if (it->sin.sin_family == AF_INET6) {
+        has_dns6_setting_ = true;
+        break;
       }
+    }
+    if (has_dns6_setting_ && !SetIPV6DnsOnInterface(&interface_luid_, config.dns.data(), config.dns.size())) {
+      RERROR("SetIPV6DnsOnInterface: failed");
     }
   }
 
-  if ((config.ipv4_dns.size() || has_dns6_setting_) && config.block_dns_on_adapters) {
+  if (config.dns.size() && config.block_dns_on_adapters) {
     RINFO("Blocking standard DNS on all adapters");
     dns_blocker_->BlockDnsExceptOnAdapter(interface_luid_, has_dns6_setting_);
 
@@ -1273,7 +1346,7 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
     if (err)
       RERROR("SetMetricOnNetworkAdapter IPv4 failed: %d", err);
 
-    if (config.ipv6_cidr) {
+    if (ipv6_addr) {
       err = SetMetricOnNetworkAdapter(&interface_luid_, AF_INET6, 2, &old_ipv6_metric_);
       if (err)
         RERROR("SetMetricOnNetworkAdapter IPv6 failed: %d", err);
@@ -1289,24 +1362,16 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
 
   RouteInfo ri, ri6;
 
-  uint32 default_route_endpoint_v4 = ToBE32(config.default_route_endpoint_v4);
-
   // Delete any current /1 default routes and read some stuff from the routing table.
-  if (!GetDefaultRouteAndDeleteOldRoutes(AF_INET, &interface_luid_, block_all_traffic_route, config.use_ipv4_default_route ? (uint8*)&default_route_endpoint_v4 : NULL, &ri)) {
+  if (!GetDefaultRouteAndDeleteOldRoutes(AF_INET, &interface_luid_, block_all_traffic_route, &config.excluded_routes, &ri)) {
     RERROR("Unable to read old default gateway and delete old default routes.");
     return false;
   }
 
-  if (config.ipv6_cidr) {
-    // Delete any current /1 default routes and read some stuff from the routing table.
-    if (!GetDefaultRouteAndDeleteOldRoutes(AF_INET6, &interface_luid_, block_all_traffic_route, config.use_ipv6_default_route ? (uint8*)config.default_route_endpoint_v6 : NULL, &ri6)) {
-      RERROR("Unable to read old default gateway and delete old default routes for IPv6.");
-      return false;
-    }
+  // Delete any current /1 default routes and read some stuff from the routing table.
+  if (!GetDefaultRouteAndDeleteOldRoutes(AF_INET6, &interface_luid_, block_all_traffic_route, &config.excluded_routes, &ri6)) {
+    RERROR("Unable to read old default gateway and delete old default routes for IPv6.");
   }
-
-  uint32 default_route_v4 = ComputeIpv4DefaultRoute(config.ip, netmask);
-  uint8 default_route_v6[16];
 
   if (block_all_traffic_route) {
     RINFO("Blocking all regular Internet traffic using routing rules");
@@ -1317,17 +1382,17 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
       g_killswitch_curr |= kBlockInternet_Route;
 
       uint32 dst[4] = {0};
+
       if (!AddMultipleCatchallRoutes(AF_INET, 1, (uint8*)&dst, localhost_luid, NULL)) {
         RERROR("Unable to add routes for route based blocking.");
         DeactivateKillSwitch(0);
         return false;
       }
-      if (config.ipv6_cidr) {
-        if (!AddMultipleCatchallRoutes(AF_INET6, 1, (uint8*)&dst, localhost_luid, NULL)) {
-          RERROR("Unable to add IPv6 routes for route based blocking.");
-          DeactivateKillSwitch(0);
-          return false;
-        }
+
+      if (!AddMultipleCatchallRoutes(AF_INET6, 1, (uint8*)&dst, localhost_luid, NULL)) {
+        RERROR("Unable to add IPv6 routes for route based blocking.");
+        DeactivateKillSwitch(0);
+        return false;
       }
     }
   }
@@ -1335,8 +1400,7 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
   if (ibs & kBlockInternet_Firewall) {
     RINFO("Blocking all regular Internet traffic using firewall rules");
     g_killswitch_curr |= kBlockInternet_Firewall;
-
-    if (!AddKillSwitchFirewall(interface_luid_, config.ipv6_cidr != 0, (ibs & kBlockInternet_AllowLocalNetworks) != 0)) {
+    if (!AddKillSwitchFirewall(interface_luid_, true, (ibs & kBlockInternet_AllowLocalNetworks) != 0)) {
       RERROR("Unable to activate firewall based kill switch");
       DeactivateKillSwitch(0);
       return false;
@@ -1345,63 +1409,54 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
 
   DeactivateKillSwitch(ibs);
 
-  // Configure default route?
-  if (config.use_ipv4_default_route) {
-    // Add a bypass route to the original gateway?
-    if (config.default_route_endpoint_v4 != 0) {
-      if (!ri.found_default_adapter) {
-        RERROR("Unable to read old ipv4 default gateway");
-        return false;
+  uint8 default_route_v4[4];
+  uint8 default_route_v6[16];
+
+  WriteBE32(default_route_v4, ComputeIpv4DefaultRoute(ipv4_ip, ipv4_netmask));
+  if (ipv6_addr)
+    ComputeIpv6DefaultRoute(ipv6_addr->addr, ipv6_addr->cidr, default_route_v6);
+
+  // Add all the routes that should go through the VPN
+  for (auto it = config.included_routes.begin(); it != config.included_routes.end(); ++it) {
+    if (it->cidr == 0) {
+      // /0 gets changed to two /1 routes, to avoid overwriting the system's default route
+      if (it->size == 32) {
+        if (!AddMultipleCatchallRoutes(AF_INET, block_all_traffic_route ? 2 : 1, default_route_v4, interface_luid_, &routes_to_undo_))
+          RERROR("Unable to add new default ipv4 route.");
+      } else if (it->size == 128 && ipv6_addr) {
+        if (!AddMultipleCatchallRoutes(AF_INET6, block_all_traffic_route ? 2 : 1, default_route_v6, interface_luid_, &routes_to_undo_))
+          RERROR("Unable to add new default ipv6 route.");
       }
-      if (!AddRoute(AF_INET, &default_route_endpoint_v4, 32, ri.default_gw, &ri.default_adapter, &routes_to_undo_)) {
-        RERROR("Unable to add ipv4 gateway bypass route.");
-        return false;
-      }
+      continue;
     }
-    // Either add 4 routes or 2 routes, depending on if we use route blocking.
-    uint32 be = ToBE32(default_route_v4);
-    if (!AddMultipleCatchallRoutes(AF_INET, block_all_traffic_route ? 2 : 1, (uint8*)&be, interface_luid_, &routes_to_undo_))
-      RERROR("Unable to add new default ipv4 route.");
-  }
+    // Avoid adding a route if it's a subset of the address
+    if (IsWgCidrAddrSubsetOfAny(*it, config.addresses))
+      continue;
 
-  if (config.ipv6_cidr) {
-    ComputeIpv6DefaultRoute(config.ipv6_address, config.ipv6_cidr, default_route_v6);
-
-    // Configure default route?
-    if (config.use_ipv6_default_route) {
-      if (IsIpv6AddressSet(config.default_route_endpoint_v6)) {
-        if (!ri6.found_default_adapter) {
-          RERROR("Unable to read old ipv6 default gateway");
-          return false;
-        }
-        if (!AddRoute(AF_INET6, config.default_route_endpoint_v6, 128, ri.default_gw, &ri6.default_adapter, &routes_to_undo_)) {
-          RERROR("Unable to add ipv6 gateway bypass route.");
-          return false;
-        }
-      }
-      if (!AddMultipleCatchallRoutes(AF_INET6, block_all_traffic_route ? 2 : 1, default_route_v6, interface_luid_, &routes_to_undo_))
-        RERROR("Unable to add new default ipv6 route.");
-    }
-  }
-
-  // Add all the extra routes
-  for (auto it = config.extra_routes.begin(); it != config.extra_routes.end(); ++it) {
     if (it->size == 32) {
-      uint32 be = ToBE32(default_route_v4);
-      AddRoute(AF_INET, it->addr, it->cidr, &be, &interface_luid_, &routes_to_undo_);
-    } else if (it->size == 128 && config.ipv6_cidr) {
+      AddRoute(AF_INET, it->addr, it->cidr, default_route_v4, &interface_luid_, &routes_to_undo_);
+    } else if (it->size == 128 && ipv6_addr) {
       AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, &interface_luid_, &routes_to_undo_);
     }
   }
 
   // Add all the routes that should bypass vpn
-  for (auto it = config.excluded_ips.begin(); it != config.excluded_ips.end(); ++it) {
+  int warned = 0;
+  for (auto it = config.excluded_routes.begin(); it != config.excluded_routes.end(); ++it) {
     if (it->size == 32) {
-      if (ri.found_default_adapter)
+      if (ri.found_default_adapter) {
         AddRoute(AF_INET, it->addr, it->cidr, ri.default_gw, &ri.default_adapter, &routes_to_undo_);
-    } else if (it->size == 128 && config.ipv6_cidr) {
-      if (ri6.found_default_adapter)
+      } else if (!(warned & 1)) {
+        warned |= 1;
+        RERROR("Unable to read old ipv4 default gateway");
+      }
+    } else if (it->size == 128) {
+      if (ri6.found_default_adapter) {
         AddRoute(AF_INET6, it->addr, it->cidr, ri6.default_gw, &ri6.default_adapter, &routes_to_undo_);
+      } else if (!(warned & 2)) {
+        warned |= 2;
+        RERROR("Unable to read old ipv6 default gateway");
+      }
     }
   }
 
@@ -1414,7 +1469,7 @@ bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, T
     RERROR("FlushIpNetTable failed: 0x%X", err);
     return false;
   }
-  if (config.ipv6_cidr) {
+  if (ipv6_addr != NULL) {
     if ((err = FlushIpNetTable2(AF_INET6, InterfaceIndex)) != NO_ERROR) {
       RERROR("FlushIpNetTable failed: 0x%X", err);
       return false;
@@ -1439,8 +1494,8 @@ void TunWin32Adapter::CloseAdapter(bool is_restart) {
     TunAdaptersInUse::GetInstance()->Release(backend_);
   }
 
-  if (old_ipv6_address_.size != 0)
-    SetIPV6AddressOnInterface(&interface_luid_, old_ipv6_address_.addr, old_ipv6_address_.cidr, NULL);
+  if (old_ipv6_address_.size())
+    SetIPV6AddressOnInterface(&interface_luid_, old_ipv6_address_, NULL);
   if (old_ipv4_metric_ != kMetricNone)
     SetMetricOnNetworkAdapter(&interface_luid_, AF_INET, old_ipv4_metric_, NULL);
   if (old_ipv6_metric_ != kMetricNone)
@@ -1449,7 +1504,7 @@ void TunWin32Adapter::CloseAdapter(bool is_restart) {
     SetIPV6DnsOnInterface(&interface_luid_, NULL, 0);
 
   old_ipv4_metric_ = old_ipv6_metric_ = -1;
-  old_ipv6_address_.size = 0;
+  old_ipv6_address_.clear();
   has_dns6_setting_ = false;
 
   for (auto it = routes_to_undo_.begin(); it != routes_to_undo_.end(); ++it)
@@ -2245,10 +2300,17 @@ void TunsafeBackendWin32::SendConfigurationProtocolPacket(uint32 identifier, con
 
 void TunsafeBackendWin32::OnConnected() {
   if (status_ != TunsafeBackend::kStatusConnected) {
-    ipv4_ip_ = ReadBE32(wg_processor_->tun_addr().addr);
+    const WgCidrAddr *ipv4_addr = NULL;
+    for (const WgCidrAddr &x : wg_processor_->addr()) {
+      if (x.size == 32) {
+        ipv4_addr = &x;
+        break;
+      }
+    }
+    ipv4_ip_ = ipv4_addr ? ReadBE32(ipv4_addr->addr) : 0;
     if (status_ != TunsafeBackend::kStatusReconnecting) {
       char buf[kSizeOfAddress];
-      RINFO("Connection established. IP %s", print_ip_prefix(buf, AF_INET, wg_processor_->tun_addr().addr, -1));
+      RINFO("Connection established. IP %s", ipv4_addr ? print_ip_prefix(buf, AF_INET, ipv4_addr->addr, -1) : "(none)");
     }
     SetStatus(TunsafeBackend::kStatusConnected);
   }

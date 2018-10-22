@@ -37,18 +37,6 @@ void *IpToPeerMap::LookupV4(uint32 ip) {
   return ipv4_.Lookup(ip);
 }
 
-void *IpToPeerMap::LookupV4DefaultPeer() {
-  return ipv4_.LookupExact(0, 0);
-}
-
-void *IpToPeerMap::LookupV6DefaultPeer() {
-  for (auto it = ipv6_.begin(); it != ipv6_.end(); ++it) {
-    if (it->cidr_len == 0)
-      return it->peer;
-  }
-  return NULL;
-}
-
 void IpToPeerMap::RemoveV4(uint32 ip, int cidr) {
   ipv4_.Delete(ip, cidr);
 }

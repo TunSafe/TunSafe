@@ -50,9 +50,6 @@ public:
   void *LookupV4(uint32 ip);
   void *LookupV6(const void *addr);
 
-  void *LookupV4DefaultPeer();
-  void *LookupV6DefaultPeer();
-
   void RemoveV4(uint32 ip, int cidr);
   void RemoveV6(const void *addr, int cidr);
 private:

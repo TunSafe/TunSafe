@@ -372,29 +372,6 @@ static uint32 CidrToNetmaskV4(int cidr) {
   return cidr == 32 ? 0xffffffff : 0xffffffff << (32 - cidr);
 }
 
-static uint32 ComputeIpv4DefaultRoute(uint32 ip, uint32 netmask) {
-  uint32 default_route_v4 = (ip & netmask) | 1;
-  if (default_route_v4 == ip)
-    default_route_v4++;
-  return default_route_v4;
-}
-
-static void ComputeIpv6DefaultRoute(const uint8 *ipv6_address, uint8 ipv6_cidr, uint8 *default_route_v6) {
-  memcpy(default_route_v6, ipv6_address, 16);
-  // clear the last bits of the ipv6 address to match the cidr.
-  size_t n = (ipv6_cidr + 7) >> 3;
-  memset(&default_route_v6[n], 0, 16 - n);
-  if (n == 0)
-    return;
-  // adjust the final byte
-  default_route_v6[n - 1] &= ~(0xff >> (ipv6_cidr & 7));
-  // set the very last byte to something
-  default_route_v6[15] |= 1;
-  // ensure it doesn't collide
-  if (memcmp(default_route_v6, ipv6_address, 16) == 0)
-    default_route_v6[15] ^= 3;
-}
-
 void TunsafeBackendBsd::AddRoute(uint32 ip, uint32 cidr, uint32 gw, const char *dev) {
   uint32 ip_be, gw_be;
   WriteBE32(&ip_be, ip);
@@ -411,7 +388,7 @@ static void AddOrRemoveRoute(const RouteInfo &cd, bool remove) {
 #if defined(OS_LINUX)
   const char *cmd = remove ? "del" : "add";
   const char *proto = (cd.family == AF_INET) ? NULL : "-6";
-    if (cd.dev.empty()) {
+  if (cd.dev.empty()) {
     RunCommand("/sbin/ip %s route %s %s via %s", proto, cmd, buf1, buf2);
   } else {
     RunCommand("/sbin/ip %s route %s %s dev %s", proto, cmd, buf1, cd.dev.c_str());
@@ -451,6 +428,7 @@ static bool IsIpv6AddressSet(const void *p) {
 // Called to initialize tun
 bool TunsafeBackendBsd::Configure(const TunConfig &&config, TunConfigOut *out) override {
   char buf[kSizeOfAddress];
+  char buf2[kSizeOfAddress];
 
   if (!RunPrePostCommand(config.pre_post_commands.pre_up)) {
     RERROR("Pre command failed!");
@@ -461,72 +439,74 @@ bool TunsafeBackendBsd::Configure(const TunConfig &&config, TunConfigOut *out) o
 
   if (!InitializeTun(devname_))
     return false;
-  
-  uint32 netmask = CidrToNetmaskV4(config.cidr);
-  uint32 default_route_v4 = ComputeIpv4DefaultRoute(config.ip, netmask);
 
+  const WgCidrAddr *ipv4_addr = NULL;
+  const WgCidrAddr *ipv6_addr = NULL;
+  for (auto it = config.addresses.begin(); it != config.addresses.end(); ++it) {
+    if (it->size == 32 && ipv4_addr == NULL)
+      ipv4_addr = &*it;
+    else if (it->size == 128 && ipv6_addr == NULL)
+      ipv6_addr = &*it;
+  }
+  if (ipv4_addr == NULL) {
+    RERROR("The TUN adapter requires an IPv4 address");
+    return false;
+  }
+  uint32 ipv4_netmask = CidrToNetmaskV4(ipv4_addr->cidr);
+  uint32 ipv4_ip = ReadBE32(ipv4_addr->addr);
+
+  addresses_to_remove_ = config.addresses;
 
 #if defined(OS_LINUX)
-  if (config.ip) {
-    char ip[4];
-    WriteBE32(ip, config.ip);
-    RunCommand("/sbin/ip address add dev %s %s", devname_, print_ip_prefix(buf, AF_INET, ip, config.cidr));
-  }
-  if (config.ipv6_cidr) {
-    RunCommand("/sbin/ip address add dev %s %s", devname_, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
-  }
+  RunCommand("/sbin/ip address flush dev %s scope global", devname_);
+  for(const WgCidrAddr &a : config.addresses)
+    RunCommand("/sbin/ip address add dev %s %s", devname_, print_ip_prefix(buf, a.size == 32 ? AF_INET : AF_INET6, a.addr, a.cidr));
   RunCommand("/sbin/ip link set dev %s mtu %d up", devname_, config.mtu);
-#else  // !defined(OS_LINUX)
-  if (config.ip) {
-    RunCommand("/sbin/ifconfig %s %A mtu %d %A netmask %A up", devname_, config.ip, config.mtu, config.ip, netmask);
+#else
+  for(const WgCidrAddr &a : config.addresses) {
+    if (a.size == 32) {
+      RunCommand("/sbin/ifconfig %s inet %s %s add", devname_, print_ip_prefix(buf, AF_INET, a.addr, a.cidr), print_ip_prefix(buf2, AF_INET, a.addr, -1));
+    } else {
+      RunCommand("/sbin/ifconfig %s inet6 %s add", devname_, print_ip_prefix(buf, AF_INET6, a.addr, a.cidr));
+    }
   }
-  if (config.ipv6_cidr) {
-    RunCommand("/sbin/ifconfig %s inet6 add %s", devname_, print_ip_prefix(buf, AF_INET6, config.ipv6_address, config.ipv6_cidr));
-  }
-#endif  // !defined(OS_LINUX)
+  RunCommand("/sbin/ifconfig %s mtu %d up", devname_, config.mtu);
+#endif
 
-  if (config.ip) {
-    AddRoute(config.ip & netmask, config.cidr, config.ip, devname_);
-  }
 
-  if (config.use_ipv4_default_route) {
-    if (config.default_route_endpoint_v4) {
-      uint32 ipv4_default_gw;
-      char default_iface[16];
-      if (!GetDefaultRoute(default_iface, sizeof(default_iface), &ipv4_default_gw)) {
+  char default_iface[16];
+  uint32 ipv4_default_gw;
+  bool found_ipv4_route = GetDefaultRoute(default_iface, sizeof(default_iface), &ipv4_default_gw);
+  for (auto it = config.excluded_routes.begin(); it != config.excluded_routes.end(); ++it) {
+    if (it->size == 32) {
+      if (!found_ipv4_route) {
         RERROR("Unable to determine default interface.");
         return false;
       }
-      AddRoute(config.default_route_endpoint_v4, 32, ipv4_default_gw, NULL);
-      for (auto it = config.excluded_ips.begin(); it != config.excluded_ips.end(); ++it) {
-        if (it->size == 32)
-          AddRoute(ReadBE32(it->addr), it->cidr, ipv4_default_gw, default_iface);
-      }
-    }
-    AddRoute(0x00000000, 1, default_route_v4, devname_);
-    AddRoute(0x80000000, 1, default_route_v4, devname_);
-  }
-
-  uint8 default_route_v6[16];
-
-  if (config.ipv6_cidr) {
-    static const uint8 matchall_1_route[17] = {0x80, 0, 0, 0};
-    ComputeIpv6DefaultRoute(config.ipv6_address, config.ipv6_cidr, default_route_v6);
-    if (config.use_ipv6_default_route) {
-      if (IsIpv6AddressSet(config.default_route_endpoint_v6)) {
-        RERROR("default_route_endpoint_v6 not supported");
-      }
-      AddRoute(AF_INET6, matchall_1_route + 1, 1, default_route_v6, devname_);
-      AddRoute(AF_INET6, matchall_1_route + 0, 1, default_route_v6, devname_);
+      AddRoute(ReadBE32(it->addr), it->cidr, ipv4_default_gw, NULL);
+    } else if (it->size == 128) {
+      RERROR("default_route_endpoint_v6 not supported");
+      return false;
     }
   }
 
   // Add all the extra routes
-  for (auto it = config.extra_routes.begin(); it != config.extra_routes.end(); ++it) {
+  for (auto it = config.included_routes.begin(); it != config.included_routes.end(); ++it) {
+    if (it->cidr == 0) {
+      if (it->size == 32) {
+        AddRoute(0x00000000, 1, ipv4_ip, devname_);
+        AddRoute(0x80000000, 1, ipv4_ip, devname_);
+      } else if (it->size == 128 && ipv6_addr) {
+        static const uint8 matchall_1_route[17] = {0x80, 0, 0, 0};
+        AddRoute(AF_INET6, matchall_1_route + 1, 1, ipv6_addr->addr, devname_);
+        AddRoute(AF_INET6, matchall_1_route + 0, 1, ipv6_addr->addr, devname_);
+      }
+      continue;
+    }
     if (it->size == 32) {
-      AddRoute(ReadBE32(it->addr), it->cidr, default_route_v4, devname_);
-    } else if (it->size == 128 && config.ipv6_cidr) {
-      AddRoute(AF_INET6, it->addr, it->cidr, default_route_v6, devname_);
+      AddRoute(ReadBE32(it->addr), it->cidr, ipv4_ip, devname_);
+    } else if (it->size == 128 && ipv6_addr) {
+      AddRoute(AF_INET6, it->addr, it->cidr, ipv6_addr->addr, devname_);
     }
   }
 
@@ -539,13 +519,30 @@ bool TunsafeBackendBsd::Configure(const TunConfig &&config, TunConfigOut *out) o
 }
 
 void TunsafeBackendBsd::CleanupRoutes() {
+  char buf[kSizeOfAddress];
+
   RunPrePostCommand(pre_down_);
 
   for(auto it = cleanup_commands_.begin(); it != cleanup_commands_.end(); ++it) {
     if (!tun_interface_gone_ || strcmp(it->dev.c_str(), devname_) != 0)
       DelRoute(*it);
   }
+
+#if defined(OS_LINUX)
+  for(const WgCidrAddr &a : addresses_to_remove_)
+    RunCommand("/sbin/ip address del dev %s %s", devname_, print_ip_prefix(buf, a.size == 32 ? AF_INET : AF_INET6, a.addr, a.cidr));
+#else
+  for(const WgCidrAddr &a : addresses_to_remove_) {
+    if (a.size == 32) {
+      RunCommand("/sbin/ifconfig %s inet %s -alias", devname_, print_ip_prefix(buf, AF_INET, a.addr, -1));
+    } else {
+      RunCommand("/sbin/ifconfig %s inet6 %s -alias", devname_, print_ip_prefix(buf, AF_INET6, a.addr, -1));
+    }
+  }
+#endif
+
   cleanup_commands_.clear();
+  addresses_to_remove_.clear();
 
   RunPrePostCommand(post_down_);
 
@@ -767,9 +764,13 @@ public:
 
   virtual void OnConnected() override {
     if (!is_connected_) {
-      uint32 ipv4_ip = ReadBE32(wg_processor_->tun_addr().addr);
+      const WgCidrAddr *ipv4_addr = NULL;
+      for (const WgCidrAddr &x : wg_processor_->addr()) {
+        if (x.size == 32) { ipv4_addr = &x; break; }
+      }
+      uint32 ipv4_ip = ipv4_addr ? ReadBE32(ipv4_addr->addr) : 0;
       char buf[kSizeOfAddress];
-      RINFO("Connection established. IP %s", print_ip(buf, ipv4_ip));
+      RINFO("Connection established. IP %s", ipv4_ip ? print_ip(buf, ipv4_ip) : "(none)");
       is_connected_ = true;
     }
   }
@@ -831,3 +832,4 @@ int main(int argc, char **argv) {
 
   return 0;
 }
+

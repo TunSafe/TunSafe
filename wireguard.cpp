@@ -23,8 +23,6 @@ enum {
 };
 
 WireguardProcessor::WireguardProcessor(UdpInterface *udp, TunInterface *tun, ProcessorDelegate *procdel) {
-  tun_addr_.size = 0;
-  tun6_addr_.size = 0;
   udp_ = udp;
   tun_ = tun;
   procdel_ = procdel;
@@ -54,21 +52,16 @@ void WireguardProcessor::SetListenPort(int listen_port) {
 }
 
 void WireguardProcessor::AddDnsServer(const IpAddr &sin) {
-  std::vector<IpAddr> *target = (sin.sin.sin_family == AF_INET6) ? &dns6_addr_ : &dns_addr_;
-  target->push_back(sin);
+  dns_addr_.push_back(sin);
 }
 
 bool WireguardProcessor::SetTunAddress(const WgCidrAddr &addr) {
-  WgCidrAddr *target = (addr.size == 128) ? &tun6_addr_ : &tun_addr_;
-  if (target->size != 0)
-    return false;
-  *target = addr;
+  addresses_.push_back(addr);
   return true;
 }
 
 void WireguardProcessor::ClearTunAddress() {
-  tun_addr_.size = 0;
-  tun6_addr_.size = 0;
+  addresses_.clear();
 }
 
 void WireguardProcessor::AddExcludedIp(const WgCidrAddr &cidr_addr) {
@@ -118,19 +111,32 @@ void WireguardProcessor::SetupCompressionHeader(WgPacketCompressionVer01 *c) {
   c->ttl = 64;
 #endif  // defined(OS_WIN)
   WriteLE16(&c->version, EXT_PACKET_COMPRESSION_VER);
-  memcpy(c->ipv4_addr, &tun_addr_.addr, 4);
-  if (tun6_addr_.size == 128)
-    memcpy(c->ipv6_addr, &tun6_addr_.addr, 16);
-  c->flags = ((tun_addr_.cidr >> 3) & 3);
+
+  for (auto it = addresses_.begin(); it != addresses_.end(); ++it) {
+    if (it->size == 32) {
+      memcpy(c->ipv4_addr, it->addr, 4);
+      c->flags = ((it->cidr >> 3) & 3);
+      break;
+    }
+  }
+  for (auto it = addresses_.begin(); it != addresses_.end(); ++it) {
+    if (it->size == 128) {
+      memcpy(c->ipv6_addr, it->addr, 16);
+      break;
+    }
+  }
 }
 
-static inline bool CheckFirstNbitsEquals(const byte *a, const byte *b, size_t n) {
-  return memcmp(a, b, n >> 3) == 0 && ((n & 7) == 0 || !((a[n >> 3] ^ b[n >> 3]) & (0xff << (8 - (n & 7)))));
-}
-
-static bool IsWgCidrAddrSubsetOf(const WgCidrAddr &inner, const WgCidrAddr &outer) {
-  return inner.size == outer.size && inner.cidr >= outer.cidr &&
-         CheckFirstNbitsEquals(inner.addr, outer.addr, outer.cidr);
+static WgCidrAddr WgCidrAddrFromIpAddr(const IpAddr &addr) {
+  WgCidrAddr r = {0};
+  if (addr.sin.sin_family == AF_INET) {
+    r.size = r.cidr = 32;
+    memcpy(r.addr, &addr.sin.sin_addr, 4);
+  } else if (addr.sin.sin_family == AF_INET6) {
+    r.size = r.cidr = 128;
+    memcpy(r.addr, &addr.sin6.sin6_addr, 16);
+  }
+  return r;
 }
 
 bool WireguardProcessor::Start() {
@@ -146,74 +152,52 @@ bool WireguardProcessor::ConfigureTun() {
   assert(dev_.IsMainThread());
 
   TunInterface::TunConfig config = {0};
-  if (tun_addr_.size == 32) {
-    if (tun_addr_.cidr >= 31) {
-      RERROR("TAP is not compatible CIDR /31 or /32. Changing to /24");
-      tun_addr_.cidr = 24;
-    }
-    config.ip = ReadBE32(tun_addr_.addr);
-    config.cidr = tun_addr_.cidr;
-  } else {
-    RERROR("No IPv4 address configured");
-  }
+  uint32 ipv4_broadcast_addr = 0xffffffff;
 
-  config.mtu = mtu_;
-  config.pre_post_commands = pre_post_;
-  config.excluded_ips = excluded_ips_;
+  for (auto it = addresses_.begin(); it != addresses_.end(); ++it) {
+    if (it->size == 32) {
+      if (it->cidr >= 31) {
+        RINFO("TAP is not compatible CIDR /31 or /32. Changing to /24");
+        it->cidr = 24;
+      }
 
-  uint32 netmask = tun_addr_.cidr == 32 ? 0xffffffff : 0xffffffff << (32 - tun_addr_.cidr);
-
-  uint32 ipv4_broadcast_addr = (netmask == 0xffffffff) ? 0xffffffff : config.ip | ~netmask;
-
-  if (tun6_addr_.size == 128) {
-    if (tun6_addr_.cidr > 126) {
-      RERROR("IPv6 /127 or /128 not supported. Changing to 120");
-      tun6_addr_.cidr = 120;
-    }
-    config.ipv6_cidr = tun6_addr_.cidr;
-    memcpy(&config.ipv6_address, tun6_addr_.addr, 16);
-  }
-
-  if (add_routes_mode_) {
-    WgPeer *peer = (WgPeer *)dev_.ip_to_peer_map().LookupV4DefaultPeer();
-    if (peer != NULL && peer->endpoint_.sin.sin_family != 0) {
-      config.default_route_endpoint_v4 = (peer->endpoint_.sin.sin_family == AF_INET) ? ReadBE32(&peer->endpoint_.sin.sin_addr) : 0;
-      // Set the default route to something
-      config.use_ipv4_default_route = true;
-      peer->allow_endpoint_change_ = false;
-    }
-
-    // Also configure ipv6 gw?
-    if (config.ipv6_cidr != 0) {
-      peer = (WgPeer*)dev_.ip_to_peer_map().LookupV6DefaultPeer();
-      if (peer != NULL && peer->endpoint_.sin.sin_family != 0) {
-        if (peer->endpoint_.sin.sin_family == AF_INET6)
-          memcpy(&config.default_route_endpoint_v6, &peer->endpoint_.sin6.sin6_addr, 16);
-        config.use_ipv6_default_route = true;
-        peer->allow_endpoint_change_ = false;
+      // Packets to this IP will not be sent out.
+      if (ipv4_broadcast_addr == 0xffffffff) {
+        uint32 netmask = it->cidr == 32 ? 0xffffffff : 0xffffffff << (32 - it->cidr);
+        ipv4_broadcast_addr = (netmask == 0xffffffff) ? 0xffffffff : ReadBE32(it->addr) | ~netmask;
+      }
+    } else if (it->size == 128) {
+      if (it->cidr > 126) {
+        RERROR("IPv6 /127 or /128 not supported. Changing to 120");
+        it->cidr = 120;
       }
     }
+    config.addresses.push_back(*it);
+  }
+  
+  config.mtu = mtu_;
+  config.pre_post_commands = pre_post_;
+  config.excluded_routes = excluded_ips_;
 
+  if (add_routes_mode_) {
     // For each peer, add the extra routes to the extra routes table
     for (WgPeer *peer = dev_.first_peer(); peer; peer = peer->next_peer_) {
       for (auto it = peer->allowed_ips_.begin(); it != peer->allowed_ips_.end(); ++it) {
-        // Don't add an entry if it's identical to my address or it's a default route
-        if (IsWgCidrAddrSubsetOf(*it, tun_addr_) || IsWgCidrAddrSubsetOf(*it, tun6_addr_) || it->cidr == 0)
-          continue;
-        // Don't add an entry if we have no ipv6 address configured
-        if (config.ipv6_cidr == 0 && it->size != 32)
-          continue;
-        config.extra_routes.push_back(*it);
+        config.included_routes.push_back(*it);
+        // If peer has the ::/0 or 0.0.0.0/0 address, disallow endpoint change.
+        if (it->cidr == 0)
+          peer->allow_endpoint_change_ = false;
       }
+      // Add the peer's endpoint to the route exclusion list.
+      WgCidrAddr endpoint_addr = WgCidrAddrFromIpAddr(peer->endpoint_);
+      if (endpoint_addr.size != 0)
+        config.excluded_routes.push_back(endpoint_addr);
     }
   }
 
-  config.block_dns_on_adapters = dns_blocking_ && ((config.use_ipv4_default_route && dns_addr_.size()) ||
-                                                   (config.use_ipv6_default_route && dns6_addr_.size()));
+  config.block_dns_on_adapters = dns_blocking_;
   config.internet_blocking = internet_blocking_;
-
-  config.ipv4_dns = dns_addr_;
-  config.ipv6_dns = dns6_addr_;
+  config.dns = dns_addr_;
 
   TunInterface::TunConfigOut config_out;
   if (!tun_->Configure(std::move(config), &config_out))

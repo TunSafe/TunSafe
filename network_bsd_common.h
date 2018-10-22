@@ -80,6 +80,7 @@ protected:
   WireguardProcessor *processor_;
   std::vector<RouteInfo> cleanup_commands_;
   std::vector<std::string> pre_down_, post_down_;
+  std::vector<WgCidrAddr> addresses_to_remove_;
   sigset_t orig_signal_mask_;
   char devname_[16];
   bool tun_interface_gone_;

@@ -379,10 +379,8 @@ void WgConfig::HandleConfigurationProtocolGet(WireguardProcessor *proc, std::str
   CmsgAppendHex(result, "private_key", proc->dev_.s_priv_, sizeof(proc->dev_.s_priv_));
   if (proc->listen_port_)
     CmsgAppendFmt(result, "listen_port=%d", proc->listen_port_);
-  if (proc->tun_addr_.size == 32)
-    CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(proc->tun_addr_, buf));
-  if (proc->tun6_addr_.size == 128)
-    CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(proc->tun6_addr_, buf));
+  for(const WgCidrAddr &x : proc->addresses_)
+    CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(x, buf));
   
   for (WgPeer *peer = proc->dev_.peers_; peer; peer = peer->next_peer_) {
     WG_SCOPED_LOCK(peer->lock_);

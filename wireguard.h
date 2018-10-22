@@ -99,8 +99,7 @@ public:
 
   WgDevice &dev() { return dev_; }
   TunInterface::PrePostCommands &prepost() { return pre_post_; }
-  const WgCidrAddr &tun_addr() { return tun_addr_; }
-
+  const std::vector<WgCidrAddr> &addr() { return addresses_; }
   void RunAllMainThreadScheduled();
 private:
   void DoWriteUdpPacket(Packet *packet);
@@ -138,12 +137,10 @@ private:
 
   WgDevice dev_;
 
-  WgCidrAddr tun_addr_;
-  WgCidrAddr tun6_addr_;
-
   WgProcessorStats stats_;
 
-  std::vector<IpAddr> dns_addr_, dns6_addr_;
+  std::vector<WgCidrAddr> addresses_;
+  std::vector<IpAddr> dns_addr_;
 
   TunInterface::PrePostCommands pre_post_;
 

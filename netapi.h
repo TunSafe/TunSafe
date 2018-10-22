@@ -63,43 +63,26 @@ public:
   };
 
   struct TunConfig {
-    // IP address and netmask of the tun device
-    in_addr_t ip;
-    uint8 cidr;
-
-    bool block_dns_on_adapters;
-
     // no, yes(firewall), yes(route), yes(both), 255(default)
     uint8 internet_blocking;
 
-    // Set this to configure a default route for ipv4
-    bool use_ipv4_default_route;
+    bool block_dns_on_adapters;
 
-    // Set this to configure a default route for ipv6
-    bool use_ipv6_default_route;
 
-    // This holds the address of the vpn endpoint, so those get routed to the old iface.
-    uint32 default_route_endpoint_v4;
-    
     // Set mtu
     int mtu;
 
-    // Set ipv6 address?
-    uint8 ipv6_address[16];
-    uint8 ipv6_cidr;
+    // The ipv6 and ipv4 addresses
+    std::vector<WgCidrAddr> addresses;
 
-    // Set this to configure DNS server for ipv4,ipv6
-    std::vector<IpAddr> ipv4_dns;
-    std::vector<IpAddr> ipv6_dns;
-
-    // This holds the address of the vpn endpoint, so those get routed to the old iface.
-    uint8 default_route_endpoint_v6[16];
+    // Set this to configure DNS server
+    std::vector<IpAddr> dns;
 
     // This holds all cidr addresses to add as additional routing entries
-    std::vector<WgCidrAddr> extra_routes;
+    std::vector<WgCidrAddr> included_routes;
 
     // This holds all the ips to exclude
-    std::vector<WgCidrAddr> excluded_ips;
+    std::vector<WgCidrAddr> excluded_routes;
 
     // This holds the pre/post commands
     PrePostCommands pre_post_commands;
