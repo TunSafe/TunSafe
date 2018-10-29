@@ -1053,7 +1053,7 @@ void WireguardProcessor::SendKeepalive_Locked(WgPeer *peer) {
     if (!packet)
       return;
     packet->size = 0;
-    packet->next = NULL;
+    Packet_NEXT(packet) = NULL;
     peer->first_queued_packet_ = packet;
   }
   SendQueuedPackets_Locked(peer);
@@ -1067,7 +1067,7 @@ void WireguardProcessor::SendQueuedPackets_Locked(WgPeer *peer) {
   peer->last_queued_packet_ptr_ = &peer->first_queued_packet_;
   peer->num_queued_packets_ = 0;
   while (packet != NULL) {
-    Packet *next = packet->next;
+    Packet *next = Packet_NEXT(packet);
     WriteAndEncryptPacketToUdp_WillUnlock(peer, packet);
     packet = next;
     WG_ACQUIRE_LOCK(peer->mutex_);  // WriteAndEncryptPacketToUdp_WillUnlock releases the lock

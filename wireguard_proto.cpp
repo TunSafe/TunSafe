@@ -459,7 +459,7 @@ void WgPeer::ClearPacketQueue_Locked() {
   assert(dev_->IsMainThread() && IsPeerLocked());
   Packet *packet;
   while ((packet = first_queued_packet_) != NULL) {
-    first_queued_packet_ = packet->next;
+    first_queued_packet_ = Packet_NEXT(packet);
     FreePacket(packet);
   }
   last_queued_packet_ptr_ = &first_queued_packet_;
@@ -472,14 +472,14 @@ void WgPeer::AddPacketToPeerQueue_Locked(Packet *packet) {
   // Keep only the first MAX_QUEUED_PACKETS packets.
   while (num_queued_packets_ >= MAX_QUEUED_PACKETS_PER_PEER) {
     Packet *packet = first_queued_packet_;
-    first_queued_packet_ = packet->next;
+    first_queued_packet_ = Packet_NEXT(packet);
     num_queued_packets_--;
     FreePacket(packet);
   }
   // Add the packet to the out queue that will get sent once handshake completes
   *last_queued_packet_ptr_ = packet;
-  last_queued_packet_ptr_ = &packet->next;
-  packet->next = NULL;
+  last_queued_packet_ptr_ = &Packet_NEXT(packet);
+  Packet_NEXT(packet) = NULL;
   num_queued_packets_++;
 }
 

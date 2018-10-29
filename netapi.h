@@ -17,26 +17,38 @@
 
 #pragma warning (disable: 4200)
 
-struct Packet {
+struct QueuedItem;
+
+struct QueuedItemCallback {
+  virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) = 0;
+  virtual void OnQueuedItemDelete(QueuedItem *ow) = 0;
+};
+
+struct QueuedItem {
   union {
-    Packet *next;
 #if defined(OS_WIN)
+    // NOTE: This must be at offset 0 for SLIST to work
     SLIST_ENTRY list_entry;
+    OVERLAPPED overlapped;
 #endif
+    QueuedItem *queue_next;
   };
-  unsigned int post_target, size;
-  byte *data;
+  QueuedItemCallback *queue_cb;
+};
 
-#if defined(OS_WIN)
-  OVERLAPPED overlapped;      // For Windows overlapped IO
-#endif
+#define Packet_NEXT(p) (*(Packet**)&(p)->queue_next)
 
-  IpAddr addr;            // Optionally set to target/source of the packet
+struct Packet : QueuedItem {
   int sin_size;
+  unsigned int size;
+  byte *data;
+  IpAddr addr;            // Optionally set to target/source of the packet
+
+  uint8 post_target;
+  uint8 userdata;
 
   byte data_pre[4];
   byte data_buf[0];
-
   enum {
     // there's always this much data before data_ptr
     HEADROOM_BEFORE = 64,
@@ -67,7 +79,6 @@ public:
     uint8 internet_blocking;
 
     bool block_dns_on_adapters;
-
 
     // Set mtu
     int mtu;

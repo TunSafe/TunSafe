@@ -56,39 +56,102 @@ private:
   bool timer_interrupt_;
 };
 
-// Encapsulates a UDP socket, optionally listening for incoming packets
+class NetworkWin32;
+class PacketAllocPool;
+
+// Encapsulates a UDP socket pair (ipv4 / ipv6), optionally listening for incoming packets
 // on a specific port.
-class UdpSocketWin32 : public UdpInterface {
+class UdpSocketWin32 : public UdpInterface, QueuedItemCallback {
 public:
-  explicit UdpSocketWin32();
+  explicit UdpSocketWin32(NetworkWin32 *network_win32);
   ~UdpSocketWin32();
 
   void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
-
-  void StartThread();
-  void StopThread();
 
   // -- from UdpInterface
   virtual bool Configure(int listen_on_port) override;
   virtual void WriteUdpPacket(Packet *packet) override;
 
+  void DoIO();
+  void CancelAllIO();
+  bool HasOutstandingIO();
+
+  enum {
+    kConcurrentReadUdp = 16,
+    kConcurrentWriteUdp = 16
+  };
+
 private:
-  void ThreadMain();
-  static DWORD WINAPI UdpThread(void *x);
+
+  void DoMoreReads();
+  void DoMoreWrites();
+
+  // From OverlappedCallbacks
+  virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
+  virtual void OnQueuedItemDelete(QueuedItem *ow) override;
+  
+  NetworkWin32 *network_;
 
   // All packets queued for writing. Locked by |mutex_|
+  // Both ipv6 and ipv4 are supported
   Packet *wqueue_, **wqueue_end_;
 
+  // Protects wqueue
   Mutex mutex_;
 
+  // This is where packets end up
   PacketProcessor *packet_handler_;
-  SOCKET socket_;
-  SOCKET socket_ipv6_;
-  HANDLE completion_port_handle_;
+
+  // The two socket handles, since we support both ipv4 and ipv6
+  SOCKET socket_, socket_ipv6_;
+
+  enum { IPV4, IPV6 };
+  int max_read_ipv6_;
+  int num_reads_[2];
+  int num_writes_;
+  Packet *pending_writes_;
+    
+  Packet *finished_reads_, **finished_reads_end_;
+  int finished_reads_count_;
+};
+
+// Holds the thread for network communications
+class NetworkWin32 {
+  friend class UdpSocketWin32;
+public:
+  explicit NetworkWin32();
+  ~NetworkWin32();
+
+  void StartThread();
+  void StopThread();
+
+  UdpSocketWin32 &udp() { return udp_socket_; }
+
+private:
+  void ThreadMain();
+  static DWORD WINAPI NetworkThread(void *x);
+
+  void FreePacketToPool(Packet *p);
+  bool AllocPacketFromPool(Packet **p);
+
+  // The network thread handle
   HANDLE thread_;
 
+  // Whether we're exiting the thread
   bool exit_thread_;
+
+  // The handle to the completion port
+  HANDLE completion_port_handle_;
+
+  Packet *freed_packets_, **freed_packets_end_;
+  int freed_packets_count_;
+
+  // Right now there's always one udp socket only
+  UdpSocketWin32 udp_socket_;
 };
+
+
+
 
 class DnsBlocker;
 
