@@ -491,6 +491,7 @@ public:
   void AddPacketToPeerQueue_Locked(Packet *packet);
   bool IsPeerLocked() { return WG_IF_LOCKS_ENABLED_ELSE(mutex_.IsLocked(), true); }
 
+  const IpAddr &endpoint() const { return endpoint_; }
 private:
   static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id, const uint8 *extfield, size_t extfield_size);
   void WriteMacToPacket(const uint8 *data, MessageMacs *mac);
