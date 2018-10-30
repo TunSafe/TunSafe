@@ -41,12 +41,11 @@ struct QueuedItem {
 struct Packet : QueuedItem {
   int sin_size;
   unsigned int size;
+
   byte *data;
-  IpAddr addr;            // Optionally set to target/source of the packet
-
-  uint8 post_target;
   uint8 userdata;
-
+  IpAddr addr;            // Optionally set to target/source of the packet
+  
   byte data_pre[4];
   byte data_buf[0];
   enum {

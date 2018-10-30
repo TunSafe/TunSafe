@@ -16,37 +16,46 @@ enum {
   ADAPTER_GUID_SIZE = 40,
 };
 
-struct Packet;
 class WireguardProcessor;
 class TunsafeBackendWin32;
+
+struct PacketProcessorTunCb : QueuedItemCallback {
+  virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
+  virtual void OnQueuedItemDelete(QueuedItem *ow) override;
+};
+
+struct PacketProcessorUdpCb : QueuedItemCallback {
+  virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
+  virtual void OnQueuedItemDelete(QueuedItem *ow) override;
+};
 
 class PacketProcessor {
 public:
   explicit PacketProcessor();
   ~PacketProcessor();
 
-  enum {
-    TARGET_PROCESSOR_UDP = 0,
-    TARGET_PROCESSOR_TUN = 1,
-    TARGET_UDP_DEVICE = 2,
-    TARGET_TUN_DEVICE = 3,
-    TARGET_CONFIG_PROTOCOL = 4,
-  };
-
   void Reset();
 
   int Run(WireguardProcessor *wg, TunsafeBackendWin32 *backend);
-  void Post(Packet *packet, Packet **end, int count);
-  void ForcePost(Packet *packet);
+  void PostPackets(Packet *first, Packet **end, int count);
+  void ForcePost(QueuedItem *item);
   void PostExit(int exit_code);
 
   const uint32 *posted_exit_code() { return &exit_code_; }
 
+  QueuedItemCallback *tun_queue() { return &tun_cb_; }
+  QueuedItemCallback *udp_queue() { return &udp_cb_; }
+
+  struct QueueContext {
+    WireguardProcessor *wg;
+    TunsafeBackendWin32 *backend;
+    bool overload;
+  };
+
 private:
   static void CALLBACK ThreadPoolTimerCallback(PTP_CALLBACK_INSTANCE iTimerInstance, PVOID pContext, PTP_TIMER);
-  void HandleConfigurationProtocolPacket(WireguardProcessor *wg, TunsafeBackendWin32 *backend, Packet *packet);
-  Packet *first_;
-  Packet **last_ptr_;
+  QueuedItem *first_;
+  QueuedItem **last_ptr_;
   uint32 packets_in_queue_;
   uint32 need_notify_;
   Mutex mutex_;
@@ -54,6 +63,9 @@ private:
 
   uint32 exit_code_;
   bool timer_interrupt_;
+
+  PacketProcessorTunCb tun_cb_;
+  PacketProcessorUdpCb udp_cb_;
 };
 
 class NetworkWin32;
@@ -272,6 +284,7 @@ class TunsafeBackendWin32 : public TunsafeBackend, public ProcessorDelegate {
   friend class TunWin32Iocp;
   friend class TunWin32Overlapped;
   friend class TunWin32Adapter;
+  friend struct ConfigQueueItem;
 public:
   TunsafeBackendWin32(Delegate *delegate);
   ~TunsafeBackendWin32();
