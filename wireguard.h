@@ -115,11 +115,10 @@ private:
   void HandleHandshakeCookiePacket(Packet *packet);
   void HandleDataPacket(Packet *packet);
   
-  void HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet, uint8 *data, size_t data_size);
+  void HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet);
   void HandleShortHeaderFormatPacket(uint32 tag, Packet *packet);
   bool CheckIncomingHandshakeRateLimit(Packet *packet, bool overload);
   bool HandleIcmpv6NeighborSolicitation(const byte *data, size_t data_size);
-  void SetupCompressionHeader(WgPacketCompressionVer01 *c);
   void NotifyHandshakeComplete();
 
   ProcessorDelegate *procdel_;

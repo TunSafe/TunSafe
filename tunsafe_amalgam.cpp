@@ -19,7 +19,7 @@
 #include "crypto/blake2s/blake2s.cpp"
 #include "crypto/siphash/siphash.cpp"
 #include "crypto/aesgcm/aesgcm.cpp"
-#include "ipzip2/ipzip2.cpp"
+#include "network_common.cpp"
 
 #if defined(WITH_NETWORK_BSD)
 #include "network_bsd.cpp"

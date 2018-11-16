@@ -4,7 +4,6 @@
 
 #include "tunsafe_types.h"
 #include "netapi.h"
-#include "ipzip2/ipzip2.h"
 #include "tunsafe_config.h"
 #include "tunsafe_endian.h"
 #include "tunsafe_threading.h"
@@ -201,15 +200,6 @@ enum {
   WG_BOOLEAN_FEATURE_ENFORCES = 0x3,
 };
 
-struct WgPacketCompressionVer01 {
-  uint16 version;      // Packet compressor version
-  uint8 ttl;           // Guessed TTL
-  uint8 flags;         // Subnet length and packet direction
-  uint8 ipv4_addr[4];  // IPV4 address of endpoint
-  uint8 ipv6_addr[16]; // IPV6 address of endpoint
-};
-STATIC_ASSERT(sizeof(WgPacketCompressionVer01) == 24, WgPacketCompressionVer01_wrong_size);
-
 struct WgKeypair;
 class WgPeer;
 
@@ -303,6 +293,23 @@ struct WgPublicKeyHasher {
   size_t operator()(const WgPublicKey&a) const;
 };
 
+class WgCompressHandler {
+public:
+  virtual ~WgCompressHandler() {}
+
+  enum CompressState {
+    COMPRESS_FAIL = -1,
+    COMPRESS_NO = 0,
+    COMPRESS_YES = 1,
+  };
+
+  // Compress a packet. 
+  virtual CompressState Compress(Packet *packet);
+
+  virtual CompressState Decompress(Packet *packet);
+
+};
+
 class WgDevice {
   friend class WgPeer;
   friend class WireguardProcessor;
@@ -316,6 +323,12 @@ public:
     // return true to try again or false to fail. The packet can be copied and saved
     // to resume a handshake later on.
     virtual bool HandleUnknownPeerId(uint8 public_key[WG_PUBLIC_KEY_LEN], Packet *packet) = 0;
+
+    // Write out the compression header
+    virtual size_t WritePacketCompressionExtension(uint8 *data, size_t data_size) = 0;
+
+    // Parse the packet compression extension
+    virtual WgCompressHandler *ParsePacketCompressionExtension(WgKeypair *keypair, const uint8 *data, size_t data_size) = 0;
   };
 
   WgDevice();
@@ -346,7 +359,6 @@ public:
   WgPeer *first_peer() { return peers_; }
   const uint8 *public_key() const { return s_pub_; }
   WgRateLimit *rate_limiter() { return &rate_limiter_; }
-  WgPacketCompressionVer01 *compression_header() { return &compression_header_; }
   bool is_private_key_initialized() { return is_private_key_initialized_; }
 
   bool IsMainThread() { return CurrentThreadIdEquals(main_thread_id_); }
@@ -436,8 +448,6 @@ private:
 
   WgRateLimit rate_limiter_;
 
-  WgPacketCompressionVer01 compression_header_;
-
   // For defering deletes until all worker threads are guaranteed not to use an object.
   MultithreadedDelayedDelete delayed_delete_;
 };
@@ -447,8 +457,6 @@ class WgPeer {
   friend class WgDevice;
   friend class WireguardProcessor;
   friend class WgConfig;
-  friend bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size);
-  friend void WgKeypairSetupCompressionExtension(WgKeypair *keypair, const WgPacketCompressionVer01 *remotec);
 public:
   explicit WgPeer(WgDevice *dev);
   ~WgPeer();
@@ -496,6 +504,7 @@ public:
   WgPeer *next_peer() { return next_peer_; }
 
 private:
+  static bool ParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size);
   static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id, const uint8 *extfield, size_t extfield_size);
   void WriteMacToPacket(const uint8 *data, MessageMacs *mac);
   void CheckAndUpdateTimeOfNextKeyEvent(uint64 now);
@@ -719,14 +728,12 @@ struct WgKeypair {
 
   AesGcm128StaticContext *aes_gcm128_context_;
 
+  WgCompressHandler *compress_handler_;
+
   // -- all up to this point is initialized to zero
   // For replay detection of incoming packets
   ReplayDetector replay_detector;
 
-#if WITH_HANDSHAKE_EXT
-  // State for packet compressor
-  IpzipState ipzip_state_;
-#endif  // WITH_HANDSHAKE_EXT
 };
 
 void WgKeypairEncryptPayload(uint8 *dst, const size_t src_len,
@@ -736,6 +743,4 @@ void WgKeypairEncryptPayload(uint8 *dst, const size_t src_len,
 bool WgKeypairDecryptPayload(uint8 *dst, const size_t src_len,
     const uint8 *ad, const size_t ad_len,
     const uint64 nonce, WgKeypair *keypair);
-
-bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size);
 

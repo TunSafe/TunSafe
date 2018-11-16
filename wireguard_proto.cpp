@@ -60,7 +60,6 @@ WgDevice::WgDevice() {
   next_rng_slot_ = 0;
   main_thread_scheduled_ = NULL;
   main_thread_scheduled_last_ = &main_thread_scheduled_;
-  memset(&compression_header_, 0, sizeof(compression_header_));
 
   low_resolution_timestamp_ = cookie_secret_timestamp_ = OsGetMilliseconds();
   OsGetRandomBytes(cookie_secret_, sizeof(cookie_secret_));
@@ -791,6 +790,7 @@ void WgPeer::ParseMessageHandshakeCookie(WgDevice *dev, const MessageHandshakeCo
 #if WITH_HANDSHAKE_EXT
 
 size_t WgPeer::WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair) {
+  uint8 *dst_end = dst + MAX_SIZE_OF_HANDSHAKE_EXTENSION;
   uint8 *dst_org = dst, value = 0;
   // Include the supported features extension
   if (!IsOnlyZeros(features_, sizeof(features_))) {
@@ -818,13 +818,10 @@ size_t WgPeer::WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair) {
       dst += ciphers;
     }
   }
-  if (features_[WG_FEATURE_ID_IPZIP]) {
-    // Include the packet compression extension
-    *dst++ = EXT_PACKET_COMPRESSION;
-    *dst++ = sizeof(WgPacketCompressionVer01);
-    memcpy(dst, &dev_->compression_header_, sizeof(WgPacketCompressionVer01));
-    dst += sizeof(WgPacketCompressionVer01);
-  }
+  // Packet compression extension?
+  if (features_[WG_FEATURE_ID_IPZIP] && dev_->delegate_)
+    dst += dev_->delegate_->WritePacketCompressionExtension(dst, dst_end - dst);
+
   return dst - dst_org;
 }
 
@@ -856,32 +853,7 @@ static uint32 ResolveCipherSuite(int tie, const uint8 *a, size_t a_size, const u
           (tie == 0 && cipher_strengths[found_a] > cipher_strengths[found_b])) ? found_a : found_b;
 }
 
-void WgKeypairSetupCompressionExtension(WgKeypair *keypair, const WgPacketCompressionVer01 *remotec) {
-  const WgPacketCompressionVer01 *localc = keypair->peer->dev_->compression_header();
-  IpzipState *state = &keypair->ipzip_state_;
-
-  // Use is_initiator as tie-breaker on who's going to be the client side.
-  int flags_xor = 0;
-  if ((localc->flags & ~3) + 2 * keypair->is_initiator - 1 <= (remotec->flags & ~3))
-    std::swap(localc, remotec), flags_xor = 1;
-  state->flags_xor = flags_xor;
-
-  memcpy(state->client_addr_v4, localc->ipv4_addr, 4);
-  memcpy(state->client_addr_v6, localc->ipv6_addr, 16);
-  state->guess_ttl[0] = localc->ttl;
-  state->client_addr_v4_subnet_bytes = (localc->flags & 3);
-  WriteLE32(&state->client_addr_v4_netmask, 0xffffffff >> ((localc->flags & 3) * 8));
-
-  memcpy(state->server_addr_v4, remotec->ipv4_addr, 4);
-  memcpy(state->server_addr_v6, remotec->ipv6_addr, 16);
-  state->guess_ttl[1] = remotec->ttl;
-  state->server_addr_v4_subnet_bytes = (remotec->flags & 3);
-  WriteLE32(&state->server_addr_v4_netmask, 0xffffffff >> ((remotec->flags & 3) * 8));
-}
-
-bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size) {
-  bool did_setup_compression = false;
-
+bool WgPeer::ParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size) {
   while (data_size >= 2) {
     uint8 type = data[0], size = data[1];
     data += 2, data_size -= 2;
@@ -892,7 +864,7 @@ bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size
     case EXT_CIPHER_SUITES:
       keypair->cipher_suite = ResolveCipherSuite(keypair->peer->cipher_prio_ - (type - EXT_CIPHER_SUITES),
                                                  keypair->peer->ciphers_, keypair->peer->num_ciphers_,
-                                                 data, data_size);
+                                                 data, size);
       break;
     case EXT_BOOLEAN_FEATURES:
       for (size_t i = 0, j = std::max<uint32>(WG_FEATURES_COUNT, size * 4); i != j; i++) {
@@ -903,13 +875,8 @@ bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size
       }
       break;
     case EXT_PACKET_COMPRESSION:
-      if (size == sizeof(WgPacketCompressionVer01)) {
-        WgPacketCompressionVer01 *c = (WgPacketCompressionVer01*)data;
-        if (ReadLE16(&c->version) == EXT_PACKET_COMPRESSION_VER) {
-          WgKeypairSetupCompressionExtension(keypair, c);
-          did_setup_compression = true;
-        }
-      }
+      if (keypair->enabled_features[WG_FEATURE_ID_IPZIP] && !keypair->compress_handler_ && keypair->peer->dev_->delegate_)
+        keypair->compress_handler_ = keypair->peer->dev_->delegate_->ParsePacketCompressionExtension(keypair, data, size);
       break;
     }
     data += size, data_size -= size;
@@ -917,7 +884,8 @@ bool WgKeypairParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size
   if (data_size != 0)
     return false;
   
-  keypair->enabled_features[WG_FEATURE_ID_IPZIP] &= did_setup_compression;
+  if (!keypair->compress_handler_)
+    keypair->enabled_features[WG_FEATURE_ID_IPZIP] = false;
   keypair->auth_tag_length = (keypair->enabled_features[WG_FEATURE_ID_SHORT_MAC] ? 8 : CHACHA20POLY1305_AUTHTAGLEN);
 
 //  RINFO("Cipher Suite = %d", keypair->cipher_suite);
@@ -965,7 +933,7 @@ WgKeypair *WgPeer::CreateNewKeypair(bool is_initiator, const uint8 chaining_key[
   kp->auth_tag_length = CHACHA20POLY1305_AUTHTAGLEN;
   
 #if WITH_HANDSHAKE_EXT
-  if (!WgKeypairParseExtendedHandshake(kp, extfield, extfield_size)) {
+  if (!ParseExtendedHandshake(kp, extfield, extfield_size)) {
 fail:
     delete kp;
     return NULL;

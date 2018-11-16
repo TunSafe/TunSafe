@@ -56,9 +56,6 @@
     <ClInclude Include="netapi.h">
       <Filter>Source Files</Filter>
     </ClInclude>
-    <ClInclude Include="ipzip2\ipzip2.h">
-      <Filter>Source Files</Filter>
-    </ClInclude>
     <ClInclude Include="tunsafe_types.h">
       <Filter>Source Files</Filter>
     </ClInclude>
@@ -150,9 +147,6 @@
       <Filter>Source Files\Win32</Filter>
     </ClCompile>
     <ClCompile Include="wireguard_config.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="ipzip2\ipzip2.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="crypto\aesgcm\aesgcm.cpp">

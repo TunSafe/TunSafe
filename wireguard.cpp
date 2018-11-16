@@ -12,7 +12,6 @@
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
-#include "ipzip2/ipzip2.h"
 #include "wireguard.h"
 #include "wireguard_config.h"
 #include "util.h"
@@ -104,31 +103,6 @@ void WireguardProcessor::ResetStats() {
   memset(&stats_, 0, sizeof(stats_));
 }
 
-void WireguardProcessor::SetupCompressionHeader(WgPacketCompressionVer01 *c) {
-  memset(c, 0, sizeof(WgPacketCompressionVer01));
-  // Windows uses a ttl of 128 while other platforms use 64
-#if defined(OS_WIN)
-  c->ttl = 128;
-#else // defined(OS_WIN)
-  c->ttl = 64;
-#endif  // defined(OS_WIN)
-  WriteLE16(&c->version, EXT_PACKET_COMPRESSION_VER);
-
-  for (auto it = addresses_.begin(); it != addresses_.end(); ++it) {
-    if (it->size == 32) {
-      memcpy(c->ipv4_addr, it->addr, 4);
-      c->flags = ((it->cidr >> 3) & 3);
-      break;
-    }
-  }
-  for (auto it = addresses_.begin(); it != addresses_.end(); ++it) {
-    if (it->size == 128) {
-      memcpy(c->ipv6_addr, it->addr, 16);
-      break;
-    }
-  }
-}
-
 static WgCidrAddr WgCidrAddrFromIpAddr(const IpAddr &addr) {
   WgCidrAddr r = {0};
   if (addr.sin.sin_family == AF_INET) {
@@ -207,8 +181,6 @@ bool WireguardProcessor::ConfigureTun() {
   TunInterface::TunConfigOut config_out;
   if (!tun_->Configure(std::move(config), &config_out))
     return false;
-
-  SetupCompressionHeader(dev_.compression_header());
 
   network_discovery_spoofing_ = config_out.enable_neighbor_discovery_spoofing;
   memcpy(network_discovery_mac_, config_out.neighbor_discovery_spoofing_mac, 6);
@@ -438,22 +410,18 @@ void WireguardProcessor::WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Pac
   } else {
     peer->OnDataSent();
 
-#if WITH_HANDSHAKE_EXT
-    // Attempt to compress the packet headers using ipzip.
-    if (keypair->enabled_features[WG_FEATURE_ID_IPZIP]) {
-      uint32 rv = IpzipCompress(data, (uint32)size, &keypair->ipzip_state_, 0);
-      if (rv == (uint32)-1)
+    // Attempt to compress the packet headers
+    if (WITH_HANDSHAKE_EXT && keypair->compress_handler_) {
+      WgCompressHandler::CompressState st = keypair->compress_handler_->Compress(packet);
+      if (st == WgCompressHandler::COMPRESS_FAIL)
         goto getout_discard;
-      if (rv == 0)
+      if (st == WgCompressHandler::COMPRESS_NO)
         goto add_padding;
-      stats_.compression_hdr_saved_out += (int32)(size - rv);
-      data += (int32)(size - rv);
-      size = rv;
+      stats_.compression_hdr_saved_out += (int32)(size - packet->size);
+      data = packet->data;
+      size = packet->size;
     } else {
 add_padding:
-#else
-    {
-#endif  // WITH_HANDSHAKE_EXT
       // Pad packet to a multiple of 16 bytes, but no more than the mtu bytes.
       unsigned padding = std::min<unsigned>((0 - size) & 15, (unsigned)mtu_ - (unsigned)size);
       memset(data + size, 0, padding);
@@ -461,8 +429,7 @@ add_padding:
     }
   }
 
-#if WITH_SHORT_HEADERS
-  if (keypair->enabled_features[WG_FEATURE_ID_SHORT_HEADER]) {
+  if (WITH_SHORT_HEADERS && keypair->enabled_features[WG_FEATURE_ID_SHORT_HEADER]) {
     size_t header_size;
     byte *write = data;
     uint8 tag = WG_SHORT_HEADER_BIT, inner_tag;
@@ -530,9 +497,6 @@ add_padding:
     ad_len = data - write_after_ack_header;
   } else {
 need_big_packet:
-#else
-  {
-#endif  // #if WITH_SHORT_HEADERS
     packet->size = (int)(size + sizeof(MessageData) + keypair->auth_tag_length);
     peer->tx_bytes_ += packet->size;
 
@@ -859,7 +823,9 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
   if (tag & WG_SHORT_HEADER_ACK)
     keypair->can_use_short_key_for_outgoing = (ack_tag & WG_ACK_HEADER_KEY_MASK) * WG_SHORT_HEADER_KEY_ID;
 
-  HandleAuthenticatedDataPacket_WillUnlock(keypair, packet, data, bytes_left - keypair->auth_tag_length);
+  packet->data = data;
+  packet->size = bytes_left - keypair->auth_tag_length;
+  HandleAuthenticatedDataPacket_WillUnlock(keypair, packet);
   return;
 getout_unlock:
   WG_RELEASE_LOCK(keypair->peer->mutex_);
@@ -881,7 +847,7 @@ void WireguardProcessor::NotifyHandshakeComplete() {
     procdel_->OnConnected();
 }
 
-void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet, uint8 *data, size_t data_size) {
+void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet) {
   WgPeer *peer = keypair->peer;
   assert(peer->IsPeerLocked());
 
@@ -901,6 +867,7 @@ void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *key
     peer->ScheduleNewHandshake();
   }
 
+  uint32 data_size = packet->size;
   if (data_size == 0) {
     peer->OnKeepaliveReceived();
     WG_RELEASE_LOCK(peer->mutex_);
@@ -909,22 +876,22 @@ void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *key
   peer->OnDataReceived();
   WG_RELEASE_LOCK(peer->mutex_);
 
-#if WITH_HANDSHAKE_EXT
-  // Unpack the packet headers using ipzip
-  if (keypair->enabled_features[WG_FEATURE_ID_IPZIP]) {
-    uint32 rv = IpzipDecompress(data, (uint32)data_size, &keypair->ipzip_state_, IPZIP_RECV_BY_CLIENT);
-    if (rv == (uint32)-1)
+  // Unpack the packet headers?
+  if (WITH_HANDSHAKE_EXT && keypair->compress_handler_) {
+    WgCompressHandler::CompressState st = keypair->compress_handler_->Decompress(packet);
+    if (st == WgCompressHandler::COMPRESS_FAIL)
       goto getout;
-    stats_.compression_hdr_saved_in += (int64)rv - data_size;
-    data -= (int64)rv - data_size, data_size = rv;
+    if (st == WgCompressHandler::COMPRESS_YES)
+      stats_.compression_hdr_saved_in += (int32)(packet->size - exch(data_size, packet->size));
   }
-#endif  // WITH_HANDSHAKE_EXT
 
   // Verify that the packet is a valid ipv4 or ipv6 packet of proper length,
   // with a source address that belongs to the peer.
   WgPeer *peer_from_header;
-  unsigned int ip_version, size_from_header;
+  uint32 ip_version, size_from_header;
+  uint8 *data;
 
+  data = packet->data;
   ip_version = *data >> 4;
   if (ip_version == 4) {
     if (data_size < IPV4_HEADER_SIZE)
@@ -951,10 +918,9 @@ void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *key
   if (peer_from_header != peer || size_from_header > data_size)
     goto getout_error_header;
 
-  packet->data = data;
   packet->size = size_from_header;
 
-  stats_.tun_bytes_out += packet->size;
+  stats_.tun_bytes_out += size_from_header;
   stats_.tun_packets_out++;
 
   tun_->WriteTunPacket(packet);
@@ -970,7 +936,7 @@ void WireguardProcessor::HandleDataPacket(Packet *packet) {
   assert(dev_.IsMainOrDataThread());
 
   uint8 *data = packet->data;
-  size_t data_size = packet->size;
+  uint32 data_size = packet->size;
   uint32 key_id = ((MessageData*)data)->receiver_id;
   uint64 counter = ToLE64((((MessageData*)data)->counter));
   WgKeypair *keypair = dev_.LookupKeypairByKeyId(key_id);
@@ -980,6 +946,9 @@ getout:
     FreePacket(packet);
     return;
   }
+
+  packet->data = data + sizeof(MessageData);
+  packet->size = data_size - sizeof(MessageData) - keypair->auth_tag_length;
 
   if (!WgKeypairDecryptPayload(data + sizeof(MessageData), data_size - sizeof(MessageData),
                                NULL, 0, counter, keypair)) {
@@ -1001,7 +970,8 @@ getout:
     assert(!keypair->peer->marked_for_delete_);
 
     WgPeer::CopyEndpointToPeer_Locked(keypair, &packet->addr);
-    HandleAuthenticatedDataPacket_WillUnlock(keypair, packet, data + sizeof(MessageData), data_size - sizeof(MessageData) - keypair->auth_tag_length);
+
+    HandleAuthenticatedDataPacket_WillUnlock(keypair, packet);
   } 
 }
 

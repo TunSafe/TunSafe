@@ -197,7 +197,6 @@
     <ClInclude Include="crypto\siphash\siphash.h" />
     <ClInclude Include="tunsafe_dnsresolve.h" />
     <ClInclude Include="tunsafe_endian.h" />
-    <ClInclude Include="ipzip2\ipzip2.h" />
     <ClInclude Include="netapi.h" />
     <ClInclude Include="network_win32_api.h" />
     <ClInclude Include="network_win32_dnsblock.h" />
@@ -221,7 +220,6 @@
     <ClCompile Include="tunsafe_cpu.cpp" />
     <ClCompile Include="crypto\aesgcm\aesgcm.cpp" />
     <ClCompile Include="crypto\siphash\siphash.cpp" />
-    <ClCompile Include="ipzip2\ipzip2.cpp" />
     <ClCompile Include="network_win32_dnsblock.cpp" />
     <ClCompile Include="tunsafe_ipaddr.cpp" />
     <ClCompile Include="tunsafe_threading.cpp" />
