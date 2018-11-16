@@ -153,9 +153,9 @@ bool WireguardProcessor::ConfigureTun() {
   
   config.mtu = mtu_;
   config.pre_post_commands = pre_post_;
-  config.excluded_routes = excluded_ips_;
 
   if (add_routes_mode_) {
+    config.excluded_routes = excluded_ips_;
     // For each peer, add the extra routes to the extra routes table
     for (WgPeer *peer = dev_.first_peer(); peer; peer = peer->next_peer_) {
       for (auto it = peer->allowed_ips_.begin(); it != peer->allowed_ips_.end(); ++it) {
