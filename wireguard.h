@@ -43,6 +43,8 @@ struct WgProcessorStats {
 
   // Address of the endpoint
   IpAddr endpoint;
+
+  uint8 endpoint_protocol;
 };
 
 class ProcessorDelegate {

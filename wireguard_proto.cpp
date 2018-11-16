@@ -348,6 +348,7 @@ WgPeer::WgPeer(WgDevice *dev) {
   assert(dev->IsMainThread());
   dev_ = dev;
   endpoint_.sin.sin_family = 0;
+  endpoint_protocol_ = 0;
   next_peer_ = NULL;
   curr_keypair_ = next_keypair_ = prev_keypair_ = NULL;
   expect_cookie_reply_ = false;
@@ -1265,7 +1266,8 @@ void WgPeer::CheckAndUpdateTimeOfNextKeyEvent(uint64 now) {
   time_of_next_key_event_ = next_time;
 }
 
-void WgPeer::SetEndpoint(const IpAddr &sin) {
+void WgPeer::SetEndpoint(int endpoint_proto, const IpAddr &sin) {
+  endpoint_protocol_ = endpoint_proto;
   endpoint_ = sin;
 }
 

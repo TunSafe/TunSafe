@@ -93,8 +93,10 @@ const WgProcessorStats &WireguardProcessor::GetStats() {
   // todo: only supports one peer but i want this in the ui for now.
   stats_.endpoint.sin.sin_family = 0;
   WgPeer *peer = dev_.first_peer();
-  if (peer)
+  if (peer) {
     stats_.endpoint = peer->endpoint_;
+    stats_.endpoint_protocol = peer->endpoint_protocol_;
+  }
   return stats_;
 }
 
@@ -426,6 +428,7 @@ void WireguardProcessor::WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Pac
                     keypair->send_key_state == WgKeypair::KEY_WANT_REFRESH);
   keypair->send_ctr = send_ctr + 1;
   packet->addr = peer->endpoint_;
+  packet->protocol = peer->endpoint_protocol_;
 
   if (size == 0) {
     peer->OnKeepaliveSent();
@@ -641,6 +644,7 @@ void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
       procdel_->OnConnectionRetry(attempts);
     peer->OnHandshakeInitSent();
     packet->addr = peer->endpoint_;
+    packet->protocol = peer->endpoint_protocol_;
     peer->tx_bytes_ += packet->size;
     WG_RELEASE_LOCK(peer->mutex_);
     DoWriteUdpPacket(packet);
@@ -723,7 +727,7 @@ static uint32 CompareIpAddr(const IpAddr *a, const IpAddr *b) {
 void WgPeer::CopyEndpointToPeer_Locked(WgKeypair *keypair, const IpAddr *addr) {
   // Remember how to send packets to this peer
   if (keypair->peer->allow_endpoint_change_ &&
-      CompareIpAddr(&keypair->peer->endpoint_, addr)) {
+      CompareIpAddr(&keypair->peer->endpoint_, addr) && addr->sin.sin_family != 0) {
 #if WITH_SHORT_HEADERS
     // When the endpoint changes, forget about using the short key.
     keypair->broadcast_short_key = 0;
@@ -1032,7 +1036,7 @@ void WireguardProcessor::HandleHandshakeResponsePacket(Packet *packet) {
   if (peer) {
     stats_.handshakes_out_success++;
     WG_SCOPED_LOCK(peer->mutex_);
-    if (peer->allow_endpoint_change_)
+    if (peer->allow_endpoint_change_ && packet->addr.sin.sin_family != 0)
       peer->endpoint_ = packet->addr;
     peer->OnHandshakeAuthComplete();
     peer->OnHandshakeFullyComplete();

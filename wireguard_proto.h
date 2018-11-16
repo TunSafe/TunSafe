@@ -456,7 +456,7 @@ public:
   void SetPublicKey(const WgPublicKey &spub);
   void SetPresharedKey(const uint8 preshared_key[WG_SYMMETRIC_KEY_LEN]);
   bool SetPersistentKeepalive(int persistent_keepalive_secs);
-  void SetEndpoint(const IpAddr &sin);
+  void SetEndpoint(int endpoint_proto, const IpAddr &sin);
   void SetAllowMulticast(bool allow);
 
   void SetFeature(int feature, uint8 value);
@@ -492,6 +492,9 @@ public:
   bool IsPeerLocked() { return WG_IF_LOCKS_ENABLED_ELSE(mutex_.IsLocked(), true); }
 
   const IpAddr &endpoint() const { return endpoint_; }
+  uint8 endpoint_protocol() const { return endpoint_protocol_; }
+  WgPeer *next_peer() { return next_peer_; }
+
 private:
   static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id, const uint8 *extfield, size_t extfield_size);
   void WriteMacToPacket(const uint8 *data, MessageMacs *mac);
@@ -525,9 +528,6 @@ private:
 
   // Holds the entry into the key id table during handshake - mt only.
   uint32 local_key_id_during_hs_;
-
-  // Address of peer
-  IpAddr endpoint_;
 
   enum {
     kMainThreadScheduled_ScheduleHandshake = 1,
@@ -564,13 +564,19 @@ private:
   // Number of handshakes made so far, when this gets too high we stop connecting.
   uint8 handshake_attempts_;
 
+  // What's the protocol of the currently configured endpoint
+  uint8 endpoint_protocol_;
+
   // Which features are enabled for this peer?
   uint8 features_[WG_FEATURES_COUNT];
 
   // Queue of packets that will get sent once handshake finishes
   uint8 num_queued_packets_;
   Packet *first_queued_packet_, **last_queued_packet_ptr_;
-  
+
+  // Address of peer
+  IpAddr endpoint_;
+
   // For statistics
   uint64 last_handshake_init_timestamp_;
   uint64 last_complete_handskake_timestamp_;

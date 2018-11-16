@@ -38,12 +38,26 @@ struct QueuedItem {
 
 #define Packet_NEXT(p) (*(Packet**)&(p)->queue_next)
 
+// Protocol types used in the Endpoint thing
+enum {
+  // The standard wireguard protocol
+  kPacketProtocolUdp = 1,
+
+  // Wireguard UDP framed inside of TCP
+  kPacketProtocolTcp = 2,
+
+  // This is OR:ed with the value in case it's an incoming connection
+  // and it's not possible to connect back to it, e.g. incoming tcp
+  kPacketProtocolIncomingConnection = 0x80,
+};
+
 struct Packet : QueuedItem {
   int sin_size;
   unsigned int size;
 
   byte *data;
   uint8 userdata;
+  uint8 protocol;         // which protocol is this packet for/from
   IpAddr addr;            // Optionally set to target/source of the packet
   
   byte data_pre[4];

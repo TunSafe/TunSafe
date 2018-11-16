@@ -212,9 +212,14 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
           return false;
       }
     } else if (strcmp(key, "Endpoint") == 0) {
+      int proto = kPacketProtocolUdp;
+      if (strncmp(value, "tcp://", 6) == 0) {
+        value += 6;
+        proto = kPacketProtocolTcp;
+      }
       if (!ParseSockaddrInWithPort(value, &sin, dns_resolver_))
         return false;
-      peer_->SetEndpoint(sin);
+      peer_->SetEndpoint(proto, sin);
     } else if (strcmp(key, "PersistentKeepalive") == 0) {
       if (!peer_->SetPersistentKeepalive(atoi(value)))
         return false;
@@ -470,7 +475,7 @@ bool WgConfig::HandleConfigurationProtocolMessage(WireguardProcessor *proc, cons
           peer->SetPresharedKey(buf32);
         } else if (strcmp(key, "endpoint") == 0) {
           if (!ParseSockaddrInWithPort(value, &sin, NULL)) goto getout_fail;
-          peer->SetEndpoint(sin);
+          peer->SetEndpoint(kPacketProtocolUdp, sin);
         } else if (strcmp(key, "persistent_keepalive_interval") == 0) {
           if (!peer->SetPersistentKeepalive(atoi(value)))
             goto getout_fail;

@@ -1540,11 +1540,18 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
     char ip[kSizeOfAddress];
     if (ps->endpoint.sin.sin_family == 0)
       return "";
+    char *p = buffer;
+
+    if (ps->endpoint_protocol == kPacketProtocolTcp) {
+      memcpy(p, "tcp://", 6);
+      p += 6;
+    }
+
     PrintIpAddr(ps->endpoint, ip);
     if (ps->endpoint.sin.sin_family == AF_INET6) {
-      snprintf(buffer, 256, "[%s]:%d", ip, htons(ps->endpoint.sin.sin_port));
+      snprintf(p, 256-16, "[%s]:%d", ip, htons(ps->endpoint.sin.sin_port));
     } else {
-      snprintf(buffer, 256, "%s:%d", ip, htons(ps->endpoint.sin.sin_port));
+      snprintf(p, 256-16, "%s:%d", ip, htons(ps->endpoint.sin.sin_port));
     }
     return buffer;
   }
