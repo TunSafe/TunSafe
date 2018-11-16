@@ -1237,22 +1237,6 @@ bool TunWin32Adapter::OpenAdapter(TunsafeBackendWin32 *backend, DWORD open_flags
   return (handle_ != NULL);
 }
 
-static inline bool CheckFirstNbitsEquals(const byte *a, const byte *b, size_t n) {
-  return memcmp(a, b, n >> 3) == 0 && ((n & 7) == 0 || !((a[n >> 3] ^ b[n >> 3]) & (0xff << (8 - (n & 7)))));
-}
-
-static bool IsWgCidrAddrSubsetOf(const WgCidrAddr &inner, const WgCidrAddr &outer) {
-  return inner.size == outer.size && inner.cidr >= outer.cidr &&
-    CheckFirstNbitsEquals(inner.addr, outer.addr, outer.cidr);
-}
-
-static bool IsWgCidrAddrSubsetOfAny(const WgCidrAddr &inner, const std::vector<WgCidrAddr> &addr) {
-  for (auto &a : addr)
-    if (IsWgCidrAddrSubsetOf(inner, a))
-      return true;
-  return false;
-}
-
 bool TunWin32Adapter::ConfigureAdapter(const TunInterface::TunConfig &&config, TunInterface::TunConfigOut *out) {
   DWORD len, err;
   

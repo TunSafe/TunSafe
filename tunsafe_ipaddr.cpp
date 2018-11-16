@@ -82,6 +82,22 @@ bool ParseCidrAddr(const char *s, WgCidrAddr *out) {
   return false;
 }
 
+static inline bool CheckFirstNbitsEquals(const byte *a, const byte *b, size_t n) {
+  return memcmp(a, b, n >> 3) == 0 && ((n & 7) == 0 || !((a[n >> 3] ^ b[n >> 3]) & (0xff << (8 - (n & 7)))));
+}
+
+static bool IsWgCidrAddrSubsetOf(const WgCidrAddr &inner, const WgCidrAddr &outer) {
+  return inner.size == outer.size && inner.cidr >= outer.cidr &&
+    CheckFirstNbitsEquals(inner.addr, outer.addr, outer.cidr);
+}
+
+bool IsWgCidrAddrSubsetOfAny(const WgCidrAddr &inner, const std::vector<WgCidrAddr> &addr) {
+  for (auto &a : addr)
+    if (IsWgCidrAddrSubsetOf(inner, a))
+      return true;
+  return false;
+}
+
 static Mutex g_dns_mutex;
 
 // This starts a background thread for running DNS resolving.

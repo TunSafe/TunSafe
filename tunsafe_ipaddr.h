@@ -2,7 +2,7 @@
 #define TUNSAFE_IPADDR_H_
 
 #include "tunsafe_types.h"
-
+#include <vector>
 #if !defined(OS_WIN)
 #include <sys/types.h>
 #include <netinet/in.h>
@@ -27,8 +27,9 @@ class DnsResolver;
 const char *print_ip_prefix(char buf[kSizeOfAddress], int family, const void *ip, int prefixlen);
 char *PrintIpAddr(const IpAddr &addr, char buf[kSizeOfAddress]);
 char *PrintWgCidrAddr(const WgCidrAddr &addr, char buf[kSizeOfAddress]);
-
 bool ParseCidrAddr(const char *s, WgCidrAddr *out);
+
+bool IsWgCidrAddrSubsetOfAny(const WgCidrAddr &inner, const std::vector<WgCidrAddr> &addr);
 
 enum {
   kParseSockaddrDontDoNAT64 = 1,

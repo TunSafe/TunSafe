@@ -190,9 +190,12 @@ bool WireguardProcessor::ConfigureTun() {
         if (it->cidr == 0)
           peer->allow_endpoint_change_ = false;
       }
-      // Add the peer's endpoint to the route exclusion list.
+    }
+    for (WgPeer *peer = dev_.first_peer(); peer; peer = peer->next_peer_) {
+      // Add the peer's endpoint to the route exclusion list, but only
+      // if the endpoint is covered by one of the included_routes.
       WgCidrAddr endpoint_addr = WgCidrAddrFromIpAddr(peer->endpoint_);
-      if (endpoint_addr.size != 0)
+      if (endpoint_addr.size != 0 && IsWgCidrAddrSubsetOfAny(endpoint_addr, config.included_routes))
         config.excluded_routes.push_back(endpoint_addr);
     }
   }
