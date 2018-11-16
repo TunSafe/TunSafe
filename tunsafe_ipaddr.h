@@ -37,5 +37,7 @@ enum {
 bool ParseSockaddrInWithPort(const char *s, IpAddr *sin, DnsResolver *resolver, int flags = 0);
 bool ParseSockaddrInWithoutPort(char *s, IpAddr *sin, DnsResolver *resolver, int flags = 0);
 
+// Returns nonzero if two endpoints are different.
+uint32 CompareIpAddr(const IpAddr *a, const IpAddr *b);
 
 #endif  // TUNSAFE_IPADDR_H_

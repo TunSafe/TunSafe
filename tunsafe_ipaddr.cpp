@@ -98,6 +98,22 @@ bool IsWgCidrAddrSubsetOfAny(const WgCidrAddr &inner, const std::vector<WgCidrAd
   return false;
 }
 
+// Returns nonzero if two endpoints are different.
+uint32 CompareIpAddr(const IpAddr *a, const IpAddr *b) {
+  uint32 rv = b->sin.sin_family ^ a->sin.sin_family;
+  if (b->sin.sin_family != AF_INET6) {
+    rv |= b->sin.sin_addr.s_addr ^ a->sin.sin_addr.s_addr;
+    rv |= b->sin.sin_port ^ a->sin.sin_port;
+  } else {
+    uint64 rx = ((uint64*)&b->sin6.sin6_addr)[0] ^ ((uint64*)&a->sin6.sin6_addr)[0];
+    rx |= ((uint64*)&b->sin6.sin6_addr)[1] ^ ((uint64*)&a->sin6.sin6_addr)[1];
+    rv |= rx | (rx >> 32);
+    rv |= b->sin6.sin6_port ^ a->sin6.sin6_port;
+  }
+  return rv;
+}
+
+
 static Mutex g_dns_mutex;
 
 // This starts a background thread for running DNS resolving.
