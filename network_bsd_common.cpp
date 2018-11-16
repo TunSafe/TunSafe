@@ -503,6 +503,13 @@ bool TunsafeBackendBsd::Configure(const TunConfig &&config, TunConfigOut *out) o
       }
       continue;
     }
+
+    // On linux, don't add a route that equals one of the addresses
+#if defined(OS_LINUX)
+    if (IsWgCidrAddrSubsetOfAny(*it, config.addresses))
+      continue;
+#endif
+
     if (it->size == 32) {
       AddRoute(ReadBE32(it->addr), it->cidr, ipv4_ip, devname_);
     } else if (it->size == 128 && ipv6_addr) {
