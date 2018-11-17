@@ -44,6 +44,12 @@ struct WgProcessorStats {
   // Address of the endpoint
   IpAddr endpoint;
 
+
+  // For lost packets calculation, the total # of incoming packets
+  uint64 lost_packets_valid;
+  // For lost packets calculation, the total # of incoming packets according to seqnr
+  uint64 lost_packets_tot;
+
   uint8 endpoint_protocol;
 };
 

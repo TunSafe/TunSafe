@@ -1503,6 +1503,7 @@ static const AdvancedTextInfo ADVANCED_TEXT_INFOS[] = {
   {Y + 19 * 3, 66, "Handshake:"},
   {Y + 19 * 4, 66, ""},
   {Y + 19 * 5, 66, "Overhead:"},
+  {Y + 19 * 6, 66, "Packet Loss:"},
 #undef Y
 };
 
@@ -1577,6 +1578,12 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
 
     snprintf(buffer, 256, "%d.%.3d%% in, %d.%.3d%% out", overhead_in_pct / 1000, overhead_in_pct % 1000,
              overhead_out_pct / 1000, overhead_out_pct % 1000);
+    return buffer;
+  }
+  case 6: {
+    snprintf(buffer, 256, "%.3f%% (%d packets)", 
+             ps->lost_packets_tot ? 100.0f * (ps->lost_packets_tot - ps->lost_packets_valid) / ps->lost_packets_tot : 0.0f,
+             (int)(ps->lost_packets_tot - ps->lost_packets_valid));
     return buffer;
   }
   default: return "";

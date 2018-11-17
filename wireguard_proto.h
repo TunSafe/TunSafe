@@ -704,18 +704,19 @@ struct WgKeypair {
 
   // Cipher suite
   uint8 cipher_suite;
-  
-  // Used so we know when to send out ack packets.
-  uint32 incoming_packet_count;
 
   // Id of the key in my map. (MainThread)
   uint32 local_key_id;
   // Id of the key in their map
   uint32 remote_key_id;
+  // Used to send out acks.
+  uint32 send_ack_ctr;
   // The timestamp of when the key was created, to be able to expire it
   uint64 key_timestamp;
   // The highest acked send_ctr value
   uint64 send_ctr_acked;
+  // Used to detect incoming packet loss
+  uint64 incoming_packet_count;
   // Counter value for chacha20 for outgoing packets
   uint64 send_ctr;
   // The key used for chacha20 encryption

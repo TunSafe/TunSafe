@@ -95,6 +95,11 @@ const WgProcessorStats &WireguardProcessor::GetStats() {
   if (peer) {
     stats_.endpoint = peer->endpoint_;
     stats_.endpoint_protocol = peer->endpoint_protocol_;
+
+    if (peer->curr_keypair_) {
+      stats_.lost_packets_tot = peer->curr_keypair_->replay_detector.expected_seq_nr();
+      stats_.lost_packets_valid = peer->curr_keypair_->incoming_packet_count;
+    }
   }
   return stats_;
 }
@@ -434,8 +439,8 @@ add_padding:
     byte *write = data;
     uint8 tag = WG_SHORT_HEADER_BIT, inner_tag;
     // For every 16 incoming packets, send out an ack.
-    if (keypair->incoming_packet_count >= 16) {
-      keypair->incoming_packet_count = 0;
+    if ((uint32)(keypair->incoming_packet_count - keypair->send_ack_ctr) >= 16) {
+      keypair->send_ack_ctr = (uint32)keypair->incoming_packet_count;
       uint64 next_expected_packet = keypair->replay_detector.expected_seq_nr();
       if (next_expected_packet < 0x10000) {
         WriteLE16(write -= 2, (uint16)next_expected_packet);
@@ -794,7 +799,6 @@ void WireguardProcessor::HandleShortHeaderFormatPacket(uint32 tag, Packet *packe
   stats_.compression_wg_saved_in += 16 - (data - packet->data);
 
   keypair->send_ctr_acked = std::max<uint64>(keypair->send_ctr_acked, acked_counter);
-  keypair->incoming_packet_count++;
 
   WgPeer::CopyEndpointToPeer_Locked(keypair, &packet->addr);
 
@@ -835,6 +839,9 @@ void WireguardProcessor::NotifyHandshakeComplete() {
 void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet) {
   WgPeer *peer = keypair->peer;
   assert(peer->IsPeerLocked());
+
+  // Remember how many incoming packets we've seen so we can approximate loss
+  keypair->incoming_packet_count++;
 
   // Promote the next key to the current key when we receive a data packet,
   // the handshake is now complete.
