@@ -179,7 +179,16 @@ bool WireguardProcessor::ConfigureTun() {
     }
   }
 
-  config.block_dns_on_adapters = dns_blocking_;
+  if (dns_blocking_) {
+    // Block DNS if at least one of the DNS servers is part of included_routes
+    for (const auto &dns : dns_addr_) {
+      WgCidrAddr tmp = WgCidrAddrFromIpAddr(dns);
+      if (IsWgCidrAddrSubsetOfAny(tmp, config.included_routes) && !IsWgCidrAddrSubsetOfAny(tmp, excluded_ips_)) {
+        config.block_dns_on_adapters = true;
+        break;
+      }
+    }
+  }
   config.internet_blocking = internet_blocking_;
   config.dns = dns_addr_;
 
