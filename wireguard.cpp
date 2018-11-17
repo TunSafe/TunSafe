@@ -632,7 +632,7 @@ void WireguardProcessor::RunAllMainThreadScheduled() {
 void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
   assert(dev_.IsMainThread());
 
-  if (!peer->CheckHandshakeRateLimit())
+  if (!peer->CheckHandshakeRateLimit() || peer->endpoint_.sin.sin_family == 0)
     return;
   stats_.handshakes_out++;
   Packet *packet = AllocPacket();
@@ -646,6 +646,15 @@ void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
     packet->addr = peer->endpoint_;
     packet->protocol = peer->endpoint_protocol_;
     peer->tx_bytes_ += packet->size;
+
+    // If this is an incoming oneway connection (such as tcp), forget the
+    // endpoint after a number of attempts.
+    if (attempts >= 3 && peer->allow_endpoint_change_ &&
+        (peer->endpoint_protocol_ & kPacketProtocolIncomingConnection)) {
+      peer->endpoint_protocol_ = 0;
+      peer->endpoint_.sin.sin_family = 0;
+    }
+
     WG_RELEASE_LOCK(peer->mutex_);
     DoWriteUdpPacket(packet);
     if (attempts > 1 && attempts <= 20)

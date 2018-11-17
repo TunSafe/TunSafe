@@ -747,6 +747,10 @@ WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packe
   peer_and_keypair->second = keypair;
 
   WG_ACQUIRE_LOCK(peer->mutex_);
+  if (peer->allow_endpoint_change_) {
+    peer->endpoint_ = packet->addr;
+    peer->endpoint_protocol_ = packet->protocol;
+  }
   peer->rx_bytes_ += packet->size;
   peer->InsertKeypairInPeer_Locked(keypair);
   WG_RELEASE_LOCK(peer->mutex_);
@@ -1182,7 +1186,7 @@ uint32 WgPeer::CheckTimeouts_Locked(uint64 now) {
   if (t & 0x1F) {
     if ((t & (1 << TIMER_RETRANSMIT_HANDSHAKE)) && (now32 - timer_value_[TIMER_RETRANSMIT_HANDSHAKE]) >= REKEY_TIMEOUT_MS) {
       t ^= (1 << TIMER_RETRANSMIT_HANDSHAKE);
-      if (handshake_attempts_ > MAX_HANDSHAKE_ATTEMPTS) {
+      if (handshake_attempts_ > MAX_HANDSHAKE_ATTEMPTS || endpoint_.sin.sin_family == 0) {
         t &= ~(1 << TIMER_SEND_KEEPALIVE);
         ClearPacketQueue_Locked();
       } else {
@@ -1208,8 +1212,10 @@ uint32 WgPeer::CheckTimeouts_Locked(uint64 now) {
     }
     if ((t & (1 << TIMER_NEW_HANDSHAKE)) && (now32 - timer_value_[TIMER_NEW_HANDSHAKE]) >= KEEPALIVE_TIMEOUT_MS + REKEY_TIMEOUT_MS) {
       t &= ~(1 << TIMER_NEW_HANDSHAKE);
-      handshake_attempts_ = 0;
-      rv |= ACTION_SEND_HANDSHAKE;
+      if (endpoint_.sin.sin_family != 0) {
+        handshake_attempts_ = 0;
+        rv |= ACTION_SEND_HANDSHAKE;
+      }
     }
     if ((t & (1 << TIMER_ZERO_KEYS)) && (now32 - timer_value_[TIMER_ZERO_KEYS]) >= REJECT_AFTER_TIME_MS * 3) {
       RINFO("Expiring all keys for peer");
