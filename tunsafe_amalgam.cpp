@@ -23,7 +23,7 @@
 
 #if defined(WITH_NETWORK_BSD)
 #include "network_bsd.cpp"
-#include "network_bsd_common.cpp"
+#include "tunsafe_bsd.cpp"
 #include "ts.cpp"
 #include "benchmark.cpp"
 #endif

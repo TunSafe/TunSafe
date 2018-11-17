@@ -5,6 +5,8 @@
 #include "wireguard_config.h"
 #include "netapi.h"
 #include <Iphlpapi.h>
+#include <Mswsock.h>
+#include <ws2ipdef.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <malloc.h>
@@ -12,7 +14,6 @@
 #include <string.h>
 #include <vector>
 #include <Iphlpapi.h>
-#include <ws2ipdef.h>
 #include <assert.h>
 #include <exdisp.h>
 #include "tunsafe_endian.h"
@@ -42,15 +43,20 @@ static HKEY g_hklm_reg_key;
 static uint8 g_killswitch_curr, g_killswitch_want, g_killswitch_currconn;
 
 bool g_allow_pre_post;
+static volatile bool g_fail_malloc_flag;
 
 static void DeactivateKillSwitch(uint32 want);
 
 Packet *AllocPacket() {
   Packet *packet = (Packet*)InterlockedPopEntrySList(&freelist_head);
-  if (packet == NULL)
-    packet = (Packet *)_aligned_malloc(kPacketAllocSize, 16);
-  packet->data = packet->data_buf + Packet::HEADROOM_BEFORE;
-  packet->size = 0;
+  if (packet == NULL) {
+    while ((packet = (Packet *)_aligned_malloc(kPacketAllocSize, 16)) == NULL) {
+      if (g_fail_malloc_flag)
+        return NULL;
+      Sleep(1000);
+    }
+  }
+  packet->Reset();
   return packet;
 }
 
@@ -83,6 +89,14 @@ void FreeAllPackets() {
   }
 }
 
+void SimplePacketPool::FreeSomePacketsInner() {
+  int n = freed_packets_count_ - 24;
+  Packet **p = &freed_packets_;
+  for (; n; n--)
+    p = &Packet_NEXT(*p);
+  FreePackets(exch(freed_packets_, *p), p, exch(freed_packets_count_, 24) - 24);
+}
+
 void InitPacketMutexes() {
   static bool mutex_inited;
   if (!mutex_inited) {
@@ -90,17 +104,6 @@ void InitPacketMutexes() {
     InitializeSListHead(&freelist_head);
   }
 }
-
-int tpq_last_qsize;
-int g_tun_reads, g_tun_writes;
-
-struct {
-  uint32 pad1[3];
-  uint32 udp_qsize1;
-  uint32 pad2[3];
-  uint32 udp_qsize2;
-} qs;
-
 
 #define kConcurrentReadTap 16
 #define kConcurrentWriteTap 16
@@ -399,45 +402,11 @@ static bool GetDefaultRouteAndDeleteOldRoutes(int family, const NET_LUID *Interf
   return (rv == 0);
 }
 
-static inline bool NoMoreAllocationRetry(volatile bool *exit_flag) {
-  if (*exit_flag)
-    return true;
-  Sleep(1000);
-  return *exit_flag;
-}
-
-static inline bool AllocPacketFrom(Packet **list, int *counter, bool *exit_flag, Packet **res) {
-   Packet *p;
-   if (p = *list) {
-     *list = Packet_NEXT(p);
-     (*counter)--;
-     p->data = p->data_buf + Packet::HEADROOM_BEFORE;
-   } else {
-     while ((p = AllocPacket()) == NULL) {
-      if (NoMoreAllocationRetry(exit_flag))
-        return false;
-    }
-   }
-  *res = p;
-  return true;
-}
-
-static void FreePacketList(Packet *pp) {
+void FreePacketList(Packet *pp) {
   while (Packet *p = pp) {
     pp = Packet_NEXT(p);
     FreePacket(p);
   }
-}
-
-inline void NetworkWin32::FreePacketToPool(Packet *p) {
-  Packet_NEXT(p) = NULL;
-  *freed_packets_end_ = p;
-  freed_packets_end_ = &Packet_NEXT(p);
-  freed_packets_count_++;
-}
-
-inline bool NetworkWin32::AllocPacketFromPool(Packet **p) {
-  return AllocPacketFrom(&freed_packets_, &freed_packets_count_, &exit_thread_, p);
 }
 
 UdpSocketWin32::UdpSocketWin32(NetworkWin32 *network_win32) {
@@ -455,6 +424,9 @@ UdpSocketWin32::UdpSocketWin32(NetworkWin32 *network_win32) {
   num_reads_[0] = num_reads_[1] = 0;
   num_writes_ = 0;
   pending_writes_ = NULL;
+
+  qsize1_ = 0;
+  qsize2_ = 0;
 }
 
 UdpSocketWin32::~UdpSocketWin32() {
@@ -529,12 +501,12 @@ fail:
 
 // Called on another thread to queue up a udp packet
 void UdpSocketWin32::WriteUdpPacket(Packet *packet) {
-  if (qs.udp_qsize2 - qs.udp_qsize1 >= (unsigned)(packet->size < 576 ? MAX_BYTES_IN_UDP_OUT_QUEUE_SMALL : MAX_BYTES_IN_UDP_OUT_QUEUE)) {
+  if (qsize2_ - qsize1_ >= (unsigned)(packet->size < 576 ? MAX_BYTES_IN_UDP_OUT_QUEUE_SMALL : MAX_BYTES_IN_UDP_OUT_QUEUE)) {
     FreePacket(packet);
     return;
   }
-  Packet_NEXT(packet) = NULL;
-  qs.udp_qsize2 += packet->size;
+  packet->queue_next = NULL;
+  qsize2_ += packet->size;
 
   mutex_.Acquire();
   Packet *was_empty = wqueue_;
@@ -542,19 +514,13 @@ void UdpSocketWin32::WriteUdpPacket(Packet *packet) {
   wqueue_end_ = &Packet_NEXT(packet);
   mutex_.Release();
 
-  if (was_empty == NULL) {
-    // Notify the worker thread that it should attempt more writes
-    PostQueuedCompletionStatus(network_->completion_port_handle_, NULL, NULL, NULL);
-  }
+  if (was_empty == NULL)
+    network_->WakeUp();
 }
 
 enum {
   kUdpGetQueuedCompletionStatusSize = kConcurrentWriteTap + kConcurrentReadTap + 1
 };
-
-static inline void ClearOverlapped(OVERLAPPED *o) {
-  memset(o, 0, sizeof(*o));
-}
 
 #ifndef STATUS_PORT_UNREACHABLE
 #define STATUS_PORT_UNREACHABLE 0xC000023F
@@ -567,8 +533,8 @@ static inline bool IsIgnoredUdpError(DWORD err) {
 void UdpSocketWin32::DoMoreReads() {
   // Listen with multiple ipv6 packets only if we ever sent an ipv6 packet.
   for (int i = num_reads_[IPV6]; i < max_read_ipv6_; i++) {
-    Packet *p;
-    if (!network_->AllocPacketFromPool(&p))
+    Packet *p = network_->packet_pool().AllocPacketFromPool();
+    if (!p)
       break;
 restart_read_udp6:
     ClearOverlapped(&p->overlapped);
@@ -590,32 +556,35 @@ restart_read_udp6:
     num_reads_[IPV6]++;
   }
   // Initiate more reads, reusing the Packet structures in |finished_writes|.
-  for (int i = num_reads_[IPV4]; i < kConcurrentReadUdp; i++) {
-    Packet *p;
-    if (!network_->AllocPacketFromPool(&p))
-      break;
-restart_read_udp:
-    ClearOverlapped(&p->overlapped);
-    WSABUF wsabuf = {(ULONG)kPacketCapacity, (char*)p->data};
-    DWORD flags = 0;
-    p->userdata = IPV4;
-    p->sin_size = sizeof(p->addr.sin);
-    p->queue_cb = this;
-    if (WSARecvFrom(socket_, &wsabuf, 1, NULL, &flags, (struct sockaddr*)&p->addr, &p->sin_size, &p->overlapped, NULL) != 0) {
-      DWORD err = WSAGetLastError();
-      if (err != WSA_IO_PENDING) {
-        if (err == WSAEMSGSIZE || err == WSAECONNRESET || err == WSAENETRESET)
-          goto restart_read_udp;
-        RERROR("UdpSocketWin32:WSARecvFrom failed 0x%X", err);
-        FreePacket(p);
+
+  if (socket_ != INVALID_SOCKET) {
+    for (int i = num_reads_[IPV4]; i < kConcurrentReadUdp; i++) {
+      Packet *p = network_->packet_pool().AllocPacketFromPool();
+      if (!p)
         break;
+restart_read_udp:
+      ClearOverlapped(&p->overlapped);
+      WSABUF wsabuf = {(ULONG)kPacketCapacity, (char*)p->data};
+      DWORD flags = 0;
+      p->userdata = IPV4;
+      p->sin_size = sizeof(p->addr.sin);
+      p->queue_cb = this;
+      if (WSARecvFrom(socket_, &wsabuf, 1, NULL, &flags, (struct sockaddr*)&p->addr, &p->sin_size, &p->overlapped, NULL) != 0) {
+        DWORD err = WSAGetLastError();
+        if (err != WSA_IO_PENDING) {
+          if (err == WSAEMSGSIZE || err == WSAECONNRESET || err == WSAENETRESET)
+            goto restart_read_udp;
+          RERROR("UdpSocketWin32:WSARecvFrom failed 0x%X", err);
+          FreePacket(p);
+          break;
+        }
       }
+      num_reads_[IPV4]++;
     }
-    num_reads_[IPV4]++;
   }
 }
 
-void UdpSocketWin32::DoMoreWrites() {
+void UdpSocketWin32::ProcessPackets() {
   // Push all the finished reads to the packet handler
   if (finished_reads_ != NULL) {
     packet_handler_->PostPackets(finished_reads_, finished_reads_end_, finished_reads_count_);
@@ -623,7 +592,9 @@ void UdpSocketWin32::DoMoreWrites() {
     finished_reads_end_ = &finished_reads_;
     finished_reads_count_ = 0;
   }
-  
+}
+
+void UdpSocketWin32::DoMoreWrites() {
   Packet *pending_writes = pending_writes_;
   // Initiate more writes from |wqueue_|
   while (num_writes_ < kConcurrentWriteUdp) {
@@ -639,7 +610,7 @@ void UdpSocketWin32::DoMoreWrites() {
       if (!pending_writes)
         break;
     }
-    qs.udp_qsize1 += pending_writes->size;
+    qsize1_ += pending_writes->size;
 
     // Then issue writes
     Packet *p = pending_writes;
@@ -688,13 +659,14 @@ void UdpSocketWin32::OnQueuedItemEvent(QueuedItem *qi, uintptr_t extra) {
   if (p->userdata < 2) {
     num_reads_[p->userdata]--;
     if ((DWORD)p->overlapped.Internal != 0) {
-      network_->FreePacketToPool(p);
       if (!IsIgnoredUdpError((DWORD)p->overlapped.Internal))
         RERROR("UdpSocketWin32::Read error 0x%X", (DWORD)p->overlapped.Internal);
+      network_->packet_pool().FreePacketToPool(p);
     } else {
       // Remember all the finished packets and queue them up to the next thread once we've
       // collected them all.
       p->size = (int)p->overlapped.InternalHigh;
+      p->protocol = kPacketProtocolUdp;
       p->queue_cb = packet_handler_->udp_queue();
       p->queue_next = NULL;
       *finished_reads_end_ = p;
@@ -703,9 +675,9 @@ void UdpSocketWin32::OnQueuedItemEvent(QueuedItem *qi, uintptr_t extra) {
     }
   } else {
     num_writes_--;
-    network_->FreePacketToPool(p);
     if ((DWORD)p->overlapped.Internal != 0)
       RERROR("UdpSocketWin32::Write error 0x%X", (DWORD)p->overlapped.Internal);
+    network_->packet_pool().FreePacketToPool(p);
   }
 }
 
@@ -716,28 +688,30 @@ void UdpSocketWin32::OnQueuedItemDelete(QueuedItem *qi) {
   } else {
     num_writes_--;
   }
-  network_->FreePacketToPool(p);
+  network_->packet_pool().FreePacketToPool(p);
 }
 
 void UdpSocketWin32::DoIO() {
   DoMoreWrites();
+  ProcessPackets();
   DoMoreReads();
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
-NetworkWin32::NetworkWin32() : udp_socket_(this) {
+NetworkWin32::NetworkWin32() : udp_socket_(this), tcp_socket_queue_(this) {
   exit_thread_ = false;
   thread_ = NULL;
-  freed_packets_ = NULL;
-  freed_packets_end_ = &freed_packets_;
-  freed_packets_count_ = 0;
   completion_port_handle_ = CreateIoCompletionPort(INVALID_HANDLE_VALUE, NULL, NULL, 0);
+  tcp_socket_ = NULL;
 }
 
 NetworkWin32::~NetworkWin32() {
   assert(thread_ == NULL);
+  
+  for (TcpSocketWin32 *socket = tcp_socket_; socket; )
+    delete exch(socket, socket->next_);
+
   CloseHandle(completion_port_handle_);
-  FreePacketList(freed_packets_);
 }
 
 DWORD WINAPI NetworkWin32::NetworkThread(void *x) {
@@ -750,20 +724,13 @@ void NetworkWin32::ThreadMain() {
   OVERLAPPED_ENTRY entries[kUdpGetQueuedCompletionStatusSize];
 
   while (!exit_thread_) {
-    // Run IO on all sockets queued for IO
+    // TODO: In the future, don't process every socket here, only
+    // those sockets that requested it.
     udp_socket_.DoIO();
+    for (TcpSocketWin32 *tcp = tcp_socket_; tcp;)
+      exch(tcp, tcp->next_)->DoIO();
 
-    // Free some packets
-    assert(freed_packets_count_ >= 0);
-    if (freed_packets_count_ >= 32) {
-      FreePackets(freed_packets_, freed_packets_end_, freed_packets_count_);
-      freed_packets_count_ = 0;
-      freed_packets_ = NULL;
-      freed_packets_end_ = &freed_packets_;
-    } else if (freed_packets_ == NULL) {
-      assert(freed_packets_count_ == 0);
-      freed_packets_end_ = &freed_packets_;
-    }
+    packet_pool_.FreeSomePackets();
 
     ULONG num_entries = 0;
     if (!GetQueuedCompletionStatusEx(completion_port_handle_, entries, kUdpGetQueuedCompletionStatusSize, &num_entries, INFINITE, FALSE)) {
@@ -779,18 +746,31 @@ void NetworkWin32::ThreadMain() {
   }
 
   udp_socket_.CancelAllIO();
+  for (TcpSocketWin32 *tcp = tcp_socket_; tcp; tcp = tcp->next_)
+    tcp->CancelAllIO();
 
-  while (udp_socket_.HasOutstandingIO()) {
+  while (HasOutstandingIO()) {
     ULONG num_entries = 0;
-    if (!GetQueuedCompletionStatusEx(completion_port_handle_, entries, 1, &num_entries, INFINITE, FALSE)) {
+    if (!GetQueuedCompletionStatusEx(completion_port_handle_, entries, kUdpGetQueuedCompletionStatusSize, &num_entries, INFINITE, FALSE)) {
       RINFO("GetQueuedCompletionStatusEx failed.");
       break;
     }
-    if (entries[0].lpOverlapped) {
-      QueuedItem *w = (QueuedItem*)((byte*)entries[0].lpOverlapped - offsetof(QueuedItem, overlapped));
-      w->queue_cb->OnQueuedItemDelete(w);
+    for (ULONG i = 0; i < num_entries; i++) {
+      if (entries[i].lpOverlapped) {
+        QueuedItem *w = (QueuedItem*)((byte*)entries[i].lpOverlapped - offsetof(QueuedItem, overlapped));
+        w->queue_cb->OnQueuedItemDelete(w);
+      }
     }
   }
+}
+
+bool NetworkWin32::HasOutstandingIO() {
+  if (udp_socket_.HasOutstandingIO())
+    return true;
+  for (TcpSocketWin32 *tcp = tcp_socket_; tcp; tcp = tcp->next_)
+    if (tcp->HasOutstandingIO())
+      return true;
+  return false;
 }
 
 void NetworkWin32::StartThread() {
@@ -804,11 +784,36 @@ void NetworkWin32::StartThread() {
 void NetworkWin32::StopThread() {
   if (thread_ != NULL) {
     exit_thread_ = true;
+    g_fail_malloc_flag = true;
     PostQueuedCompletionStatus(completion_port_handle_, NULL, NULL, NULL);
     WaitForSingleObject(thread_, INFINITE);
     CloseHandle(thread_);
     thread_ = NULL;
     exit_thread_ = false;
+    g_fail_malloc_flag = false;
+  }
+}
+
+void NetworkWin32::WakeUp() {
+  PostQueuedCompletionStatus(completion_port_handle_, NULL, NULL, NULL);
+}
+
+void NetworkWin32::PostQueuedItem(QueuedItem *item) {
+  PostQueuedCompletionStatus(completion_port_handle_, NULL, NULL, &item->overlapped);
+}
+
+bool NetworkWin32::Configure(int listen_port, int listen_port_tcp) {
+  if (listen_port_tcp)
+    RERROR("ListenPortTCP not supported in this version");
+  return udp_socket_.Configure(listen_port);
+}
+
+// Called from tunsafe thread
+void NetworkWin32::WriteUdpPacket(Packet *packet) {
+  if (packet->protocol & kPacketProtocolUdp) {
+    udp_socket_.WriteUdpPacket(packet);
+  } else {
+    tcp_socket_queue_.WritePacket(packet);
   }
 }
 
@@ -874,6 +879,8 @@ int PacketProcessor::Run(WireguardProcessor *wg, TunsafeBackendWin32 *backend) {
 
   mutex_.Acquire();
   while (!(exit_code = exit_code_)) {
+    FreeAllPackets();
+
     if (timer_interrupt_) {
       timer_interrupt_ = false;
       need_notify_ = 0;
@@ -912,7 +919,6 @@ int PacketProcessor::Run(WireguardProcessor *wg, TunsafeBackendWin32 *backend) {
       need_notify_ = 0;
       mutex_.Release();
 
-      tpq_last_qsize = packets_in_queue;
       if (packets_in_queue >= 1024)
         overload = 2;
       queue_context.overload = (overload != 0);
@@ -986,8 +992,8 @@ void PacketProcessor::PostPackets(Packet *first, Packet **end, int count) {
 }
 
 void PacketProcessor::ForcePost(QueuedItem *item) {
-  mutex_.Acquire();
   item->queue_next = NULL;
+  mutex_.Acquire();
   packets_in_queue_ += 1;
   *last_ptr_ = item;
   last_ptr_ = &item->queue_next;
@@ -1648,7 +1654,6 @@ bool TunWin32Adapter::RunPrePostCommand(const std::vector<std::string> &vec) {
   return success;
 }
 
-
 //////////////////////////////////////////////////////////////////////////////
 
 TunWin32Iocp::TunWin32Iocp(DnsBlocker *blocker, TunsafeBackendWin32 *backend) : adapter_(blocker, backend->guid_), backend_(backend) {
@@ -1704,6 +1709,20 @@ enum {
   kTunGetQueuedCompletionStatusSize = kConcurrentWriteTap + kConcurrentReadTap + 1
 };
 
+static inline bool AllocPacketFrom(Packet **list, int *counter, bool *exit_flag, Packet **res) {
+  Packet *p;
+  if (p = *list) {
+    *list = Packet_NEXT(p);
+    (*counter)--;
+    p->data = p->data_buf;
+  } else {
+    if (!(p = AllocPacket()))
+      return false;
+  }
+  *res = p;
+  return true;
+}
+
 void TunWin32Iocp::ThreadMain() {
   OVERLAPPED_ENTRY entries[kTunGetQueuedCompletionStatusSize];
   Packet *pending_writes = NULL;
@@ -1738,7 +1757,6 @@ void TunWin32Iocp::ThreadMain() {
         num_reads++;
       }
     }
-    g_tun_reads = num_reads;
 
     assert(freed_packets_count >= 0);
     if (freed_packets_count >= 32) {
@@ -1820,7 +1838,6 @@ void TunWin32Iocp::ThreadMain() {
         num_writes++;
       }
     }
-    g_tun_writes = num_writes;
   }
 
 EXIT:
@@ -1896,217 +1913,6 @@ void TunWin32Iocp::WriteTunPacket(Packet *packet) {
 
 //////////////////////////////////////////////////////////////////////////////
 
-TunWin32Overlapped::TunWin32Overlapped(DnsBlocker *blocker, TunsafeBackendWin32 *backend) : adapter_(blocker, backend->guid_), backend_(backend) {
-  wqueue_end_ = &wqueue_;
-  wqueue_ = NULL;
-
-  thread_ = NULL;
-
-  read_event_ = CreateEvent(NULL, TRUE, FALSE, NULL);
-  write_event_ = CreateEvent(NULL, TRUE, FALSE, NULL);
-  wake_event_ = CreateEvent(NULL, FALSE, FALSE, NULL);
-  
-  packet_handler_ = NULL;
-  exit_thread_ = false;
-}
-
-TunWin32Overlapped::~TunWin32Overlapped() {
-  CloseTun();
-  CloseHandle(read_event_);
-  CloseHandle(write_event_);
-  CloseHandle(wake_event_);
-}
-
-bool TunWin32Overlapped::Configure(const TunConfig &&config, TunConfigOut *out) {
-  CloseTun();
-  if (adapter_.OpenAdapter(backend_, FILE_FLAG_OVERLAPPED) &&
-      adapter_.ConfigureAdapter(std::move(config), out))
-    return true;
-  CloseTun();
-  return false;
-}
-
-void TunWin32Overlapped::CloseTun() {
-  assert(thread_ == NULL);
-  adapter_.CloseAdapter(false);
-  FreePacketList(wqueue_);
-  wqueue_ = NULL;
-  wqueue_end_ = &wqueue_;
-}
-
-void TunWin32Overlapped::ThreadMain() {
-  Packet *pending_writes = NULL;
-  DWORD err;
-  Packet *read_packet = NULL, *write_packet = NULL;
-
-  HANDLE h[3];
-  while (!exit_thread_) {
-    if (read_packet == NULL) {
-      Packet *p = AllocPacket();
-      ClearOverlapped(&p->overlapped);
-      p->overlapped.hEvent = read_event_;
-      if (!ReadFile(adapter_.handle(), p->data, kPacketCapacity, NULL, &p->overlapped) && (err = GetLastError()) != ERROR_IO_PENDING) {
-        FreePacket(p);
-        RERROR("TunWin32: ReadFile failed 0x%X", err);
-      } else {
-        read_packet = p;
-      }
-    }
-
-    int n = 0;
-    if (write_packet)
-      h[n++] = write_event_;
-    if (read_packet != NULL)
-      h[n++] = read_event_;
-    h[n++] = wake_event_;
-
-    DWORD res = WaitForMultipleObjects(n, h, FALSE, INFINITE);
-
-    if (res >= WAIT_OBJECT_0 && res <= WAIT_OBJECT_0 + 2) {
-      HANDLE hx = h[res - WAIT_OBJECT_0];
-      if (hx == read_event_) {
-        read_packet->size = (int)read_packet->overlapped.InternalHigh;
-        Packet_NEXT(read_packet) = NULL;
-        packet_handler_->PostPackets(read_packet, &Packet_NEXT(read_packet), 1);
-        read_packet = NULL;
-      } else if (hx == write_event_) {
-        FreePacket(write_packet);
-        write_packet = NULL;
-      }
-    } else {
-      RERROR("Wait said %d", res);
-    }
-    
-    if (write_packet == NULL) {
-      if (!pending_writes) {
-        mutex_.Acquire();
-        pending_writes = wqueue_;
-        wqueue_end_ = &wqueue_;
-        wqueue_ = NULL;
-        mutex_.Release();
-      }
-      if (pending_writes) {
-        // Then issue writes
-        Packet *p = pending_writes;
-        pending_writes = Packet_NEXT(p);
-        memset(&p->overlapped, 0, sizeof(p->overlapped));
-        p->overlapped.hEvent = write_event_;
-        if (!WriteFile(adapter_.handle(), p->data, p->size, NULL, &p->overlapped) && (err = GetLastError()) != ERROR_IO_PENDING) {
-          RERROR("TunWin32: WriteFile failed 0x%X", err);
-          FreePacket(p);
-        } else {
-          write_packet = p;
-        }
-      }
-    }
-  }
-
-  // TODO: Free memory
-  CancelIo(adapter_.handle());
-  FreePacketList(pending_writes);
-}
-
-DWORD WINAPI TunWin32Overlapped::TunThread(void *x) {
-  TunWin32Overlapped *xx = (TunWin32Overlapped *)x;
-  xx->ThreadMain();
-  return 0;
-}
-
-void TunWin32Overlapped::StartThread() {
-  DWORD thread_id;
-  thread_ = CreateThread(NULL, 0, &TunThread, this, 0, &thread_id);
-  SetThreadPriority(thread_, ABOVE_NORMAL_PRIORITY_CLASS);
-}
-
-void TunWin32Overlapped::StopThread() {
-  exit_thread_ = true;
-  SetEvent(wake_event_);
-  WaitForSingleObject(thread_, INFINITE);
-  CloseHandle(thread_);
-  thread_ = NULL;
-}
-
-void TunWin32Overlapped::WriteTunPacket(Packet *packet) {
-  Packet_NEXT(packet) = NULL;
-  mutex_.Acquire();
-  Packet *was_empty = wqueue_;
-  *wqueue_end_ = packet;
-  wqueue_end_ = &Packet_NEXT(packet);
-  mutex_.Release();
-  if (was_empty == NULL)
-    SetEvent(wake_event_);
-}
-
-void TunsafeBackendWin32::SetPublicKey(const uint8 key[32]) {
-  memcpy(public_key_, key, 32);
-  delegate_->OnStateChanged();
-}
-
-DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
-  TunsafeBackendWin32 *backend = (TunsafeBackendWin32*)bk;
-  int stop_mode;
-  int fast_retry_ctr = 0;
-
-  for(;;) {
-    TunWin32Iocp tun(&backend->dns_blocker_, backend);
-    NetworkWin32 net;
-    WireguardProcessor wg_proc(&net.udp(), &tun, backend);
-
-    qs.udp_qsize1 = qs.udp_qsize2 = 0;
-
-    net.udp().SetPacketHandler(&backend->packet_processor_);
-    tun.SetPacketHandler(&backend->packet_processor_);
-
-    if (backend->config_file_[0] &&
-        !ParseWireGuardConfigFile(&wg_proc, backend->config_file_, &backend->dns_resolver_))
-      goto getout_fail;
-
-    if (!wg_proc.Start())
-      goto getout_fail;
-
-    backend->SetPublicKey(wg_proc.dev().public_key());
-
-    backend->wg_processor_ = &wg_proc;
-
-    net.StartThread();
-    tun.StartThread();
-    stop_mode = backend->packet_processor_.Run(&wg_proc, backend);
-    net.StopThread();
-    tun.StopThread();
-    
-    backend->wg_processor_ = NULL;
-
-    // Keep DNS alive
-    if (stop_mode != MODE_EXIT)
-      tun.adapter().DisassociateDnsBlocker();
-    else
-      backend->dns_resolver_.ClearCache();
-
-    FreeAllPackets();
-
-    if (stop_mode != MODE_TUN_FAILED)
-      return 0;
-    
-    uint32 last_fail = GetTickCount();
-    fast_retry_ctr = (last_fail - backend->last_tun_adapter_failed_ < 5000) ? fast_retry_ctr + 1 : 0;
-    backend->last_tun_adapter_failed_ = last_fail;
-
-    backend->SetStatus((fast_retry_ctr >= 3) ? TunsafeBackend::kErrorTunPermanent : TunsafeBackend::kStatusTunRetrying);
-    
-    if (backend->status_ == TunsafeBackend::kErrorTunPermanent) {
-      RERROR("Too many automatic restarts...");
-      goto getout_fail_noseterr;
-    }
-    Sleep(1000);
-  }
-getout_fail:
-  backend->status_ = TunsafeBackend::kErrorInitialize;
-  backend->delegate_->OnStatusCode(TunsafeBackend::kErrorInitialize);
-getout_fail_noseterr:
-  backend->dns_blocker_.RestoreDns();
-  return 0;
-}
-
 TunsafeBackend::TunsafeBackend() {
   is_started_ = false;
   is_remote_ = false;
@@ -2152,6 +1958,75 @@ TunsafeBackendWin32::~TunsafeBackendWin32() {
   TunAdaptersInUse::GetInstance()->Release(this);
 }
 
+void TunsafeBackendWin32::SetPublicKey(const uint8 key[32]) {
+  memcpy(public_key_, key, 32);
+  delegate_->OnStateChanged();
+}
+
+DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
+  TunsafeBackendWin32 *backend = (TunsafeBackendWin32*)bk;
+  int stop_mode;
+  int fast_retry_ctr = 0;
+
+  for (;;) {
+    TunWin32Iocp tun(&backend->dns_blocker_, backend);
+    NetworkWin32 net;
+    WireguardProcessor wg_proc(&net, &tun, backend);
+
+    net.udp().SetPacketHandler(&backend->packet_processor_);
+    net.tcp_socket_queue().SetPacketHandler(&backend->packet_processor_);
+
+    tun.SetPacketHandler(&backend->packet_processor_);
+
+    if (backend->config_file_[0] &&
+        !ParseWireGuardConfigFile(&wg_proc, backend->config_file_, &backend->dns_resolver_))
+      goto getout_fail;
+
+    if (!wg_proc.Start())
+      goto getout_fail;
+
+    backend->SetPublicKey(wg_proc.dev().public_key());
+
+    backend->wg_processor_ = &wg_proc;
+
+    net.StartThread();
+    tun.StartThread();
+    stop_mode = backend->packet_processor_.Run(&wg_proc, backend);
+    net.StopThread();
+    tun.StopThread();
+
+    backend->wg_processor_ = NULL;
+
+    // Keep DNS alive
+    if (stop_mode != MODE_EXIT)
+      tun.adapter().DisassociateDnsBlocker();
+    else
+      backend->dns_resolver_.ClearCache();
+
+    FreeAllPackets();
+
+    if (stop_mode != MODE_TUN_FAILED)
+      return 0;
+
+    uint32 last_fail = GetTickCount();
+    fast_retry_ctr = (last_fail - backend->last_tun_adapter_failed_ < 5000) ? fast_retry_ctr + 1 : 0;
+    backend->last_tun_adapter_failed_ = last_fail;
+
+    backend->SetStatus((fast_retry_ctr >= 3) ? TunsafeBackend::kErrorTunPermanent : TunsafeBackend::kStatusTunRetrying);
+
+    if (backend->status_ == TunsafeBackend::kErrorTunPermanent) {
+      RERROR("Too many automatic restarts...");
+      goto getout_fail_noseterr;
+    }
+    Sleep(1000);
+  }
+getout_fail:
+  backend->status_ = TunsafeBackend::kErrorInitialize;
+  backend->delegate_->OnStatusCode(TunsafeBackend::kErrorInitialize);
+getout_fail_noseterr:
+  backend->dns_blocker_.RestoreDns();
+  return 0;
+}
 
 void TunsafeBackendWin32::SetStatus(StatusCode status) {
   status_ = status;

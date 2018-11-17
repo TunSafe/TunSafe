@@ -81,6 +81,8 @@ public:
   ~WireguardProcessor();
 
   void SetListenPort(int listen_port);
+  void SetListenPortTcp(int listen_port);
+
   void AddDnsServer(const IpAddr &sin);
   bool SetTunAddress(const WgCidrAddr &addr);
   void ClearTunAddress();
@@ -132,6 +134,7 @@ private:
   UdpInterface *udp_;
   
   uint16 listen_port_;
+  uint16 listen_port_tcp_;
   uint16 mtu_;
 
   bool dns_blocking_;

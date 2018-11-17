@@ -59,22 +59,30 @@ struct Packet : QueuedItem {
   uint8 userdata;
   uint8 protocol;         // which protocol is this packet for/from
   IpAddr addr;            // Optionally set to target/source of the packet
-  
-  byte data_pre[4];
-  byte data_buf[0];
+
   enum {
-    // there's always this much data before data_ptr
+    // there's always this much data before data_buf, to allow for header expansion
+    // in front.
     HEADROOM_BEFORE = 64,
   };
+
+  byte data_pre[HEADROOM_BEFORE];
+  byte data_buf[0];
+
+  void Reset() {
+    data = data_buf;
+    size = 0;
+  }
 };
 
 enum {
   kPacketAllocSize = 2048 - 16,
-  kPacketCapacity = kPacketAllocSize - sizeof(Packet) - Packet::HEADROOM_BEFORE,
+  kPacketCapacity = kPacketAllocSize - sizeof(Packet),
 };
 
 void FreePacket(Packet *packet);
 void FreePackets(Packet *packet, Packet **end, int count);
+void FreePacketList(Packet *packet);
 Packet *AllocPacket();
 void FreeAllPackets();
 
@@ -123,7 +131,7 @@ public:
 
 class UdpInterface {
 public:
-  virtual bool Configure(int listen_port) = 0;
+  virtual bool Configure(int listen_port_udp, int listen_port_tcp) = 0;
   virtual void WriteUdpPacket(Packet *packet) = 0;
 };
 

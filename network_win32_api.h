@@ -125,6 +125,3 @@ protected:
 
 TunsafeBackend *CreateNativeTunsafeBackend(TunsafeBackend::Delegate *delegate);
 TunsafeBackend::Delegate *CreateTunsafeBackendDelegateThreaded(TunsafeBackend::Delegate *delegate, const std::function<void(void)> &callback);
-
-extern int tpq_last_qsize;
-extern int g_tun_reads, g_tun_writes;

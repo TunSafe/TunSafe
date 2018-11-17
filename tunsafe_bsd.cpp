@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-1.0-only
 // Copyright (C) 2018 Ludvig Strigeus <info@tunsafe.com>. All Rights Reserved.
-#include "network_bsd_common.h"
+#include "tunsafe_bsd.h"
 #include "tunsafe_endian.h"
 #include "util.h"
 
@@ -42,17 +42,6 @@
 #include <sys/inotify.h>
 #include <limits.h>
 #endif
-
-void tunsafe_die(const char *msg) {
-  fprintf(stderr, "%s\n", msg);
-  exit(1);
-}
-
-void SetThreadName(const char *name) {
-#if defined(OS_LINUX)
-  prctl(PR_SET_NAME, name, 0, 0, 0);
-#endif  // defined(OS_LINUX)
-}
 
 #if defined(OS_MACOSX) || defined(OS_FREEBSD)
 struct MyRouteMsg {
@@ -346,21 +335,7 @@ int open_tun(char *devname, size_t devname_size) {
 }
 #endif
 
-int open_udp(int listen_on_port) {
-  int udp_fd = socket(AF_INET, SOCK_DGRAM, 0);
-  if (udp_fd < 0) return udp_fd;
-  sockaddr_in sin = {0};
-  sin.sin_family = AF_INET;
-  sin.sin_port = htons(listen_on_port);
-  if (bind(udp_fd, (struct sockaddr*)&sin, sizeof(sin)) != 0) {
-    close(udp_fd);
-    return -1;
-  }
-  return udp_fd;
-}
-
-TunsafeBackendBsd::TunsafeBackendBsd() 
-    : processor_(NULL) {
+TunsafeBackendBsd::TunsafeBackendBsd() {
   devname_[0] = 0;
   tun_interface_gone_ = false;
 }
@@ -579,121 +554,32 @@ bool TunsafeBackendBsd::RunPrePostCommand(const std::vector<std::string> &vec) {
   return success;
 }
 
-#if defined(OS_LINUX)
-UnixSocketDeletionWatcher::UnixSocketDeletionWatcher() 
-    : inotify_fd_(-1) {
-  pipes_[0] = -1;
-  pipes_[0] = -1;
-}
 
-UnixSocketDeletionWatcher::~UnixSocketDeletionWatcher() {
-  close(inotify_fd_);
-  close(pipes_[0]);
-  close(pipes_[1]);
-}
-
-bool UnixSocketDeletionWatcher::Start(const char *path, bool *flag_to_set) {
-  assert(inotify_fd_ == -1);
-  path_ = path;
-  flag_to_set_ = flag_to_set;
-  pid_ = getpid();
-  inotify_fd_ = inotify_init1(IN_CLOEXEC | IN_NONBLOCK);
-  if (inotify_fd_ == -1) {
-    perror("inotify_init1() failed");
-    return false;
-  }
-  if (inotify_add_watch(inotify_fd_, "/var/run/wireguard", IN_DELETE | IN_DELETE_SELF) == -1) {
-    perror("inotify_add_watch failed");
-    return false;
-  }
-  if (pipe(pipes_) == -1) {
-    perror("pipe() failed");
-    return false;
-  }
-  return pthread_create(&thread_, NULL, &UnixSocketDeletionWatcher::RunThread, this) == 0;
-}
-
-void UnixSocketDeletionWatcher::Stop() {
-  RINFO("Stopping..");
-  void *retval;
-  write(pipes_[1], "", 1);
-  pthread_join(thread_, &retval);
-}
-
-void *UnixSocketDeletionWatcher::RunThread(void *arg) {
-  UnixSocketDeletionWatcher *self = (UnixSocketDeletionWatcher*)arg;
-  return self->RunThreadInner();
-}
-
-void *UnixSocketDeletionWatcher::RunThreadInner() {
-  char buf[sizeof(struct inotify_event) + NAME_MAX + 1]
-     __attribute__ ((aligned(__alignof__(struct inotify_event))));
-  fd_set fdset;
-  struct stat st;
-  for(;;) {
-    if (lstat(path_, &st) == -1 && errno == ENOENT) {
-      RINFO("Unix socket %s deleted.", path_);
-      *flag_to_set_ = true;
-      kill(pid_, SIGALRM);
-      break;
-    }
-    FD_ZERO(&fdset);
-    FD_SET(inotify_fd_, &fdset);
-    FD_SET(pipes_[0], &fdset);
-    int n = select(std::max(inotify_fd_, pipes_[0]) + 1, &fdset, NULL, NULL, NULL);
-    if (n == -1) {
-      perror("select");
-      break;
-    }
-    if (FD_ISSET(inotify_fd_, &fdset)) {
-      ssize_t len = read(inotify_fd_, buf, sizeof(buf));
-      if (len == -1) {
-        perror("read");
-        break;
-      }
-    }
-    if (FD_ISSET(pipes_[0], &fdset))
-      break;
-  }
-  return NULL;
-}
-
-#else  // !defined(OS_LINUX)
-
-bool UnixSocketDeletionWatcher::Poll(const char *path) {
-  struct stat st;
-  return lstat(path, &st) == -1 && errno == ENOENT;
-}
-
-#endif // !defined(OS_LINUX)
-
-static TunsafeBackendBsd *g_tunsafe_backend_bsd;
-
-static void SigAlrm(int sig) {
-  if (g_tunsafe_backend_bsd)
-    g_tunsafe_backend_bsd->HandleSigAlrm();
-}
-
+static SignalCatcher *g_signal_catcher;
 static bool did_ctrlc;
 
-void SigInt(int sig) {
+void SignalCatcher::SigAlrm(int sig) {
+  if (g_signal_catcher)
+    *g_signal_catcher->sigalarm_flag_ = true;
+}
+
+void SignalCatcher::SigInt(int sig) {
   if (did_ctrlc)
     exit(1);
   did_ctrlc = true;
-  write(1, "Ctrl-C detected. Exiting. Press again to force quit.\n", sizeof("Ctrl-C detected. Exiting. Press again to force quit.\n")-1);
-  
+  write(1, "Ctrl-C detected. Exiting. Press again to force quit.\n", sizeof("Ctrl-C detected. Exiting. Press again to force quit.\n") - 1);
   // todo: fix signal safety?
-  if (g_tunsafe_backend_bsd)
-    g_tunsafe_backend_bsd->HandleExit();
+  if (g_signal_catcher)
+    *g_signal_catcher->exit_flag_ = true;
 }
 
-void TunsafeBackendBsd::RunLoop() {
-  assert(!g_tunsafe_backend_bsd);
-  assert(processor_);
+SignalCatcher::SignalCatcher(bool *exit_flag, bool *sigalarm_flag) {
+  assert(g_signal_catcher == NULL);
+  exit_flag_ = exit_flag;
+  sigalarm_flag_ = sigalarm_flag;
+  g_signal_catcher = this;
 
   sigset_t mask;
-
-  g_tunsafe_backend_bsd = this;
 
   // We want an alarm signal every second.
   {
@@ -713,7 +599,6 @@ void TunsafeBackendBsd::RunLoop() {
       return;
     }
   }
-
 #if defined(OS_LINUX) || defined(OS_FREEBSD)
   sigemptyset(&mask);
   sigaddset(&mask, SIGALRM);
@@ -737,7 +622,7 @@ void TunsafeBackendBsd::RunLoop() {
     if (timer_create(CLOCK_MONOTONIC, &sev, &timer_id) < 0) {
       RERROR("timer_create failed");
       return;
-    }    
+    }
 
     if (timer_settime(timer_id, 0, &tv, NULL) < 0) {
       RERROR("timer_settime failed");
@@ -747,50 +632,208 @@ void TunsafeBackendBsd::RunLoop() {
 #elif defined(OS_MACOSX)
   ualarm(1000000, 1000000);
 #endif
+}
 
-  RunLoopInner();
-
-  g_tunsafe_backend_bsd = NULL;
+SignalCatcher::~SignalCatcher() {
+  g_signal_catcher = NULL;
 }
 
 void InitCpuFeatures();
 void Benchmark();
-
 
 const char *print_ip(char buf[kSizeOfAddress], in_addr_t ip) {
   snprintf(buf, kSizeOfAddress, "%d.%d.%d.%d", (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, (ip >> 0) & 0xff);
   return buf;
 }
 
-class MyProcessorDelegate : public ProcessorDelegate {
+class TunsafeBackendBsdImpl : public TunsafeBackendBsd, public NetworkBsd::NetworkBsdDelegate, public ProcessorDelegate {
 public:
-  MyProcessorDelegate() {
-    wg_processor_ = NULL;
-    is_connected_ = false;
-  }
+  TunsafeBackendBsdImpl();
+  virtual ~TunsafeBackendBsdImpl();
 
-  virtual void OnConnected() override {
-    if (!is_connected_) {
-      const WgCidrAddr *ipv4_addr = NULL;
-      for (const WgCidrAddr &x : wg_processor_->addr()) {
-        if (x.size == 32) { ipv4_addr = &x; break; }
-      }
-      uint32 ipv4_ip = ipv4_addr ? ReadBE32(ipv4_addr->addr) : 0;
-      char buf[kSizeOfAddress];
-      RINFO("Connection established. IP %s", ipv4_ip ? print_ip(buf, ipv4_ip) : "(none)");
-      is_connected_ = true;
-    }
-  }
-  virtual void OnConnectionRetry(uint32 attempts) override {
-    if (is_connected_ && attempts >= 3) {
-      is_connected_ = false;
-      RINFO("Reconnecting...");
-    }
-  }
+  void RunLoop();
+  virtual bool InitializeTun(char devname[16]) override;
 
-  WireguardProcessor *wg_processor_;
+  // -- from TunInterface
+  virtual void WriteTunPacket(Packet *packet) override;
+
+  // -- from UdpInterface
+  virtual bool Configure(int listen_port_udp, int listen_port_tcp) override;
+  virtual void WriteUdpPacket(Packet *packet) override;
+
+  // -- from NetworkBsdDelegate
+  virtual void OnSecondLoop(uint64 now) override;
+  virtual void RunAllMainThreadScheduled() override;
+
+  // -- from ProcessorDelegate
+  virtual void OnConnected() override;
+  virtual void OnConnectionRetry(uint32 attempts) override;
+
+  WireguardProcessor *processor() { return &processor_; }
+
+private:
+  void WriteTcpPacket(Packet *packet);
+
+  // Close all TCP connections that are not pointed to by any of the peer endpoint.
+  void CloseOrphanTcpConnections();
+
   bool is_connected_;
+  uint8 close_orphan_counter_;
+  WireguardProcessor processor_;
+  NetworkBsd network_;
+  TunSocketBsd tun_;
+  UdpSocketBsd udp_;
+  UnixDomainSocketListenerBsd unix_socket_listener_;
+  TcpSocketListenerBsd tcp_socket_listener_;
 };
+
+TunsafeBackendBsdImpl::TunsafeBackendBsdImpl() 
+    : is_connected_(false),
+      close_orphan_counter_(0),
+      processor_(this, this, this),
+      network_(this, 1000),
+      tun_(&network_, &processor_), 
+      udp_(&network_, &processor_),
+      unix_socket_listener_(&network_, &processor_),
+      tcp_socket_listener_(&network_, &processor_) {
+}
+
+TunsafeBackendBsdImpl::~TunsafeBackendBsdImpl() {
+}
+
+bool TunsafeBackendBsdImpl::InitializeTun(char devname[16]) {
+  int tun_fd = open_tun(devname, 16);
+  if (tun_fd < 0) { RERROR("Error opening tun device"); return false; }
+  if (!tun_.Initialize(tun_fd)) {
+    close(tun_fd);
+    return false;
+  }
+  unix_socket_listener_.Initialize(devname);
+  return true;  
+}
+
+void TunsafeBackendBsdImpl::WriteTunPacket(Packet *packet) {
+  tun_.WritePacket(packet);
+}
+
+// Called to initialize udp
+bool TunsafeBackendBsdImpl::Configure(int listen_port, int listen_port_tcp) {
+  return udp_.Initialize(listen_port) && 
+         (listen_port_tcp == 0 || tcp_socket_listener_.Initialize(listen_port_tcp));
+}
+
+void TunsafeBackendBsdImpl::WriteTcpPacket(Packet *packet) {
+  // Check if we have a tcp connection for the endpoint, otherwise create one.
+  for (TcpSocketBsd *tcp = network_.tcp_sockets(); tcp; tcp = tcp->next()) {
+    // After we send 3 handshakes on a tcp socket in a row, then close and reopen the socket because it seems defunct.
+    if (CompareIpAddr(&tcp->endpoint(), &packet->addr) == 0 && tcp->endpoint_protocol() == packet->protocol) {
+      if (ReadLE32(packet->data) == MESSAGE_HANDSHAKE_INITIATION) {
+        if (tcp->handshake_attempts == 2) {
+          RINFO("Making new Tcp socket due to too many handshake failures");
+          delete tcp;
+          break;
+        }
+        tcp->handshake_attempts++;
+      } else {
+        tcp->handshake_attempts = -1;
+      }
+      tcp->WritePacket(packet);
+      return;
+    }
+  }
+  // Drop tcp packet that's for an incoming connection, or packets that are
+  // not a handshake.
+  if ((packet->protocol & kPacketProtocolIncomingConnection) ||
+      ReadLE32(packet->data) != MESSAGE_HANDSHAKE_INITIATION) {
+    FreePacket(packet);
+    return;
+  }
+  // Initialize a new tcp socket and connect to the endpoint
+  TcpSocketBsd *tcp = new TcpSocketBsd(&network_, &processor_);
+  if (!tcp || !tcp->InitializeOutgoing(packet->addr)) {
+    delete tcp;
+    FreePacket(packet);
+    return;
+  }
+  tcp->WritePacket(packet);
+}
+
+void TunsafeBackendBsdImpl::WriteUdpPacket(Packet *packet) {
+  assert((packet->protocol & 0x7F) <= 2);
+  if (packet->protocol & kPacketProtocolTcp) {
+    WriteTcpPacket(packet);
+  } else {
+    udp_.WritePacket(packet);
+  }
+}
+
+void TunsafeBackendBsdImpl::RunLoop() {
+  if (!unix_socket_listener_.Start(network_.exit_flag()))
+    return;
+
+  SignalCatcher signal_catcher(network_.exit_flag(), network_.sigalarm_flag());
+  network_.RunLoop(&signal_catcher.orig_signal_mask_);
+  unix_socket_listener_.Stop();
+
+  tun_interface_gone_ = tun_.tun_interface_gone();
+}
+
+void TunsafeBackendBsdImpl::OnSecondLoop(uint64 now) {
+  if (!(close_orphan_counter_++ & 0xF))
+    CloseOrphanTcpConnections();
+  processor_.SecondLoop();
+}
+
+void TunsafeBackendBsdImpl::RunAllMainThreadScheduled() {
+  processor_.RunAllMainThreadScheduled();
+}
+
+void TunsafeBackendBsdImpl::OnConnected() {
+  if (!is_connected_) {
+    const WgCidrAddr *ipv4_addr = NULL;
+    for (const WgCidrAddr &x : processor_.addr()) {
+      if (x.size == 32) { ipv4_addr = &x; break; }
+    }
+    uint32 ipv4_ip = ipv4_addr ? ReadBE32(ipv4_addr->addr) : 0;
+    char buf[kSizeOfAddress];
+    RINFO("Connection established. IP %s", ipv4_ip ? print_ip(buf, ipv4_ip) : "(none)");
+    is_connected_ = true;
+  }
+}
+
+void TunsafeBackendBsdImpl::OnConnectionRetry(uint32 attempts) {
+  if (is_connected_ && attempts >= 3) {
+    is_connected_ = false;
+    RINFO("Reconnecting...");
+  }
+}
+
+void TunsafeBackendBsdImpl::CloseOrphanTcpConnections() {
+  // Add all incoming tcp connections into a lookup table
+  WG_HASHTABLE_IMPL<WgAddrEntry::IpPort, void*, WgAddrEntry::IpPortHasher> lookup;
+  for (TcpSocketBsd *tcp = network_.tcp_sockets(); tcp; tcp = tcp->next()) {
+    if (tcp->endpoint_protocol() == (kPacketProtocolTcp | kPacketProtocolIncomingConnection)) {
+      // Avoid deleting tcp sockets that were just born.
+      if (tcp->age == 0) {
+        tcp->age = 1;
+      } else {
+        lookup[ConvertIpAddrToAddrX(tcp->endpoint())] = tcp;
+      }
+    }
+  }
+  if (lookup.empty())
+    return;
+  // For each peer, check if it has an endpoint that matches 
+  // an entry in the lookup table, and delete it from the lookup
+  // table.
+  for(WgPeer *peer = processor_.dev().first_peer(); peer; peer = peer->next_peer()) {
+    if (peer->endpoint_protocol() == (kPacketProtocolTcp | kPacketProtocolIncomingConnection))
+      lookup.erase(ConvertIpAddrToAddrX(peer->endpoint()));
+  }
+  // The tcp connections that are still in the hashtable can be deleted
+  for(const auto &it : lookup)
+    delete (TcpSocketBsd *)it.second;
+}
 
 int main(int argc, char **argv) {
   CommandLineOutput cmd = {0};
@@ -812,20 +855,15 @@ int main(int argc, char **argv) {
 
   SetThreadName("tunsafe-m");
 
-  MyProcessorDelegate my_procdel;
-  TunsafeBackendBsd *backend = CreateTunsafeBackendBsd();
+  TunsafeBackendBsdImpl backend;
   if (cmd.interface_name)
-    backend->SetTunDeviceName(cmd.interface_name);
-
-  WireguardProcessor wg(backend, backend, &my_procdel);
-
-  my_procdel.wg_processor_ = &wg;
-  backend->SetProcessor(&wg);
+    backend.SetTunDeviceName(cmd.interface_name);
 
   DnsResolver dns_resolver(NULL);
-  if (*cmd.filename_to_load && !ParseWireGuardConfigFile(&wg, cmd.filename_to_load, &dns_resolver))
+  if (*cmd.filename_to_load && !ParseWireGuardConfigFile(backend.processor(), cmd.filename_to_load, &dns_resolver))
     return 1;
-  if (!wg.Start()) return 1;
+  if (!backend.processor()->Start())
+    return 1;
 
   if (cmd.daemon) {
     fprintf(stderr, "Switching to daemon mode...\n");
@@ -833,9 +871,8 @@ int main(int argc, char **argv) {
       perror("daemon() failed");
   }
 
-  backend->RunLoop();
-  backend->CleanupRoutes();
-  delete backend;
+  backend.RunLoop();
+  backend.CleanupRoutes();
 
   return 0;
 }

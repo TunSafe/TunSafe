@@ -28,6 +28,7 @@ WireguardProcessor::WireguardProcessor(UdpInterface *udp, TunInterface *tun, Pro
   mtu_ = 1420;
   memset(&stats_, 0, sizeof(stats_));
   listen_port_ = 0;
+  listen_port_tcp_ = 0;
   network_discovery_spoofing_ = false;
   add_routes_mode_ = true;
   dns_blocking_ = true;
@@ -49,6 +50,16 @@ void WireguardProcessor::SetListenPort(int listen_port) {
     }
   }
 }
+
+void WireguardProcessor::SetListenPortTcp(int listen_port) {
+  if (listen_port_tcp_ != listen_port) {
+    listen_port_tcp_ = listen_port;
+    if (is_started_ && !ConfigureUdp()) {
+      RINFO("ConfigureUdp failed");
+    }
+  }
+}
+
 
 void WireguardProcessor::AddDnsServer(const IpAddr &sin) {
   dns_addr_.push_back(sin);
@@ -126,7 +137,7 @@ bool WireguardProcessor::Start() {
 
 bool WireguardProcessor::ConfigureUdp() {
   assert(dev_.IsMainThread());
-  return udp_->Configure(listen_port_);
+  return udp_->Configure(listen_port_, listen_port_tcp_);
 }
 
 bool WireguardProcessor::ConfigureTun() {

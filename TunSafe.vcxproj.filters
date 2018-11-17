@@ -23,6 +23,12 @@
     <Filter Include="crypto\chacha20poly1305">
       <UniqueIdentifier>{1ca37c7b-e91e-4648-9584-7d0c73d8e416}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\BSD">
+      <UniqueIdentifier>{4b2f2fd9-780e-45db-8fe1-f03079439723}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="crypto\siphash">
+      <UniqueIdentifier>{0f45e1a0-f33e-4c6e-88ae-eb4639f12041}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -92,7 +98,6 @@
     <ClInclude Include="service_win32_constants.h">
       <Filter>Source Files\Win32</Filter>
     </ClInclude>
-    <ClInclude Include="crypto\siphash\siphash.h" />
     <ClInclude Include="crypto\blake2s\blake2s.h">
       <Filter>crypto\blake2s</Filter>
     </ClInclude>
@@ -122,6 +127,21 @@
     </ClInclude>
     <ClInclude Include="tunsafe_dnsresolve.h">
       <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="crypto\siphash\siphash.h">
+      <Filter>crypto\siphash</Filter>
+    </ClInclude>
+    <ClInclude Include="network_bsd.h">
+      <Filter>Source Files\BSD</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_bsd.h">
+      <Filter>Source Files\BSD</Filter>
+    </ClInclude>
+    <ClInclude Include="network_common.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="network_win32_tcp.h">
+      <Filter>Source Files\Win32</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -173,9 +193,6 @@
     <ClCompile Include="service_pipe_win32.cpp">
       <Filter>Source Files\Win32</Filter>
     </ClCompile>
-    <ClCompile Include="crypto\siphash\siphash.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="crypto\blake2s\blake2s.cpp">
       <Filter>crypto\blake2s</Filter>
     </ClCompile>
@@ -187,6 +204,24 @@
     </ClCompile>
     <ClCompile Include="tunsafe_ipaddr.cpp">
       <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="network_bsd.cpp">
+      <Filter>Source Files\BSD</Filter>
+    </ClCompile>
+    <ClCompile Include="network_bsd_mt.cpp">
+      <Filter>Source Files\BSD</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\siphash\siphash.cpp">
+      <Filter>crypto\siphash</Filter>
+    </ClCompile>
+    <ClCompile Include="tunsafe_bsd.cpp">
+      <Filter>Source Files\BSD</Filter>
+    </ClCompile>
+    <ClCompile Include="network_common.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="network_win32_tcp.cpp">
+      <Filter>Source Files\Win32</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

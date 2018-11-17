@@ -104,6 +104,8 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       wg_->dev().SetPrivateKey(binkey);
     } else if (strcmp(key, "ListenPort") == 0) {
       wg_->SetListenPort(atoi(value));
+    } else if (strcmp(key, "ListenPortTCP") == 0) {
+      wg_->SetListenPortTcp(atoi(value));
     } else if (strcmp(key, "Address") == 0) {
       SplitString(value, ',', &ss);
       for (size_t i = 0; i < ss.size(); i++) {

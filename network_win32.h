@@ -2,15 +2,14 @@
 // Copyright (C) 2018 Ludvig Strigeus <info@tunsafe.com>. All Rights Reserved.
 #pragma once
 
-#include "stdafx.h"
-#include "tunsafe_types.h"
 #include "netapi.h"
 #include "network_win32_api.h"
 #include "network_win32_dnsblock.h"
 #include "wireguard_config.h"
 #include "tunsafe_threading.h"
 #include "tunsafe_dnsresolve.h"
-#include <functional>
+#include "network_common.h"
+#include "network_win32_tcp.h"
 
 enum {
   ADAPTER_GUID_SIZE = 40,
@@ -18,6 +17,7 @@ enum {
 
 class WireguardProcessor;
 class TunsafeBackendWin32;
+class DnsBlocker;
 
 struct PacketProcessorTunCb : QueuedItemCallback {
   virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
@@ -73,16 +73,15 @@ class PacketAllocPool;
 
 // Encapsulates a UDP socket pair (ipv4 / ipv6), optionally listening for incoming packets
 // on a specific port.
-class UdpSocketWin32 : public UdpInterface, QueuedItemCallback {
+class UdpSocketWin32 : public QueuedItemCallback {
 public:
   explicit UdpSocketWin32(NetworkWin32 *network_win32);
   ~UdpSocketWin32();
 
   void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
 
-  // -- from UdpInterface
-  virtual bool Configure(int listen_on_port) override;
-  virtual void WriteUdpPacket(Packet *packet) override;
+  bool Configure(int listen_on_port);
+  inline void WriteUdpPacket(Packet *packet);
 
   void DoIO();
   void CancelAllIO();
@@ -94,9 +93,9 @@ public:
   };
 
 private:
-
   void DoMoreReads();
   void DoMoreWrites();
+  void ProcessPackets();
 
   // From OverlappedCallbacks
   virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
@@ -125,11 +124,16 @@ private:
     
   Packet *finished_reads_, **finished_reads_end_;
   int finished_reads_count_;
+
+  __declspec(align(64)) uint32 qsize1_;
+  __declspec(align(64)) uint32 qsize2_;
 };
 
 // Holds the thread for network communications
-class NetworkWin32 {
+class NetworkWin32 : public UdpInterface {
   friend class UdpSocketWin32;
+  friend class TcpSocketWin32;
+  friend class TcpSocketQueue;
 public:
   explicit NetworkWin32();
   ~NetworkWin32();
@@ -138,13 +142,20 @@ public:
   void StopThread();
 
   UdpSocketWin32 &udp() { return udp_socket_; }
+  SimplePacketPool &packet_pool() { return packet_pool_; }
+  TcpSocketQueue &tcp_socket_queue() { return tcp_socket_queue_; }
+  void WakeUp();
+  void PostQueuedItem(QueuedItem *item);
+
+  // -- from UdpInterface
+  virtual bool Configure(int listen_port_udp, int listen_port_tcp) override;
+  virtual void WriteUdpPacket(Packet *packet) override;
 
 private:
   void ThreadMain();
   static DWORD WINAPI NetworkThread(void *x);
 
-  void FreePacketToPool(Packet *p);
-  bool AllocPacketFromPool(Packet **p);
+  bool HasOutstandingIO();
 
   // The network thread handle
   HANDLE thread_;
@@ -155,17 +166,16 @@ private:
   // The handle to the completion port
   HANDLE completion_port_handle_;
 
-  Packet *freed_packets_, **freed_packets_end_;
-  int freed_packets_count_;
-
   // Right now there's always one udp socket only
   UdpSocketWin32 udp_socket_;
+
+  // A linked list of all tcp sockets
+  TcpSocketWin32 *tcp_socket_;
+
+  SimplePacketPool packet_pool_;
+
+  TcpSocketQueue tcp_socket_queue_;
 };
-
-
-
-
-class DnsBlocker;
 
 class TunWin32Adapter {
 public:
@@ -241,42 +251,6 @@ private:
 
   TunsafeBackendWin32 *backend_;
   TunWin32Adapter adapter_;
-};
-
-// Implementation of TUN interface handling using Overlapped IO
-class TunWin32Overlapped : public TunInterface {
-public:
-  explicit TunWin32Overlapped(DnsBlocker *blocker, TunsafeBackendWin32 *backend);
-  ~TunWin32Overlapped();
-
-  void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
-
-  void StartThread();
-  void StopThread();
-
-  // -- from TunInterface
-  virtual bool Configure(const TunConfig &&config, TunConfigOut *out) override;
-  virtual void WriteTunPacket(Packet *packet) override;
-
-private:
-  void CloseTun();
-  void ThreadMain();
-  static DWORD WINAPI TunThread(void *x);
-
-  PacketProcessor *packet_handler_;
-  HANDLE thread_;
-
-  Mutex mutex_;
-
-  HANDLE read_event_, write_event_, wake_event_;
-
-  bool exit_thread_;
-
-  Packet *wqueue_, **wqueue_end_;
-
-  TunWin32Adapter adapter_;
-
-  TunsafeBackendWin32 *backend_;
 };
 
 class TunsafeBackendWin32 : public TunsafeBackend, public ProcessorDelegate {
@@ -427,3 +401,8 @@ private:
   uint8 num_inuse_;
   Entry entry_[kMaxAdaptersInUse];
 };
+
+static inline void ClearOverlapped(OVERLAPPED *o) {
+  memset(o, 0, sizeof(*o));
+}
+
