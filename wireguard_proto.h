@@ -509,7 +509,6 @@ private:
   void WriteMacToPacket(const uint8 *data, MessageMacs *mac);
   void CheckAndUpdateTimeOfNextKeyEvent(uint64 now);
   static void DeleteKeypair(WgKeypair **kp);
-  static void CopyEndpointToPeer_Locked(WgKeypair *keypair, const IpAddr *addr);
   static void DelayedDelete(void *x);
   size_t WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair);
   void InsertKeypairInPeer_Locked(WgKeypair *keypair);
