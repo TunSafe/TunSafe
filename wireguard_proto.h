@@ -409,8 +409,8 @@ private:
   WG_HASHTABLE_IMPL<uint32, std::pair<WgPeer*, WgKeypair*>, KeyIdHasher> key_id_lookup_;
 
   // Mapping from IPV4 IP/PORT to WgPeer*, so we can find the peer when a key id is
-  // not explicitly included.
-  WG_HASHTABLE_IMPL<WgAddrEntry::IpPort, WgAddrEntry*, WgAddrEntry::IpPortHasher> addr_entry_lookup_;
+  // not explicitly included. Use void* here so we can reuse the same template instance.
+  WG_HASHTABLE_IMPL<WgAddrEntry::IpPort, void*, WgAddrEntry::IpPortHasher> addr_entry_lookup_;
   WG_DECLARE_RWLOCK(addr_entry_lookup_lock_);
 
   // Mapping from peer id to peer. This may be accessed only from MT.

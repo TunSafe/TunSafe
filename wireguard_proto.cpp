@@ -281,7 +281,7 @@ WgKeypair *WgDevice::LookupKeypairInAddrEntryMap(const IpAddr &addr, uint32 slot
   auto it = addr_entry_lookup_.find(addr_x);
   if (it == addr_entry_lookup_.end())
     return NULL;
-  WgAddrEntry *addr_entry = it->second;
+  WgAddrEntry *addr_entry = (WgAddrEntry*)it->second;
   return addr_entry->keys[slot];
 }
 
@@ -300,7 +300,7 @@ void WgDevice::UpdateKeypairAddrEntry_Locked(const IpAddr &addr, WgKeypair *keyp
   if (keypair->addr_entry != NULL)
     EraseKeypairAddrEntry_Locked(keypair);
 
-  WgAddrEntry **aep = &addr_entry_lookup_[addr_x], *ae;
+  WgAddrEntry **aep = (WgAddrEntry**)&addr_entry_lookup_[addr_x], *ae;
 
   if ((ae = *aep) == NULL) {
     *aep = ae = new WgAddrEntry(addr_x);
