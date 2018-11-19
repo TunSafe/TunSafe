@@ -29,6 +29,9 @@
     <Filter Include="crypto\siphash">
       <UniqueIdentifier>{0f45e1a0-f33e-4c6e-88ae-eb4639f12041}</UniqueIdentifier>
     </Filter>
+    <Filter Include="crypto\sha">
+      <UniqueIdentifier>{1725c5b8-3480-41d8-8b8e-356f68ceda3d}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="stdafx.h">
@@ -143,6 +146,12 @@
     <ClInclude Include="network_win32_tcp.h">
       <Filter>Source Files\Win32</Filter>
     </ClInclude>
+    <ClInclude Include="crypto\sha\sha1.h">
+      <Filter>crypto\sha</Filter>
+    </ClInclude>
+    <ClInclude Include="tunsafe_wg_plugin.h">
+      <Filter>Source Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="stdafx.cpp">
@@ -222,6 +231,12 @@
     </ClCompile>
     <ClCompile Include="network_win32_tcp.cpp">
       <Filter>Source Files\Win32</Filter>
+    </ClCompile>
+    <ClCompile Include="crypto\sha\sha1.cpp">
+      <Filter>crypto\sha</Filter>
+    </ClCompile>
+    <ClCompile Include="tunsafe_wg_plugin.cpp">
+      <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

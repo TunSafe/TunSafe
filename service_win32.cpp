@@ -484,6 +484,7 @@ bool TunsafeServiceManager::SwitchInterface(TunsafeServiceServer *server, const 
 ///////////////////////////////////////////////////////////////////////////////////////
 
 TunsafeServiceBackend::TunsafeServiceBackend(TunsafeServiceManager *manager) {
+  token_request_flag_ = 0;
   manager_ = manager;
   historical_log_lines_count_ = historical_log_lines_pos_ = 0;
   memset(historical_log_lines_, 0, sizeof(historical_log_lines_));
@@ -595,6 +596,8 @@ void TunsafeServiceBackend::SendStateUpdate(TunsafeServiceServer *filter) {
   ss->is_started = backend_->is_started();
   ss->internet_block_state = backend_->GetInternetBlockState();
   ss->ipv4_ip = backend_->GetIP();
+  ss->token_request = backend_->GetTokenRequest();
+  ss->token_request_flag = token_request_flag_;
   memcpy(ss->public_key, backend_->public_key(), 32);
   memcpy(temp + sizeof(ServiceState), current_filename_.c_str(), current_filename_.size() + 1);
   for (TunsafeServiceServer *pipe_server : pipe_servers_) {
@@ -787,6 +790,10 @@ bool TunsafeServiceServer::HandleMessage(int type, uint8 *data, size_t size) {
       service_backend_->Start("");
     service_backend_->backend_->SendConfigurationProtocolPacket(unique_id_, std::string((char*)data, size));
     break;
+  case TS_SERVICE_REQ_SUBMIT_TOKEN:
+    service_backend_->token_request_flag_ ^= 1;
+    service_backend_->backend_->SubmitToken(std::string((char*)data, size));
+    break;
 
   default:
     return false;
@@ -901,6 +908,7 @@ TunsafeServiceClient::TunsafeServiceClient(TunsafeBackend::Delegate *delegate)
   delegate_ = delegate;
   cached_graph_ = 0;
   last_graph_type_ = 0xffffffff;
+  token_request_flag_ = 0xff;
   memset(&service_state_, 0, sizeof(service_state_));
   connection_ = pipe_manager_.GetClientConnection();
 }
@@ -957,6 +965,18 @@ LinearizedGraph *TunsafeServiceClient::GetGraph(int type) {
 }
 
 void TunsafeServiceClient::SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) {
+}
+
+uint32 TunsafeServiceClient::GetTokenRequest() {
+  mutex_.Acquire();
+  uint32 rv = (token_request_flag_ == service_state_.token_request_flag) ? 0 : service_state_.token_request;
+  mutex_.Release();
+  return rv;
+}
+
+void TunsafeServiceClient::SubmitToken(const std::string &&token) {
+  token_request_flag_ = service_state_.token_request_flag;
+  connection_->WritePacket(TS_SERVICE_REQ_SUBMIT_TOKEN, (const uint8*)token.data(), token.size());
 }
 
 std::string TunsafeServiceClient::GetConfigFileName() {

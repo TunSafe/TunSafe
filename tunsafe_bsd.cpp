@@ -2,6 +2,7 @@
 // Copyright (C) 2018 Ludvig Strigeus <info@tunsafe.com>. All Rights Reserved.
 #include "tunsafe_bsd.h"
 #include "tunsafe_endian.h"
+#include "tunsafe_wg_plugin.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -42,6 +43,8 @@
 #include <sys/inotify.h>
 #include <limits.h>
 #endif
+
+static bool g_daemon_mode;
 
 #if defined(OS_MACOSX) || defined(OS_FREEBSD)
 struct MyRouteMsg {
@@ -646,7 +649,7 @@ const char *print_ip(char buf[kSizeOfAddress], in_addr_t ip) {
   return buf;
 }
 
-class TunsafeBackendBsdImpl : public TunsafeBackendBsd, public NetworkBsd::NetworkBsdDelegate, public ProcessorDelegate {
+class TunsafeBackendBsdImpl : public TunsafeBackendBsd, public NetworkBsd::NetworkBsdDelegate, public ProcessorDelegate, public PluginDelegate {
 public:
   TunsafeBackendBsdImpl();
   virtual ~TunsafeBackendBsdImpl();
@@ -669,6 +672,9 @@ public:
   virtual void OnConnected() override;
   virtual void OnConnectionRetry(uint32 attempts) override;
 
+  // -- from PluginDelegate
+  virtual void OnRequestToken(WgPeer *peer, uint32 type) override;
+
   WireguardProcessor *processor() { return &processor_; }
 
 private:
@@ -679,6 +685,7 @@ private:
 
   bool is_connected_;
   uint8 close_orphan_counter_;
+  TunsafePlugin *plugin_;
   WireguardProcessor processor_;
   NetworkBsd network_;
   TunSocketBsd tun_;
@@ -690,15 +697,18 @@ private:
 TunsafeBackendBsdImpl::TunsafeBackendBsdImpl() 
     : is_connected_(false),
       close_orphan_counter_(0),
+      plugin_(CreateTunsafePlugin(this)),
       processor_(this, this, this),
       network_(this, 1000),
       tun_(&network_, &processor_), 
       udp_(&network_, &processor_),
       unix_socket_listener_(&network_, &processor_),
       tcp_socket_listener_(&network_, &processor_) {
+  processor_.dev().SetPlugin(plugin_);
 }
 
 TunsafeBackendBsdImpl::~TunsafeBackendBsdImpl() {
+  delete plugin_;
 }
 
 bool TunsafeBackendBsdImpl::InitializeTun(char devname[16]) {
@@ -808,6 +818,19 @@ void TunsafeBackendBsdImpl::OnConnectionRetry(uint32 attempts) {
   }
 }
 
+void TunsafeBackendBsdImpl::OnRequestToken(WgPeer *peer, uint32 type) {
+  if (!g_daemon_mode) {
+    fprintf(stderr, "A two factor token is required to login. Please enter the value from your authenticator.\nToken: ");
+    char buf[100], *rv;
+    while (!(rv = fgets(buf, 100, stdin)) && errno == EINTR) {}
+    if (rv) {
+      size_t len = strlen(buf);
+      while (len && buf[len-1] == '\n') buf[--len] = 0;
+      plugin_->SubmitToken((const uint8*)buf, strlen(buf));
+    }
+  }
+}
+
 void TunsafeBackendBsdImpl::CloseOrphanTcpConnections() {
   // Add all incoming tcp connections into a lookup table
   WG_HASHTABLE_IMPL<WgAddrEntry::IpPort, void*, WgAddrEntry::IpPortHasher> lookup;
@@ -866,6 +889,8 @@ int main(int argc, char **argv) {
     return 1;
 
   if (cmd.daemon) {
+    g_daemon_mode = true;
+
     fprintf(stderr, "Switching to daemon mode...\n");
     if (daemon(0, 0) == -1)
       perror("daemon() failed");

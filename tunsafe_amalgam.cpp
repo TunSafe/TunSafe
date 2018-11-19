@@ -9,6 +9,7 @@
 #include "wireguard.cpp"
 #include "wireguard_proto.cpp"
 #include "wireguard_config.cpp"
+#include "tunsafe_wg_plugin.cpp"
 #include "util.cpp"
 #include "tunsafe_threading.cpp"
 #include "tunsafe_cpu.cpp"
@@ -19,6 +20,7 @@
 #include "crypto/blake2s/blake2s.cpp"
 #include "crypto/siphash/siphash.cpp"
 #include "crypto/aesgcm/aesgcm.cpp"
+#include "crypto/sha/sha1.cpp"
 #include "network_common.cpp"
 
 #if defined(WITH_NETWORK_BSD)

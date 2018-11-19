@@ -4,6 +4,7 @@
 #include "wireguard_config.h"
 #include "network_win32_api.h"
 #include "network_win32_dnsblock.h"
+#include "tunsafe_wg_plugin.h"
 #include <Commctrl.h>
 #include <stdlib.h>
 #include <assert.h>
@@ -34,6 +35,8 @@
 void InitCpuFeatures();
 void PrintCpuFeatures();
 void Benchmark();
+void ShowTwoFactorDialog();
+
 static const char *GetCurrentConfigTitle(char *buf, size_t max_size);
 static char *PrintMB(char *buf, int64 bytes);
 static void LoadConfigFile(const char *filename, bool save, bool force_start);
@@ -73,6 +76,8 @@ static UINT g_message_taskbar_created;
 static int g_current_tab;
 static bool wm_dropfiles_recursive;
 static bool g_has_icon;
+static bool g_twofactor_dialog_shown;
+static uint32 g_twofactor_dialog_request;
 static int g_selected_graph_type;
 static RECT comborect;
 static HBITMAP arrowbitmap;
@@ -228,6 +233,15 @@ public:
     SetDlgItemText(g_ui_window, ID_START, running ? "Re&connect" : "&Connect");
     InvalidatePaintbox();
     EnableWindow(GetDlgItem(g_ui_window, ID_STOP), running);
+
+    if (running && !g_twofactor_dialog_shown) {
+      uint32 token_request = g_backend->GetTokenRequest();
+      if (token_request != 0) {
+        g_twofactor_dialog_shown = true;
+        g_twofactor_dialog_request = token_request;
+        PostMessage(g_ui_window, WM_USER + 3, 0, 0); // show two factor dialog
+      }
+    }
   }
 
   virtual void OnStatusCode(TunsafeBackend::StatusCode status) override {
@@ -1045,6 +1059,10 @@ static INT_PTR WINAPI DlgProc(HWND hWnd, UINT message, WPARAM wParam,
     g_backend_delegate->DoWork();
     return true;
 
+  case WM_USER + 3:
+    ShowTwoFactorDialog();
+    return true;
+
   case WM_INITMENU: {
     HMENU menu = GetMenu(g_ui_window);
 
@@ -1666,6 +1684,189 @@ static LRESULT CALLBACK AdvancedBoxWndProc(HWND  hwnd, UINT  uMsg, WPARAM wParam
   return DefWindowProc(hwnd, uMsg, wParam, lParam);
 }
 
+static char twofactordig[9];
+static uint8 twofactornum, twofactormax;
+
+static void DrawInTwoFactorBox(HDC hdc, int w, int h) {
+  RECT rect = {0, 0, w, h};
+  FillRect(hdc, &rect, (HBRUSH)(COLOR_3DFACE + 1));
+
+  HPEN dc_pen = (HPEN)GetStockObject(DC_PEN);
+  HGDIOBJ original = SelectObject(hdc, dc_pen);
+
+  HFONT font = CreateFontHelper(32, 0, "Tahoma");
+  SelectObject(hdc, font);
+  SetBkMode(hdc, TRANSPARENT);
+
+  HPEN sel_pen = CreatePen(PS_SOLID, RescaleDpi(3), GetSysColor(COLOR_HIGHLIGHT));
+  SetDCPenColor(hdc, GetSysColor(COLOR_3DSHADOW));
+
+  int item_width = 35, item_spacing = 43, n = 6, xmarg = 15, middle_spacing = 12;
+  if (twofactormax == 8) {
+    item_width = 32;
+    xmarg = 2;
+    item_spacing = 36;
+    middle_spacing = 6;
+  } else if (twofactormax == 7) {
+    item_width = 35;
+    item_spacing = 41;
+    xmarg = 6;
+    middle_spacing = 0;
+  }
+  int radius = RescaleDpi(10);
+  for (int i = 0; i < twofactormax; i++) {
+    int x = xmarg + item_spacing * i + (i * 2 >= twofactormax) * middle_spacing;
+
+    SelectObject(hdc, i == twofactornum ? sel_pen : dc_pen);
+    RECT r2 = {x, 5, x + item_width, 5 + 42};
+    RECT r = RescaleDpiRect(r2);
+    RoundRect(hdc, r.left, r.top, r.right, r.bottom, radius, radius);
+    
+    if (i < twofactornum)
+      DrawText(hdc, twofactordig + i, 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_NOCLIP);
+   }
+
+  DeleteObject(font);
+  DeleteObject(sel_pen);
+  SelectObject(hdc, original);
+}
+
+static LRESULT CALLBACK TwoFactorEditFieldWndProc(HWND  hwnd, UINT  uMsg, WPARAM wParam, LPARAM lParam) {
+  switch (uMsg) {
+  case WM_PAINT: {
+    HandleWmPaintPaintbox(hwnd, &DrawInTwoFactorBox);
+    return TRUE;
+  }
+  case WM_GETDLGCODE:
+    return DLGC_WANTCHARS;
+  case WM_KEYDOWN:
+    if (wParam >= '0' && wParam <= '9' && twofactornum < twofactormax) {
+      twofactordig[twofactornum++] = (char)wParam;
+      if (twofactornum == twofactormax) {
+        twofactordig[twofactornum] = 0;
+        g_backend->SubmitToken(std::string(twofactordig));
+        SendMessage(GetParent(hwnd), WM_CLOSE, 0, 0);
+      } else {
+        InvalidateRect(hwnd, NULL, FALSE);
+      }
+      return FALSE;
+    } else if (wParam == VK_BACK) {
+      if (twofactornum > 0) {
+        twofactornum--;
+        InvalidateRect(hwnd, NULL, FALSE);
+      }
+      return FALSE;
+    } else if (wParam == 'V' && GetAsyncKeyState(VK_CONTROL) < 0) {
+      if (twofactornum == 0) {
+        std::string digits = GetClipboardString();
+        if (digits.size() == twofactormax) {
+          g_backend->SubmitToken(std::move(digits));
+          SendMessage(GetParent(hwnd), WM_CLOSE, 0, 0);
+        }
+      }
+      return FALSE;
+    }
+    break;
+  case WM_CHAR:
+    return FALSE;
+
+  case WM_ERASEBKGND:
+    return TRUE;
+
+  }
+  return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+static INT_PTR WINAPI TwoFactorDlgProc(HWND hWnd, UINT message, WPARAM wParam,
+                                       LPARAM lParam) {
+  static HFONT twofactorfont;
+
+  switch (message) {
+  case WM_INITDIALOG: {
+    uint32 failreason = g_twofactor_dialog_request & kTokenRequestStatus_Mask;
+    if (failreason) {
+      size_t index = (failreason >> 8) - 1;
+      
+      static const char * const kFailReasons[] = {
+        "Code Not Accepted. Please try again.",
+        "Incorrect code. Please try again.",
+        "Account locked.",
+        "Rate limited. Please wait 30 seconds.",
+      };
+
+      HWND label = GetDlgItem(hWnd, IDC_CODENOTACCEPTED);
+      SetWindowText(label, kFailReasons[index >= ARRAYSIZE(kFailReasons) ? 0 : index]);
+      ShowWindow(label, SW_SHOW);
+    }
+
+    int type = g_twofactor_dialog_request & kTokenRequestType_Mask;
+    if (type >= kTokenRequestType_6digits && type <= kTokenRequestType_8digits) {
+      twofactormax = (uint8)(type - kTokenRequestType_6digits + 6);
+    } else {
+      if (type != kTokenRequestType_Password)
+        SendDlgItemMessage(hWnd, IDC_TWOFACTOREDIT, EM_SETPASSWORDCHAR, 0, 0);
+
+      twofactorfont = CreateFontHelper(20, 0, "Tahoma", 0);
+      SendDlgItemMessage(hWnd, IDC_TWOFACTOREDIT, WM_SETFONT, (WPARAM)twofactorfont, 0);
+    }
+    return TRUE;
+  }
+
+  case WM_DESTROY:
+    if (twofactorfont)
+      DeleteObject(exch_null(twofactorfont));
+    return FALSE;
+
+
+  case WM_CTLCOLORSTATIC:
+    if (GetWindowLong((HWND)lParam, GWL_ID) == IDC_CODENOTACCEPTED) {
+      SetTextColor((HDC)wParam, RGB(255, 0, 0));
+      SetBkMode((HDC)wParam, TRANSPARENT);
+      return (LRESULT)GetSysColorBrush(COLOR_3DFACE);
+    }
+    break;
+    
+  case WM_CLOSE:
+    EndDialog(hWnd, 0);
+    g_twofactor_dialog_shown = false;
+    return TRUE;
+  case WM_COMMAND:
+    switch (wParam) {
+    case IDCANCEL:
+      EndDialog(hWnd, 0);
+      g_twofactor_dialog_shown = false;
+      return TRUE;
+    case IDOK: {
+      wchar_t buf[TunsafePlugin::kMaxTokenLen + 1];
+      char utf8buf[TunsafePlugin::kMaxTokenLen + 1];
+      buf[0] = 0;
+      int nw = GetDlgItemTextW(hWnd, IDC_TWOFACTOREDIT, buf, ARRAYSIZE(buf)) + 1;
+      int nutf8 = WideCharToMultiByte(CP_UTF8, 0, buf, nw, utf8buf, ARRAYSIZE(utf8buf), 0, NULL);
+      if (nutf8) {
+        g_backend->SubmitToken(std::string(utf8buf));
+        EndDialog(hWnd, 0);
+        g_twofactor_dialog_shown = false;
+        return TRUE;
+      }
+    }
+    }
+    break;
+  }
+  return FALSE;
+}
+
+void ShowTwoFactorDialog() {
+  twofactornum = 0;
+  int type = g_twofactor_dialog_request & kTokenRequestType_Mask;
+  int dialog;
+  if (type >= kTokenRequestType_6digits && type <= kTokenRequestType_8digits) {
+    dialog = IDD_DIALOG3;
+  } else {
+    dialog = IDD_DIALOG4;
+  }
+  DialogBox(g_hinstance, MAKEINTRESOURCE(dialog), g_ui_window, &TwoFactorDlgProc);
+}
+
 void InitializeClass(WNDPROC wndproc, const char *name) {
   WNDCLASSEX wce = {0};
   wce.cbSize = sizeof(wce);
@@ -1687,6 +1888,7 @@ static bool CreateMainWindow() {
   InitializeClass(&PaintBoxWndProc, "PaintBox");
   InitializeClass(&GraphBoxWndProc, "GraphBox");
   InitializeClass(&AdvancedBoxWndProc, "AdvancedBox");
+  InitializeClass(&TwoFactorEditFieldWndProc, "TwoFactorEditField");
 
   HDC dc = GetDC(0);
   g_large_fonts = GetDeviceCaps(dc, LOGPIXELSX);

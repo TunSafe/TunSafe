@@ -6,6 +6,7 @@
 #define IDI_ICON1                       2
 #define ID_STOP                         3
 #define IDRAND                          3
+#define IDCANCEL2                       3
 #define ID_RESTART                      4
 #define ID_START                        5
 #define ID_EXIT                         6
@@ -37,11 +38,15 @@
 #define IDC_PRIVATE_KEY                 34
 #define IDD_DIALOG1                     101
 #define IDD_DIALOG2                     105
+#define IDD_DIALOG3                     106
 #define IDR_MENU1                       107
+#define IDD_DIALOG4                     107
 #define IDC_STATUSBAR                   108
 #define IDB_DOWNARROW                   108
 #define IDC_PUBLIC_KEY                  109
 #define IDC_TAB                         110
+#define IDC_CODENOTACCEPTED             111
+#define IDC_TWOFACTOREDIT               1017
 
 // Next default values for new objects
 // 
@@ -49,7 +54,7 @@
 #ifndef APSTUDIO_READONLY_SYMBOLS
 #define _APS_NEXT_RESOURCE_VALUE        113
 #define _APS_NEXT_COMMAND_VALUE         40030
-#define _APS_NEXT_CONTROL_VALUE         1016
+#define _APS_NEXT_CONTROL_VALUE         1018
 #define _APS_NEXT_SYMED_VALUE           101
 #endif
 #endif

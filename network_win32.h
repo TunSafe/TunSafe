@@ -10,6 +10,7 @@
 #include "tunsafe_dnsresolve.h"
 #include "network_common.h"
 #include "network_win32_tcp.h"
+#include "tunsafe_wg_plugin.h"
 
 enum {
   ADAPTER_GUID_SIZE = 40,
@@ -253,7 +254,7 @@ private:
   TunWin32Adapter adapter_;
 };
 
-class TunsafeBackendWin32 : public TunsafeBackend, public ProcessorDelegate {
+class TunsafeBackendWin32 : public TunsafeBackend, public ProcessorDelegate, public PluginDelegate {
   friend class PacketProcessor;
   friend class TunWin32Iocp;
   friend class TunWin32Overlapped;
@@ -277,10 +278,15 @@ public:
   virtual LinearizedGraph *GetGraph(int type) override;
   virtual std::string GetConfigFileName() override;
   virtual void SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) override;
-
+  virtual uint32 GetTokenRequest() override;
+  virtual void SubmitToken(const std::string &&message) override;
+  
   // -- from ProcessorDelegate
   virtual void OnConnected() override;
   virtual void OnConnectionRetry(uint32 attempts) override;
+
+  // -- from PluginDelegate
+  virtual void OnRequestToken(WgPeer *peer, uint32 type) override;
 
   void SetPublicKey(const uint8 key[32]);
   void PostExit(int exit_code);
@@ -305,10 +311,13 @@ private:
   Delegate *delegate_;
   char *config_file_;
 
+  std::atomic<uint32> token_request_;
+
   DnsBlocker dns_blocker_;
   DnsResolver dns_resolver_;
 
   WireguardProcessor *wg_processor_;
+  TunsafePlugin *tunsafe_wg_plugin_;
 
   uint32 last_tun_adapter_failed_;
   StatsCollector stats_collector_;

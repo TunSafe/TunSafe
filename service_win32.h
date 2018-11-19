@@ -83,6 +83,9 @@ public:
   // Called to register a pipe server with this backend
   void AddPipeServer(TunsafeServiceServer *pipe_server);
 private:
+  // toggled every time a token submit is processed
+  uint8 token_request_flag_;
+
   // Points at the service manager
   TunsafeServiceManager *manager_;
 
@@ -162,9 +165,11 @@ private:
 
 struct ServiceState {
   uint8 is_started : 1;
+  uint8 token_request_flag : 1; // toggled each time token_request changes
   uint8 reserved1;
   uint16 internet_block_state;
-  uint8 reserved[24 + 64];
+  uint8 reserved[20 + 64];
+  uint32 token_request;
   uint32 ipv4_ip;
   uint8 public_key[32];
 };
@@ -190,6 +195,8 @@ public:
   virtual void SetServiceStartupFlags(uint32 flags);
   virtual LinearizedGraph *GetGraph(int type);
   virtual void SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) override;
+  virtual uint32 GetTokenRequest() override;
+  virtual void SubmitToken(const std::string &&token) override;
 
   // -- from PipeConnection::Delegate
   virtual bool HandleMessage(int type, uint8 *data, size_t size) override;
@@ -203,6 +210,7 @@ public:
 protected:
   TunsafeBackend::Delegate *delegate_;
   uint8 want_stats_;
+  uint8 token_request_flag_;
   bool got_state_from_control_;
   ServiceState service_state_;
   std::string config_file_;

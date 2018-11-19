@@ -22,6 +22,7 @@
 #include <algorithm>
 #include "network_win32_dnsblock.h"
 #include "util_win32.h"
+#include "tunsafe_wg_plugin.h"
 
 enum {
   HARD_MAXIMUM_QUEUE_SIZE = 102400,
@@ -1939,6 +1940,7 @@ static void RemoveKillSwitchRoute() {
 TunsafeBackendWin32::TunsafeBackendWin32(Delegate *delegate) : delegate_(delegate), dns_resolver_(&dns_blocker_) {
   memset(&stats_, 0, sizeof(stats_));
   wg_processor_ = NULL;
+  token_request_ = 0;
   InitPacketMutexes();
   worker_thread_ = NULL;
   last_tun_adapter_failed_ = 0;
@@ -1963,6 +1965,12 @@ void TunsafeBackendWin32::SetPublicKey(const uint8 key[32]) {
   delegate_->OnStateChanged();
 }
 
+struct PluginHolder {
+  PluginHolder(PluginDelegate *del) : plugin(CreateTunsafePlugin(del)) {}
+  ~PluginHolder() { delete plugin; }
+  TunsafePlugin *plugin;
+};
+
 DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
   TunsafeBackendWin32 *backend = (TunsafeBackendWin32*)bk;
   int stop_mode;
@@ -1971,7 +1979,10 @@ DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
   for (;;) {
     TunWin32Iocp tun(&backend->dns_blocker_, backend);
     NetworkWin32 net;
+    PluginHolder plugin(backend);
     WireguardProcessor wg_proc(&net, &tun, backend);
+    wg_proc.dev().SetPlugin(plugin.plugin);
+    plugin.plugin->Initialize(&wg_proc);
 
     net.udp().SetPacketHandler(&backend->packet_processor_);
     net.tcp_socket_queue().SetPacketHandler(&backend->packet_processor_);
@@ -1988,6 +1999,7 @@ DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
     backend->SetPublicKey(wg_proc.dev().public_key());
 
     backend->wg_processor_ = &wg_proc;
+    backend->tunsafe_wg_plugin_ = plugin.plugin;
 
     net.StartThread();
     tun.StartThread();
@@ -1996,6 +2008,7 @@ DWORD WINAPI TunsafeBackendWin32::WorkerThread(void *bk) {
     tun.StopThread();
 
     backend->wg_processor_ = NULL;
+    backend->tunsafe_wg_plugin_ = NULL;
 
     // Keep DNS alive
     if (stop_mode != MODE_EXIT)
@@ -2079,6 +2092,7 @@ void TunsafeBackendWin32::Start(const char *config_file) {
   dns_resolver_.ResetCancel();
   g_killswitch_currconn = kBlockInternet_Default;
   is_started_ = true;
+  token_request_ = 0;
   memset(public_key_, 0, sizeof(public_key_));
   SetStatus(kStatusInitializing);
   delegate_->OnClearLog();
@@ -2192,15 +2206,25 @@ struct ConfigQueueItem : QueuedItem, QueuedItemCallback {
   virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
   virtual void OnQueuedItemDelete(QueuedItem *ow) override;
 
+  enum Type {
+    SendConfigurationProtocolPacket,
+    SubmitToken
+  };
+  Type type;
   std::string message;
   uint32 ident;
 };
 
 void ConfigQueueItem::OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) {
   PacketProcessor::QueueContext *context = (PacketProcessor::QueueContext *)extra;
-  std::string reply;
-  WgConfig::HandleConfigurationProtocolMessage(context->wg, std::move(message), &reply);
-  context->backend->delegate_->OnConfigurationProtocolReply(ident, std::move(reply));
+  
+  if (type == SendConfigurationProtocolPacket) {
+    std::string reply;
+    WgConfig::HandleConfigurationProtocolMessage(context->wg, std::move(message), &reply);
+    context->backend->delegate_->OnConfigurationProtocolReply(ident, std::move(reply));
+  } else {
+    context->backend->tunsafe_wg_plugin_->SubmitToken((const uint8*)message.data(), message.size());
+  }
   delete this;
 }
 
@@ -2210,11 +2234,36 @@ void ConfigQueueItem::OnQueuedItemDelete(QueuedItem *ow) {
 
 void TunsafeBackendWin32::SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) {
   ConfigQueueItem *queue_item = new ConfigQueueItem;
+  queue_item->type = ConfigQueueItem::SendConfigurationProtocolPacket;
   queue_item->ident = identifier;
   queue_item->message = std::move(message);
   queue_item->queue_cb = queue_item;
   packet_processor_.ForcePost(queue_item);
 }
+
+void TunsafeBackendWin32::SubmitToken(const std::string &&message) {
+  // Clear out the old token request so GetTokenRequest returns zero.
+  token_request_ = 0;
+  
+  ConfigQueueItem *queue_item = new ConfigQueueItem;
+  queue_item->type = ConfigQueueItem::SubmitToken;
+  queue_item->message = std::move(message);
+  queue_item->queue_cb = queue_item;
+  packet_processor_.ForcePost(queue_item);
+  
+}
+
+uint32 TunsafeBackendWin32::GetTokenRequest() {
+  return token_request_;
+}
+
+// This is called on the wireguard thread whenever it needs a token,
+// it should reschedule
+void TunsafeBackendWin32::OnRequestToken(WgPeer *peer, uint32 type) {
+  token_request_ = type;
+  delegate_->OnStateChanged();
+}
+
 
 void TunsafeBackendWin32::OnConnected() {
   if (status_ != TunsafeBackend::kStatusConnected) {

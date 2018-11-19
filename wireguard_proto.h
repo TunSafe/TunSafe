@@ -318,18 +318,22 @@ public:
   virtual bool OnUnknownInterfaceSetting(const char *key, const char *value) = 0;
   virtual bool OnUnknownPeerSetting(WgPeer *peer, const char *key, const char *value) = 0;
 
+  // Returns true if we want to perform a handshake for this peer.
+  virtual bool WantHandshake(WgPeer *peer) = 0;
+
+  // Called right before handshake initiation is sent out. Can't drop packets.
+  virtual uint32 OnHandshake0(WgPeer *peer, uint8 *extout, uint32 extout_size, const uint8 salt[WG_PUBLIC_KEY_LEN]) = 0;
+  // Called after handshake initiation is parsed, but before handshake response is sent.
+
   enum {
     kHandshakeResponseDrop = 0xffffffff,
     kHandshakeResponseFail = 0x80000000
   };
-
-  // Called right before handshake initiation is sent out. Can be dropped.
-  virtual uint32 OnHandshake0(WgPeer *peer, uint8 *extout, uint32 extout_size) = 0;
-  // Called after handshake initiation is parsed, but before handshake response is sent.
   // Packet can be dropped or keypair failed.
-  virtual uint32 OnHandshake1(WgPeer *peer, const uint8 *ext, uint32 ext_size, uint8 *extout, uint32 extout_size) = 0;
+  virtual uint32 OnHandshake1(WgPeer *peer, const uint8 *ext, uint32 ext_size, const uint8 salt_in[WG_PUBLIC_KEY_LEN], uint8 *extout, uint32 extout_size, const uint8 salt_out[WG_PUBLIC_KEY_LEN]) = 0;
+  
   // Called when handshake response is parsed
-  virtual uint32 OnHandshake2(WgPeer *peer, const uint8 *ext, uint32 ext_size) = 0;
+  virtual uint32 OnHandshake2(WgPeer *peer, const uint8 *ext, uint32 ext_size, const uint8 salt[WG_PUBLIC_KEY_LEN]) = 0;
 };
 
 
@@ -491,7 +495,7 @@ public:
   static WgPeer *ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet);
   static WgPeer *ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packet);
   static void ParseMessageHandshakeCookie(WgDevice *dev, const MessageHandshakeCookie *src);
-  bool CreateMessageHandshakeInitiation(Packet *packet);
+  void CreateMessageHandshakeInitiation(Packet *packet);
   bool CheckSwitchToNextKey_Locked(WgKeypair *keypair);
   void RemovePeer();
   bool CheckHandshakeRateLimit();

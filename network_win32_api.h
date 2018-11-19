@@ -91,7 +91,6 @@ public:
   // Returns false if the name can't be exclusively reserved to this adapter.
   virtual bool SetTunAdapterName(const char *name) = 0;
 
-
   virtual void Start(const char *config_file) = 0;
   virtual void Stop() = 0;
   virtual void RequestStats(bool enable) = 0;
@@ -104,6 +103,12 @@ public:
   virtual std::string GetConfigFileName() = 0;
   virtual LinearizedGraph *GetGraph(int type) = 0;
   virtual void SendConfigurationProtocolPacket(uint32 identifier, const std::string &&message) = 0;
+
+  // Returns a nonzero value whenever a token is requested,
+  // as a reply to OnStateChanged
+  virtual uint32 GetTokenRequest() = 0;
+  // Called when the UI answers the token request
+  virtual void SubmitToken(const std::string &&message) = 0;
 
   bool is_started() { return is_started_; }
   bool is_remote() { return is_remote_; }

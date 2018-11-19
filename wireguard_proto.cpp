@@ -520,22 +520,11 @@ void WgPeer::SetPresharedKey(const uint8 preshared_key[WG_SYMMETRIC_KEY_LEN]) {
 }
 
 // run on the client
-bool WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
+void WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
   assert(dev_->IsMainThread());
 
   uint8 k[WG_SYMMETRIC_KEY_LEN];
   MessageHandshakeInitiation *dst = (MessageHandshakeInitiation *)packet->data;
-
-  int extfield_size = 0;
-  if (WITH_HANDSHAKE_EXT && supports_handshake_extensions_)
-    extfield_size = WriteHandshakeExtension(dst->timestamp_enc + WG_TIMESTAMP_LEN, NULL);
-
-  if (dev_->plugin_) {
-    uint32 rv = dev_->plugin_->OnHandshake0(this, dst->timestamp_enc + WG_TIMESTAMP_LEN + extfield_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - extfield_size);
-    if (rv & WgPlugin::kHandshakeResponseFail)
-      return false;
-    extfield_size += rv;
-  }
 
   // Ci := HASH(CONSTRUCTION)
   memcpy(hs_.ci, kWgInitChainingKey, sizeof(hs_.ci));
@@ -563,6 +552,17 @@ bool WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
   // TAI64N
   OsGetTimestampTAI64N(dst->timestamp_enc);
 
+
+  int extfield_size = 0;
+  if (WITH_HANDSHAKE_EXT && supports_handshake_extensions_)
+    extfield_size = WriteHandshakeExtension(dst->timestamp_enc + WG_TIMESTAMP_LEN, NULL);
+
+  if (dev_->plugin_) {
+    uint32 rv = dev_->plugin_->OnHandshake0(this, dst->timestamp_enc + WG_TIMESTAMP_LEN + extfield_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - extfield_size, dst->ephemeral);
+    assert(!(rv & WgPlugin::kHandshakeResponseFail));
+    extfield_size += rv;
+  }
+
   // msg.timestamp := AEAD(K, 0, timestamp, hi)
   chacha20poly1305_encrypt(dst->timestamp_enc, dst->timestamp_enc, extfield_size + WG_TIMESTAMP_LEN, hs_.hi, sizeof(hs_.hi), 0, k);
   // Hi := HASH(Hi || msg.timestamp)
@@ -574,7 +574,6 @@ bool WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
   dst->type = MESSAGE_HANDSHAKE_INITIATION;
   memzero_crypto(k, sizeof(k));
   WriteMacToPacket((uint8*)dst, (MessageMacs*)((uint8*)&dst->mac + extfield_size));
-  return true;
 }
 
 // Parsed by server
@@ -683,8 +682,8 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
     // Allow plugin to determine what to do with the packet,
     // it can append new headers to the response, and decide what to do.  
     if (dev->plugin_) {
-      uint32 rv = dev->plugin_->OnHandshake1(peer, extbuf + WG_TIMESTAMP_LEN, extfield_size,
-                                                     dst->empty_enc + extfield_out_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - extfield_out_size);
+      uint32 rv = dev->plugin_->OnHandshake1(peer, extbuf + WG_TIMESTAMP_LEN, extfield_size, e_remote,
+                                                     dst->empty_enc + extfield_out_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - extfield_out_size, dst->ephemeral);
       if (rv == WgPlugin::kHandshakeResponseDrop)
         goto getout;
       if (rv & WgPlugin::kHandshakeResponseFail)
@@ -770,7 +769,7 @@ WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packe
   // Allow plugin to determine what to do with the packet,
   // it can append new headers to the response, and decide what to do.  
   if (dev->plugin_) {
-    uint32 rv = dev->plugin_->OnHandshake2(peer, src->empty_enc, extfield_size);
+    uint32 rv = dev->plugin_->OnHandshake2(peer, src->empty_enc, extfield_size, src->ephemeral);
     if (rv & WgPlugin::kHandshakeResponseFail) {
       delete keypair;
       goto getout;

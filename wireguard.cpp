@@ -630,14 +630,14 @@ void WireguardProcessor::ForceSendHandshakeInitiation(WgPeer *peer) {
 void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
   assert(dev_.IsMainThread());
 
-  if (!peer->CheckHandshakeRateLimit() || peer->endpoint_.sin.sin_family == 0)
+  if (!peer->CheckHandshakeRateLimit() ||
+      peer->endpoint_.sin.sin_family == 0 ||
+      (dev_.plugin_ && !dev_.plugin_->WantHandshake(peer)))
     return;
   Packet *packet = AllocPacket();
   if (packet) {
-    if (!peer->CreateMessageHandshakeInitiation(packet)) {
-      FreePacket(packet);
-      return;
-    }
+    peer->CreateMessageHandshakeInitiation(packet);
+
     stats_.handshakes_out++;
     WG_ACQUIRE_LOCK(peer->mutex_);
     int attempts = ++peer->total_handshake_attempts_;

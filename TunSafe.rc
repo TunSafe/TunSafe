@@ -82,6 +82,29 @@ BEGIN
     PUSHBUTTON      "&Randomize",IDRAND,7,70,50,14
 END
 
+IDD_DIALOG3 DIALOGEX 0, 0, 211, 94
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Two Factor Authentication"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    LTEXT           "The server requires Two Factor authentication. Please enter the code from your authenticator.",-1,7,7,197,18
+    CONTROL         "",IDC_PAINTBOX,"TwoFactorEditField",WS_TABSTOP,7,32,197,34,0x4000000L
+    PUSHBUTTON      "&Cancel",IDCANCEL,154,72,50,14
+    LTEXT           "",IDC_CODENOTACCEPTED,7,74,133,8,NOT WS_VISIBLE
+END
+
+IDD_DIALOG4 DIALOGEX 0, 0, 211, 78
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Two Factor Authentication"
+FONT 8, "MS Shell Dlg", 400, 0, 0x1
+BEGIN
+    EDITTEXT        IDC_TWOFACTOREDIT,7,29,197,19,ES_PASSWORD | ES_AUTOHSCROLL
+    DEFPUSHBUTTON   "&OK",IDOK,99,57,50,14
+    PUSHBUTTON      "&Cancel",IDCANCEL,155,57,50,14
+    LTEXT           "The server requires Two Factor authentication. Please enter the code from your authenticator.",-1,7,7,197,18
+    LTEXT           "",IDC_CODENOTACCEPTED,7,53,75,17,NOT WS_VISIBLE
+END
+
 
 /////////////////////////////////////////////////////////////////////////////
 //
@@ -105,6 +128,22 @@ BEGIN
         RIGHTMARGIN, 260
         TOPMARGIN, 7
         BOTTOMMARGIN, 84
+    END
+
+    IDD_DIALOG3, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 204
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 87
+    END
+
+    IDD_DIALOG4, DIALOG
+    BEGIN
+        LEFTMARGIN, 7
+        RIGHTMARGIN, 204
+        TOPMARGIN, 7
+        BOTTOMMARGIN, 71
     END
 END
 #endif    // APSTUDIO_INVOKED
@@ -133,6 +172,16 @@ BEGIN
 END
 
 IDD_DIALOG2 AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+IDD_DIALOG3 AFX_DIALOG_LAYOUT
+BEGIN
+    0
+END
+
+IDD_DIALOG4 AFX_DIALOG_LAYOUT
 BEGIN
     0
 END

@@ -184,6 +184,7 @@
     <ClInclude Include="crypto\blake2s\blake2s-round.h" />
     <ClInclude Include="crypto\blake2s\blake2s-sse-impl.h" />
     <ClInclude Include="crypto\curve25519\curve25519-donna.h" />
+    <ClInclude Include="crypto\sha\sha1.h" />
     <ClInclude Include="ip_to_peer_map.h" />
     <ClInclude Include="network_bsd.h">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -219,6 +220,7 @@
     <ClInclude Include="tunsafe_ipaddr.h" />
     <ClInclude Include="tunsafe_threading.h" />
     <ClInclude Include="tunsafe_types.h" />
+    <ClInclude Include="tunsafe_wg_plugin.h" />
     <ClInclude Include="util_win32.h" />
     <ClInclude Include="wireguard_config.h" />
     <ClInclude Include="util.h" />
@@ -228,6 +230,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="benchmark.cpp" />
+    <ClCompile Include="crypto\sha\sha1.cpp" />
     <ClCompile Include="ip_to_peer_map.cpp" />
     <ClCompile Include="network_bsd.cpp">
       <ExcludedFromBuild Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">true</ExcludedFromBuild>
@@ -257,6 +260,7 @@
     <ClCompile Include="network_win32_dnsblock.cpp" />
     <ClCompile Include="tunsafe_ipaddr.cpp" />
     <ClCompile Include="tunsafe_threading.cpp" />
+    <ClCompile Include="tunsafe_wg_plugin.cpp" />
     <ClCompile Include="util.cpp" />
     <ClCompile Include="network_win32.cpp" />
     <ClCompile Include="util_win32.cpp" />
