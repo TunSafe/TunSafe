@@ -621,6 +621,12 @@ void WireguardProcessor::RunAllMainThreadScheduled() {
   }
 }
 
+void WireguardProcessor::ForceSendHandshakeInitiation(WgPeer *peer) {
+  peer->last_handshake_init_timestamp_ -= REKEY_TIMEOUT_MS;
+  peer->total_handshake_attempts_ = 0;
+  SendHandshakeInitiation(peer);
+}
+
 void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
   assert(dev_.IsMainThread());
 

@@ -111,6 +111,9 @@ public:
   TunInterface::PrePostCommands &prepost() { return pre_post_; }
   const std::vector<WgCidrAddr> &addr() { return addresses_; }
   void RunAllMainThreadScheduled();
+
+  void ForceSendHandshakeInitiation(WgPeer *peer);
+
 private:
   void DoWriteUdpPacket(Packet *packet);
   void WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Packet *packet);
