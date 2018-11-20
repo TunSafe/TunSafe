@@ -193,13 +193,19 @@ public:
   MultithreadedDelayedDelete();
   ~MultithreadedDelayedDelete();
 
+  // Call this with the # of worker threads that will call the wireguard code
+  void Configure(uint32 num_threads);
+
+  // Add something that will be deleted.
   typedef void DoDeleteFunc(void *x);
   void Add(DoDeleteFunc *func, void *param);
 
-  void Configure(uint32 num_threads);
 
+  // Call this periodically from worker thread with id |thread_id|, ids start from zero up to num_threads-1
   void Checkpoint(uint32 thread_id);
 
+  // Call this periodically from the main thread to do the actual deletes once the worker threads
+  // have reached the checkpoint.
   void MainCheckpoint();
 
   bool enabled() const { return num_threads_ != 0; }
