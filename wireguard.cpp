@@ -436,7 +436,7 @@ void WireguardProcessor::WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Pac
     peer->OnDataSent();
 
     // Attempt to compress the packet headers
-    if (WITH_HANDSHAKE_EXT && keypair->compress_handler_) {
+    if (WITH_PACKET_COMPRESSION && keypair->compress_handler_) {
       WgCompressHandler::CompressState st = keypair->compress_handler_->Compress(packet);
       if (st == WgCompressHandler::COMPRESS_FAIL)
         goto getout_discard;
@@ -626,10 +626,13 @@ void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
 
   if (!peer->CheckHandshakeRateLimit() || peer->endpoint_.sin.sin_family == 0)
     return;
-  stats_.handshakes_out++;
   Packet *packet = AllocPacket();
   if (packet) {
-    peer->CreateMessageHandshakeInitiation(packet);
+    if (!peer->CreateMessageHandshakeInitiation(packet)) {
+      FreePacket(packet);
+      return;
+    }
+    stats_.handshakes_out++;
     WG_ACQUIRE_LOCK(peer->mutex_);
     int attempts = ++peer->total_handshake_attempts_;
     if (procdel_)
@@ -888,7 +891,7 @@ void WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *key
   WG_RELEASE_LOCK(peer->mutex_);
 
   // Unpack the packet headers?
-  if (WITH_HANDSHAKE_EXT && keypair->compress_handler_) {
+  if (WITH_PACKET_COMPRESSION && keypair->compress_handler_) {
     WgCompressHandler::CompressState st = keypair->compress_handler_->Decompress(packet);
     if (st == WgCompressHandler::COMPRESS_FAIL)
       goto getout;

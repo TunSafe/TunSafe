@@ -185,7 +185,8 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
         wg_->AddExcludedIp(addr);
       }
     } else {
-      goto err;
+      if (!wg_->dev().plugin() || !wg_->dev().plugin()->OnUnknownInterfaceSetting(key, value))
+        goto err;
     }
   } else if (strcmp(group, "[Peer]") == 0) {
     if (key == NULL) {
@@ -251,7 +252,8 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
           return false;
       }
     } else {
-      goto err;
+      if (!wg_->dev().plugin() || !wg_->dev().plugin()->OnUnknownPeerSetting(peer_, key, value))
+        goto err;
     }
   } else {
   err:

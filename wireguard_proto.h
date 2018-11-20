@@ -135,8 +135,6 @@ STATIC_ASSERT(sizeof(MessageHandshakeInitiation) == 148, MessageHandshakeInitiat
 // 1 byte length
 // <payload>
 
-
-
 struct MessageHandshakeResponse {
   uint32 type;
   uint32 sender_key_id;
@@ -163,9 +161,6 @@ struct MessageData {
 STATIC_ASSERT(sizeof(MessageData) == 16, MessageData_wrong_size);
 
 enum {
-  EXT_PACKET_COMPRESSION = 0x15,
-  EXT_PACKET_COMPRESSION_VER = 0x01,
-
   EXT_BOOLEAN_FEATURES = 0x16,
 
   EXT_CIPHER_SUITES = 0x18,
@@ -307,29 +302,42 @@ public:
   virtual CompressState Compress(Packet *packet);
 
   virtual CompressState Decompress(Packet *packet);
-
 };
+
+// Can be used to customize the behavior of the wireguard impl
+class WgPlugin {
+public:
+  virtual ~WgPlugin() {}
+
+  // This is called from the main thread whenever a public key was not found in the WgDevice,
+  // return true to try again or false to fail. The packet can be copied and saved
+  // to resume a handshake later on.
+  virtual bool HandleUnknownPeerId(uint8 public_key[WG_PUBLIC_KEY_LEN], Packet *packet) = 0;
+
+  // For handling unknown settings during config parsing
+  virtual bool OnUnknownInterfaceSetting(const char *key, const char *value) = 0;
+  virtual bool OnUnknownPeerSetting(WgPeer *peer, const char *key, const char *value) = 0;
+
+  enum {
+    kHandshakeResponseDrop = 0xffffffff,
+    kHandshakeResponseFail = 0x80000000
+  };
+
+  // Called right before handshake initiation is sent out. Can be dropped.
+  virtual uint32 OnHandshake0(WgPeer *peer, uint8 *extout, uint32 extout_size) = 0;
+  // Called after handshake initiation is parsed, but before handshake response is sent.
+  // Packet can be dropped or keypair failed.
+  virtual uint32 OnHandshake1(WgPeer *peer, const uint8 *ext, uint32 ext_size, uint8 *extout, uint32 extout_size) = 0;
+  // Called when handshake response is parsed
+  virtual uint32 OnHandshake2(WgPeer *peer, const uint8 *ext, uint32 ext_size) = 0;
+};
+
 
 class WgDevice {
   friend class WgPeer;
   friend class WireguardProcessor;
   friend class WgConfig;
 public:
-
-  // Can be used to customize the behavior of WgDevice
-  class Delegate {
-  public:
-    // This is called from the main thread whenever a public key was not found in the WgDevice,
-    // return true to try again or false to fail. The packet can be copied and saved
-    // to resume a handshake later on.
-    virtual bool HandleUnknownPeerId(uint8 public_key[WG_PUBLIC_KEY_LEN], Packet *packet) = 0;
-
-    // Write out the compression header
-    virtual size_t WritePacketCompressionExtension(uint8 *data, size_t data_size) = 0;
-
-    // Parse the packet compression extension
-    virtual WgCompressHandler *ParsePacketCompressionExtension(WgKeypair *keypair, const uint8 *data, size_t data_size) = 0;
-  };
 
   WgDevice();
   ~WgDevice();
@@ -364,8 +372,9 @@ public:
   bool IsMainThread() { return CurrentThreadIdEquals(main_thread_id_); }
   bool IsMainOrDataThread() { return CurrentThreadIdEquals(main_thread_id_) || WG_IF_LOCKS_ENABLED_ELSE(delayed_delete_.enabled(), false);  }
 
-  void SetDelegate(Delegate *del) { delegate_ = del; }
-  
+  void SetPlugin(WgPlugin *del) { plugin_ = del; }
+  WgPlugin *plugin() { return plugin_; }
+    
 private:
   std::pair<WgPeer*, WgKeypair*> *LookupPeerInKeyIdLookup(uint32 key_id);
   WgKeypair *LookupKeypairByKeyId(uint32 key_id);
@@ -393,7 +402,7 @@ private:
   WgPeer *peers_, **last_peer_ptr_;
 
   // For hooking
-  Delegate *delegate_;
+  WgPlugin *plugin_;
 
 
   // Keypair IDs are generated randomly by us so no point in wasting cycles on
@@ -452,6 +461,12 @@ private:
   MultithreadedDelayedDelete delayed_delete_;
 };
 
+// Allows associating extradata with peers that can be used by plugins etc.
+class WgPeerExtraData {
+public:
+  virtual ~WgPeerExtraData() {}
+};
+
 // State for peer
 class WgPeer {
   friend class WgDevice;
@@ -476,7 +491,7 @@ public:
   static WgPeer *ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet);
   static WgPeer *ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packet);
   static void ParseMessageHandshakeCookie(WgDevice *dev, const MessageHandshakeCookie *src);
-  void CreateMessageHandshakeInitiation(Packet *packet);
+  bool CreateMessageHandshakeInitiation(Packet *packet);
   bool CheckSwitchToNextKey_Locked(WgKeypair *keypair);
   void RemovePeer();
   bool CheckHandshakeRateLimit();
@@ -503,19 +518,24 @@ public:
   uint8 endpoint_protocol() const { return endpoint_protocol_; }
   WgPeer *next_peer() { return next_peer_; }
 
+  WgPeerExtraData *extradata() { return peer_extra_data_; }
+  void SetExtradata(WgPeerExtraData *ex) { peer_extra_data_ = ex; }
+  WgDevice *dev() { return dev_; }
+
 private:
-  static bool ParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size);
-  static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id, const uint8 *extfield, size_t extfield_size);
+  bool ParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size);
+  static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id);
   void WriteMacToPacket(const uint8 *data, MessageMacs *mac);
   void CheckAndUpdateTimeOfNextKeyEvent(uint64 now);
   static void DeleteKeypair(WgKeypair **kp);
   static void DelayedDelete(void *x);
-  size_t WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair);
+  int WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair);
   void InsertKeypairInPeer_Locked(WgKeypair *keypair);
   void ClearKeys_Locked();
   void ClearHandshake_Locked();
   void ClearPacketQueue_Locked();
   void ScheduleNewHandshake();
+
   
   WgDevice *dev_;
   WgPeer *next_peer_;
@@ -603,6 +623,8 @@ private:
 
   uint64 rx_bytes_;
   uint64 tx_bytes_;
+
+  WgPeerExtraData *peer_extra_data_;
 
   // Handshake state that gets setup in |CreateMessageHandshakeInitiation| and used in
   // the response.
