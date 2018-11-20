@@ -382,6 +382,22 @@ bool SetClipboardString(const char *string) {
   return ok;
 }
 
+std::string GetClipboardString() {
+  std::string rv;
+  if (OpenClipboard(NULL)) {
+    HANDLE hData = GetClipboardData(CF_TEXT);
+    if (hData != NULL) {
+      char *pszText = static_cast<char*>(GlobalLock(hData));
+      if (pszText != NULL)
+        rv = pszText;
+      GlobalUnlock(hData);
+    }
+    CloseClipboard();
+  }
+  return rv;
+}
+
+
 RECT GetParentRect(HWND wnd) {
   RECT btrect;
   GetClientRect(wnd, &btrect);

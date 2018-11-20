@@ -2,6 +2,7 @@
 // Copyright (C) 2018 Ludvig Strigeus <info@tunsafe.com>. All Rights Reserved.
 #include "tunsafe_types.h"
 #include <vector>
+#include <string>
 
 #pragma once
 const char *FindFilenameComponent(const char *s);
@@ -54,6 +55,7 @@ bool EnsureValidConfigPath(const char *path);
 bool RunProcessAsAdminWithArgs(const char *args, bool wait_for_exit);
 bool RestartProcessAsAdministrator();
 bool SetClipboardString(const char *string);
+std::string GetClipboardString();
 RECT GetParentRect(HWND wnd);
 RECT MakeRect(int l, int t, int r, int b);
 struct GuidAndDevName {
@@ -61,3 +63,4 @@ struct GuidAndDevName {
   char name[64];
 };
 void GetTapAdapterInfo(std::vector<GuidAndDevName> *result);
+
