@@ -1026,8 +1026,6 @@ void WireguardProcessor::HandleHandshakeResponsePacket(Packet *packet) {
   if (peer) {
     stats_.handshakes_out_success++;
     WG_SCOPED_LOCK(peer->mutex_);
-    if (peer->allow_endpoint_change_ && packet->addr.sin.sin_family != 0)
-      peer->endpoint_ = packet->addr;
     peer->OnHandshakeAuthComplete();
     peer->OnHandshakeFullyComplete();
     NotifyHandshakeComplete();
