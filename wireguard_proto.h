@@ -771,3 +771,11 @@ bool WgKeypairDecryptPayload(uint8 *dst, const size_t src_len,
     const uint8 *ad, const size_t ad_len,
     const uint64 nonce, WgKeypair *keypair);
 
+struct WgExtensionHooksDefault {
+  static uint32 GetIpv4Target(Packet *packet, uint8 *data) { return ReadBE32(data + 16); }
+};
+
+#ifndef WG_EXTENSION_HOOKS
+#define WG_EXTENSION_HOOKS WgExtensionHooksDefault
+#endif  // WG_EXTENSION_HOOKS
+

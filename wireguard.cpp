@@ -354,7 +354,6 @@ void WireguardProcessor::HandleUdpPacket(Packet *packet, bool overload) {
   }
 }
 
-
 // On incoming packet to the tun interface.
 WireguardProcessor::PacketResult WireguardProcessor::HandleTunPacket2(Packet *packet) {
   uint8 *data = packet->data;
@@ -369,7 +368,7 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleTunPacket2(Packet *pa
   
   ip_version = *data >> 4;
   if (ip_version == 4) {
-    uint32 ip = ReadBE32(data + 16);
+    uint32 ip = WG_EXTENSION_HOOKS::GetIpv4Target(packet, data);
     WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ip);
     WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
