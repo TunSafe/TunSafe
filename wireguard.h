@@ -95,6 +95,24 @@ public:
 
   void HandleTunPacket(Packet *packet);
   void HandleUdpPacket(Packet *packet, bool overload);
+
+  // These are the same as above, but instead return the processed packet
+  // instead of forwarding it to udp/tun.
+  enum PacketResult {
+    // The packet is now in use by the wireguard impl and must not be touched
+    kPacketResult_InUse = 0,
+
+    // The wireguard impl has processed the packet and it's to be forwarded
+    // to the udp / tun layer
+    kPacketResult_ForwardUdp = 1,
+    kPacketResult_ForwardTun = 2,
+
+    // The wireguard impl does not need the packet and it should be freed
+    kPacketResult_Free = 3
+  };
+  PacketResult HandleTunPacket2(Packet *packet);
+  PacketResult HandleUdpPacket2(Packet *packet, bool overload);
+
   static bool IsMainThreadPacket(Packet *packet);
 
   void SecondLoop();
@@ -115,20 +133,20 @@ public:
   void ForceSendHandshakeInitiation(WgPeer *peer);
 
 private:
-  void DoWriteUdpPacket(Packet *packet);
-  void WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Packet *packet);
+  inline void PrepareOutgoingHandshakePacket(WgPeer *peer, Packet *packet);
+  PacketResult WriteAndEncryptPacketToUdp_WillUnlock(WgPeer *peer, Packet *packet);
   void SendHandshakeInitiation(WgPeer *peer);
   void SendKeepalive_Locked(WgPeer *peer);
   void SendQueuedPackets_Locked(WgPeer *peer);
 
-  void HandleHandshakeInitiationPacket(Packet *packet);
-  void HandleHandshakeResponsePacket(Packet *packet);
-  void HandleHandshakeCookiePacket(Packet *packet);
-  void HandleDataPacket(Packet *packet);
+  PacketResult HandleHandshakeInitiationPacket(Packet *packet);
+  PacketResult HandleHandshakeResponsePacket(Packet *packet);
+  PacketResult HandleHandshakeCookiePacket(Packet *packet);
+  PacketResult HandleDataPacket(Packet *packet);
   
-  void HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet);
-  void HandleShortHeaderFormatPacket(uint32 tag, Packet *packet);
-  bool CheckIncomingHandshakeRateLimit(Packet *packet, bool overload);
+  PacketResult HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet);
+  PacketResult HandleShortHeaderFormatPacket(uint32 tag, Packet *packet);
+  PacketResult CheckIncomingHandshakeRateLimit(Packet *packet, bool overload);
   bool HandleIcmpv6NeighborSolicitation(const byte *data, size_t data_size);
   void NotifyHandshakeComplete();
 
