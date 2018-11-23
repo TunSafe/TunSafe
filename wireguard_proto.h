@@ -468,7 +468,8 @@ private:
 // Allows associating extradata with peers that can be used by plugins etc.
 class WgPeerExtraData {
 public:
-  virtual ~WgPeerExtraData() {}
+  // This is called when the peer is destroyed.
+  virtual void OnPeerDestroy() = 0;
 };
 
 // State for peer

@@ -392,7 +392,8 @@ WgPeer::~WgPeer() {
   assert(curr_keypair_ == NULL && next_keypair_ == NULL && prev_keypair_ == NULL);
   assert(local_key_id_during_hs_ == 0);
   assert(first_queued_packet_ == NULL);
-  delete peer_extra_data_;
+  if (peer_extra_data_)
+    peer_extra_data_->OnPeerDestroy();
 }
 
 void WgPeer::DelayedDelete(void *x) {

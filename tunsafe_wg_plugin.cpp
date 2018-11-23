@@ -171,6 +171,11 @@ class PluginPeer : public WgPeerExtraData {
 public:
   PluginPeer(TunsafePluginImpl *plugin, WgPeer *peer) : plugin(plugin), peer(peer), token_client_handler(this) {}
   ~PluginPeer();
+
+  virtual void OnPeerDestroy() override {
+    delete this;
+  }
+
   WgPeer *peer;
   TunsafePluginImpl *plugin;
   TokenClientHandler token_client_handler;
