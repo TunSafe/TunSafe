@@ -15,7 +15,7 @@ private:
   static void HandleConfigurationProtocolGet(WireguardProcessor *proc, std::string *result);
 };
 
-bool ParseWireGuardConfigString(WireguardProcessor *wg, char *buf, size_t buf_size, DnsResolver *dns_resolver);
+bool ParseWireGuardConfigString(WireguardProcessor *wg, const char *buf, size_t buf_size, DnsResolver *dns_resolver);
 bool ParseWireGuardConfigFile(WireguardProcessor *wg, const char *filename, DnsResolver *dns_resolver);
 
 

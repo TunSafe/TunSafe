@@ -271,8 +271,10 @@ static bool ContainsNonAsciiCharacter(const char *buf, size_t size) {
   return false;
 }
 
-bool ParseWireGuardConfigString(WireguardProcessor *wg, char *buf, size_t buf_size, DnsResolver *dns_resolver) {
+bool ParseWireGuardConfigString(WireguardProcessor *wg, const char *bufin, size_t buf_size, DnsResolver *dns_resolver) {
   char group[32] = {0};
+  std::string buf2 = bufin;
+  char *buf = &buf2[0];
   
   WgFileParser file_parser(wg, dns_resolver);
   
