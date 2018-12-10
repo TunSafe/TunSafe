@@ -350,6 +350,7 @@ WgPeer::WgPeer(WgDevice *dev) {
   last_handshake_init_recv_timestamp_ = 0;
   last_complete_handskake_timestamp_ = 0;
   persistent_keepalive_ms_ = 0;
+  keepalive_timeout_ms_ = KEEPALIVE_TIMEOUT_MS;
   rx_bytes_ = 0;
   tx_bytes_ = 0;
   timers_ = 0;
@@ -1178,7 +1179,11 @@ uint32 WgPeer::CheckTimeouts_Locked(uint64 now) {
         rv |= ACTION_SEND_HANDSHAKE;
       }
     }
-    if ((t & (1 << TIMER_SEND_KEEPALIVE)) && (now32 - timer_value_[TIMER_SEND_KEEPALIVE]) >= KEEPALIVE_TIMEOUT_MS) {
+    if ((t & (1 << TIMER_SEND_KEEPALIVE)) && (now32 - timer_value_[TIMER_SEND_KEEPALIVE]) >= keepalive_timeout_ms_) {
+      // When header obfuscation is enabled, vary this between 7,8,9,10,11,12
+      if (WITH_HEADER_OBFUSCATION && dev_->packet_obfuscator().enabled())
+        keepalive_timeout_ms_ = KEEPALIVE_TIMEOUT_MS + ((int)(dev_->GetRandomNumber() % 6) - 3) * 1000;
+
       t &= ~(1 << TIMER_SEND_KEEPALIVE);
       rv |= ACTION_SEND_KEEPALIVE;
       if (pending_keepalive_) {

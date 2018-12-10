@@ -60,7 +60,6 @@ enum ProtocolTimeouts {
   KEEPALIVE_TIMEOUT_MS = 10000,
   REKEY_AFTER_TIME_MS = 120000,
   REJECT_AFTER_TIME_MS = 180000,
-  PERSISTENT_KEEPALIVE_MS = 25000,
   MIN_HANDSHAKE_INTERVAL_MS = 20,
 
   MAX_SIZE_OF_HANDSHAKE_EXTENSION = 1024,
@@ -649,6 +648,8 @@ private:
   uint8 cipher_prio_;
   uint8 num_ciphers_;
   uint8 ciphers_[MAX_CIPHERS];
+
+  uint32 keepalive_timeout_ms_; // Set to KEEPALIVE_TIMEOUT_MS
 
   uint64 rx_bytes_;
   uint64 tx_bytes_;
