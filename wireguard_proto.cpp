@@ -927,8 +927,8 @@ bool WgPeer::ParseExtendedHandshake(WgKeypair *kp, const uint8 *data, size_t dat
 
     case EXT_BOOLEAN_FEATURES:
       if (WITH_BOOLEAN_FEATURES) {
-        for (size_t i = 0, j = std::max<uint32>(WG_FEATURES_COUNT, size * 4); i != j; i++) {
-          uint8 value = (i < size * 4) ? (data[i >> 2] >> ((i * 2) & 7)) & 3 : 0;
+        for (uint32 i = 0, j = std::max<uint32>(WG_FEATURES_COUNT, size * 4); i != j; i++) {
+          uint8 value = (i < (uint32)size * 4) ? (data[i >> 2] >> ((i * 2) & 7)) & 3 : 0;
           if (i >= WG_FEATURES_COUNT ? (value == WG_BOOLEAN_FEATURE_ENFORCES) :
               !ResolveBooleanFeatureValue(value, features_[i], &kp->enabled_features[i]))
             return false;

@@ -11,6 +11,7 @@
 #endif
 
 union IpAddr {
+  short int sin_family;
   sockaddr_in sin;
   sockaddr_in6 sin6;
 };

@@ -402,7 +402,7 @@ void WgConfig::HandleConfigurationProtocolGet(WireguardProcessor *proc, std::str
     CmsgAppendFmt(result, "address=%s", PrintWgCidrAddr(x, buf));
   
   for (WgPeer *peer = proc->dev_.peers_; peer; peer = peer->next_peer_) {
-    WG_SCOPED_LOCK(peer->lock_);
+    WG_SCOPED_LOCK(peer->mutex_);
     
     CmsgAppendHex(result, "public_key", peer->s_remote_.bytes, sizeof(peer->s_remote_));
     if (!IsOnlyZeros(peer->preshared_key_, sizeof(peer->preshared_key_)))

@@ -15,12 +15,12 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS 1
 #define _HAS_EXCEPTIONS 0
 #define _CRT_SECURE_NO_WARNINGS 1
+#define NOMINMAX
 
 //#include <Winsock2.h>
 #include <Ws2tcpip.h>
 
 #include <Windows.h>
-#undef max
 //#include <winsock2.h>
 #include <ws2ipdef.h>
 #include <iphlpapi.h>
@@ -37,6 +37,4 @@
 
 #include <vector>
 #include <string>
-
-#undef min
 

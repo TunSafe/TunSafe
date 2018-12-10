@@ -488,7 +488,7 @@ add_padding:
         inner_tag = WG_ACK_HEADER_COUNTER_4;
       } else {
         WriteLE32(write -= 4, (uint32)next_expected_packet);
-        WriteLE16(write -= 2, (uint16)(next_expected_packet>>32));
+        WriteLE16(write -= 2, (uint16)(next_expected_packet >> 32));
         inner_tag = WG_ACK_HEADER_COUNTER_6;
       }
       if (keypair->broadcast_short_key != 0) {
