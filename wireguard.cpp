@@ -450,6 +450,8 @@ WireguardProcessor::PacketResult WireguardProcessor::WriteAndEncryptPacketToUdp_
   packet->addr = peer->endpoint_;
   packet->protocol = peer->endpoint_protocol_;
 
+  WG_EXTENSION_HOOKS::OnPeerOutgoingUdp(peer, packet);
+
   if (size == 0) {
     peer->OnKeepaliveSent();
   } else {
@@ -663,6 +665,7 @@ void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
     peer->OnHandshakeInitSent();
     packet->addr = peer->endpoint_;
     packet->protocol = peer->endpoint_protocol_;
+    WG_EXTENSION_HOOKS::OnPeerOutgoingUdp(peer, packet);
     peer->tx_bytes_ += packet->size;
 
     // If this is an incoming oneway connection (such as tcp), forget the
@@ -888,6 +891,8 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
     peer->endpoint_protocol_ = packet->protocol;
   }
 
+  WG_EXTENSION_HOOKS::OnPeerIncomingUdp(peer, packet);
+
   // Remember how many incoming packets we've seen so we can approximate loss
   keypair->incoming_packet_count++;
 
@@ -936,9 +941,13 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
   if (ip_version == 4) {
     if (data_size < IPV4_HEADER_SIZE)
       goto getout_error_header;
-    WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
-    peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ReadBE32(data + 12));
-    WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
+    if (!WG_EXTENSION_HOOKS::DisableSourceAddressVerification(peer)) {
+      WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
+      peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV4(ReadBE32(data + 12));
+      WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
+      if (peer_from_header != peer) 
+        goto getout_error_header;
+    }
     size_from_header = ReadBE16(data + 2);
     if (size_from_header < IPV4_HEADER_SIZE) {
       // too small packet?
@@ -950,12 +959,14 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
     WG_ACQUIRE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
     peer_from_header = (WgPeer*)dev_.ip_to_peer_map().LookupV6(data + 8);
     WG_RELEASE_RWLOCK_SHARED(dev_.ip_to_peer_map_lock_);
+    if (peer_from_header != peer)
+      goto getout_error_header;
     size_from_header = IPV6_HEADER_SIZE + ReadBE16(data + 4);
   } else {
     // invalid ip version
     goto getout_error_header;
   }
-  if (peer_from_header != peer || size_from_header > data_size)
+  if (size_from_header > data_size)
     goto getout_error_header;
 
   packet->size = size_from_header;

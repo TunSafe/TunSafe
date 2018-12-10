@@ -66,6 +66,12 @@ struct Packet : QueuedItem {
     HEADROOM_BEFORE = 64,
   };
 
+
+#ifdef PACKET_EXTENSION_FIELDS
+  PACKET_EXTENSION_FIELDS
+#endif  // PACKET_EXTENSION_FIELDS
+
+
   byte data_pre[HEADROOM_BEFORE];
   byte data_buf[0];
 

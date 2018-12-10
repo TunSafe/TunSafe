@@ -787,6 +787,9 @@ WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packe
     peer->endpoint_ = packet->addr;
     peer->endpoint_protocol_ = packet->protocol;
   }
+
+  WG_EXTENSION_HOOKS::OnPeerIncomingUdp(peer, packet);
+  
   peer->rx_bytes_ += packet->size;
   peer->InsertKeypairInPeer_Locked(keypair);
   WG_RELEASE_LOCK(peer->mutex_);

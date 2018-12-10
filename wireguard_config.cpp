@@ -97,7 +97,9 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
   
   if (strcmp(group, "[Interface]") == 0) {
     if (key == NULL) return true;
-    if (strcmp(key, "PrivateKey") == 0) {
+    if (wg_->dev().plugin() && wg_->dev().plugin()->OnUnknownInterfaceSetting(key, value)) {
+      // nothing here
+    } else if (strcmp(key, "PrivateKey") == 0) {
       if (!ParseBase64Key(value, binkey))
         return false;
       had_interface_ = true;
@@ -185,8 +187,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
         wg_->AddExcludedIp(addr);
       }
     } else {
-      if (!wg_->dev().plugin() || !wg_->dev().plugin()->OnUnknownInterfaceSetting(key, value))
-        goto err;
+      goto err;
     }
   } else if (strcmp(group, "[Peer]") == 0) {
     if (key == NULL) {
@@ -199,7 +200,10 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       memset(&pi_, 0, sizeof(pi_));
       return true;
     }
-    if (strcmp(key, "PublicKey") == 0) {
+
+    if (wg_->dev().plugin() && wg_->dev().plugin()->OnUnknownPeerSetting(peer_, key, value)) {
+      // nothing here
+    } else if (strcmp(key, "PublicKey") == 0) {
       if (!ParseBase64Key(value, pi_.pub.bytes))
         return false;
     } else if (strcmp(key, "PresharedKey") == 0) {
@@ -252,8 +256,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
           return false;
       }
     } else {
-      if (!wg_->dev().plugin() || !wg_->dev().plugin()->OnUnknownPeerSetting(peer_, key, value))
-        goto err;
+      goto err;
     }
   } else {
   err:
@@ -331,6 +334,11 @@ bool ParseWireGuardConfigString(WireguardProcessor *wg, const char *bufin, size_
     buf = nl + 1;
   }
   file_parser.FinishGroup();
+
+  // Let plugin do any final processing
+  if (wg->dev().plugin() && !wg->dev().plugin()->OnAfterSettingsParsed())
+    return false;
+
   return true;
 }
 

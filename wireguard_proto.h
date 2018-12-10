@@ -318,22 +318,26 @@ public:
   virtual bool OnUnknownInterfaceSetting(const char *key, const char *value) = 0;
   virtual bool OnUnknownPeerSetting(WgPeer *peer, const char *key, const char *value) = 0;
 
+  // Called after settings have been completely parsed, the plugin may modify the state
+  virtual bool OnAfterSettingsParsed() = 0;
+
   // Returns true if we want to perform a handshake for this peer.
   virtual bool WantHandshake(WgPeer *peer) = 0;
-
-  // Called right before handshake initiation is sent out. Can't drop packets.
-  virtual uint32 OnHandshake0(WgPeer *peer, uint8 *extout, uint32 extout_size, const uint8 salt[WG_PUBLIC_KEY_LEN]) = 0;
-  // Called after handshake initiation is parsed, but before handshake response is sent.
 
   enum {
     kHandshakeResponseDrop = 0xffffffff,
     kHandshakeResponseFail = 0x80000000
   };
+  // Called before handshake initiation is sent out. Can write extra headers. Can't drop packets.
+  virtual uint32 OnHandshake0(WgPeer *peer, uint8 *extout, uint32 extout_size, const uint8 salt[WG_PUBLIC_KEY_LEN]) = 0;
+  // Called after handshake initiation is parsed, but before handshake response is sent.
   // Packet can be dropped or keypair failed.
   virtual uint32 OnHandshake1(WgPeer *peer, const uint8 *ext, uint32 ext_size, const uint8 salt_in[WG_PUBLIC_KEY_LEN], uint8 *extout, uint32 extout_size, const uint8 salt_out[WG_PUBLIC_KEY_LEN]) = 0;
-  
   // Called when handshake response is parsed
   virtual uint32 OnHandshake2(WgPeer *peer, const uint8 *ext, uint32 ext_size, const uint8 salt[WG_PUBLIC_KEY_LEN]) = 0;
+
+  // Called right before an outgoing non-data packet is sent out, but before it's scrambled.
+  virtual void OnOutgoingHandshakePacket(WgPeer *peer, Packet *packet) = 0;
 };
 
 
@@ -378,7 +382,9 @@ public:
 
   void SetPlugin(WgPlugin *del) { plugin_ = del; }
   WgPlugin *plugin() { return plugin_; }
-    
+
+  MultithreadedDelayedDelete *GetDelayedDelete() { return &delayed_delete_; }
+
 private:
   std::pair<WgPeer*, WgKeypair*> *LookupPeerInKeyIdLookup(uint32 key_id);
   WgKeypair *LookupKeypairByKeyId(uint32 key_id);
@@ -773,6 +779,9 @@ bool WgKeypairDecryptPayload(uint8 *dst, const size_t src_len,
 
 struct WgExtensionHooksDefault {
   static uint32 GetIpv4Target(Packet *packet, uint8 *data) { return ReadBE32(data + 16); }
+  static void OnPeerIncomingUdp(WgPeer *peer, const Packet *packet) { }
+  static void OnPeerOutgoingUdp(WgPeer *peer, Packet *packet) { }
+  static bool DisableSourceAddressVerification(WgPeer *peer) { return false; }
 };
 
 #ifndef WG_EXTENSION_HOOKS
