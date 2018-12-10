@@ -100,8 +100,8 @@ static const unsigned char d[] = {
   66,66,66,66,66,66
 };
 
-bool base64_decode(uint8 *in, size_t inLen, uint8 *out, size_t *outLen) {
-  uint8 *end = in + inLen;
+bool base64_decode(const uint8 *in, size_t inLen, uint8 *out, size_t *outLen) {
+  const uint8 *end = in + inLen;
   uint8 iter = 0;
   uint32_t buf = 0;
   size_t len = 0;
@@ -168,10 +168,6 @@ int RunCommand(const char *fmt, ...) {
         tmp += buf;
       } else if (c == '%') {
         tmp += '%';
-      } else if (c == 'A') {
-        struct in_addr in;
-        in.s_addr = htonl(va_arg(va, in_addr_t));
-        tmp += inet_ntoa(in);
       }
     } else if (c == ' ' || c == 0) {
 ZERO:

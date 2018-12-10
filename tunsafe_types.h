@@ -7,7 +7,6 @@
 #include "build_config.h"
 #include "tunsafe_config.h"
 
-
 typedef uint8_t byte;
 typedef uint8_t uint8;
 typedef uint16_t uint16;
@@ -17,8 +16,7 @@ typedef int64_t int64;
 typedef int8_t int8;
 typedef int16_t int16;
 typedef int32_t int32;
-
-typedef unsigned int in_addr_t;
+typedef unsigned int uint;
 
 #define CTASTR2(pre,post) pre ## post
 #define CTASTR(pre,post) CTASTR2(pre,post)

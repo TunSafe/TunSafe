@@ -4,7 +4,7 @@
 #include "tunsafe_types.h"
 
 char *base64_encode(const uint8 *input, size_t length, char *output, size_t output_size, size_t *actual_size);
-bool base64_decode(uint8 *in, size_t inLen, uint8 *out, size_t *outLen);
+bool base64_decode(const uint8 *in, size_t inLen, uint8 *out, size_t *outLen);
 bool IsOnlyZeros(const uint8 *data, size_t data_size);
 
 int RunCommand(const char *fmt, ...);

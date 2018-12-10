@@ -123,7 +123,7 @@ void StopTunsafeBackend(UpdateIconWhy why) {
   }
 }
 
-const char *print_ip(char buf[kSizeOfAddress], in_addr_t ip) {
+const char *print_ip(char buf[kSizeOfAddress], uint32 ip) {
   snprintf(buf, kSizeOfAddress, "%d.%d.%d.%d", (ip >> 24) & 0xff, (ip >> 16) & 0xff, (ip >> 8) & 0xff, (ip >> 0) & 0xff);
   return buf;
 }
