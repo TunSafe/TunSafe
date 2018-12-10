@@ -961,6 +961,13 @@ void PacketProcessorUdpCb::OnQueuedItemDelete(QueuedItem *qi) {
   FreePacket(static_cast<Packet*>(qi));
 }
 
+void PacketProcessorDeobfuscateUdpCb::OnQueuedItemEvent(QueuedItem *qi, uintptr_t extra) {
+  PacketProcessor::QueueContext *context = (PacketProcessor::QueueContext *)extra;
+  Packet *packet = static_cast<Packet*>(qi);
+  context->wg->dev().packet_obfuscator().DeobfuscatePacket(packet);
+  PacketProcessorUdpCb::OnQueuedItemEvent(qi, extra);
+}
+
 void PacketProcessor::PostExit(int exit_code) {
   mutex_.Acquire();
   // Avoid race condition where mode_tun_failed is set during thread exit.

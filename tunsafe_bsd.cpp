@@ -773,6 +773,8 @@ void TunsafeBackendBsdImpl::WriteUdpPacket(Packet *packet) {
   if (packet->protocol & kPacketProtocolTcp) {
     WriteTcpPacket(packet);
   } else {
+    if (processor_.dev().packet_obfuscator().enabled())
+      processor_.dev().packet_obfuscator().ObfuscatePacket(packet);
     udp_.WritePacket(packet);
   }
 }
@@ -857,7 +859,6 @@ void TunsafeBackendBsdImpl::CloseOrphanTcpConnections() {
   for(const auto &it : lookup)
     delete (TcpSocketBsd *)it.second;
 }
-
 int main(int argc, char **argv) {
   CommandLineOutput cmd = {0};
 

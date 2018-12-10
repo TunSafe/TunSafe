@@ -170,7 +170,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       
       wg_->SetInternetBlocking((InternetBlockState)v);
     } else if (strcmp(key, "HeaderObfuscation") == 0) {
-      wg_->SetHeaderObfuscation(value);
+      wg_->dev().packet_obfuscator().SetKey((uint8*)value, strlen(value));
     } else if (strcmp(key, "PostUp") == 0) {
       wg_->prepost().post_up.emplace_back(value);
     } else if (strcmp(key, "PostDown") == 0) {

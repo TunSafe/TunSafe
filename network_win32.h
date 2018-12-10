@@ -30,6 +30,10 @@ struct PacketProcessorUdpCb : QueuedItemCallback {
   virtual void OnQueuedItemDelete(QueuedItem *ow) override;
 };
 
+struct PacketProcessorDeobfuscateUdpCb : PacketProcessorUdpCb {
+  virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
+};
+
 class PacketProcessor {
 public:
   explicit PacketProcessor();
@@ -41,11 +45,20 @@ public:
   void PostPackets(Packet *first, Packet **end, int count);
   void ForcePost(QueuedItem *item);
   void PostExit(int exit_code);
+  void EnableDeobfuscation() {
+    udp_cb_maybe_deobfuscate_ = &udp_cb_deobfuscate_;
+  }
 
   const uint32 *posted_exit_code() { return &exit_code_; }
 
+  // Handler for tun packets
   QueuedItemCallback *tun_queue() { return &tun_cb_; }
-  QueuedItemCallback *udp_queue() { return &udp_cb_; }
+   
+  // Handler for udp packets
+  QueuedItemCallback *udp_queue() { return udp_cb_maybe_deobfuscate_; }
+
+  // Incoming queue for tcp packets that do not use deobfuscation
+  QueuedItemCallback *tcp_queue() { return &udp_cb_; }
 
   struct QueueContext {
     WireguardProcessor *wg;
@@ -65,8 +78,11 @@ private:
   uint32 exit_code_;
   bool timer_interrupt_;
 
+  QueuedItemCallback *udp_cb_maybe_deobfuscate_;
+
   PacketProcessorTunCb tun_cb_;
   PacketProcessorUdpCb udp_cb_;
+  PacketProcessorDeobfuscateUdpCb udp_cb_deobfuscate_;
 };
 
 class NetworkWin32;

@@ -55,7 +55,6 @@ WgDevice::WgDevice() {
   peers_ = NULL;
   last_peer_ptr_ = &peers_;
   plugin_ = NULL;
-  header_obfuscation_ = false;
   is_private_key_initialized_ = false;
   next_rng_slot_ = 0;
   main_thread_scheduled_ = NULL;
@@ -329,18 +328,6 @@ void WgDevice::UpdateKeypairAddrEntry_Locked(const IpAddr &addr, WgKeypair *keyp
   assert(ae->ref_count == !!ae->keys[0] + !!ae->keys[1] + !!ae->keys[2]);
 
   keypair->broadcast_short_key = 1;
-}
-
-//>> > hashlib.sha256('TunSafe Header Obfuscation Key').hexdigest()
-//'2444423e33eb5bb875961224c6441f54c5dea95a3a4e1139509ffa6992bdb278'
-static const uint8 kHeaderObfuscationKey[32] = {36, 68, 66, 62, 51, 235, 91, 184, 117, 150, 18, 36, 198, 68, 31, 84, 197, 222, 169, 90, 58, 78, 17, 57, 80, 159, 250, 105, 146, 189, 178, 120};
-
-void WgDevice::SetHeaderObfuscation(const char *key) {
-#if WITH_HEADER_OBFUSCATION
-  header_obfuscation_ = (key != NULL);
-  if (key)
-    blake2s_hmac((uint8*)&header_obfuscation_key_, sizeof(header_obfuscation_key_), (uint8*)key, strlen(key), kHeaderObfuscationKey, sizeof(kHeaderObfuscationKey));
-#endif  // WITH_HEADER_OBFUSCATION
 }
 
 WgPeer::WgPeer(WgDevice *dev) {
@@ -1056,7 +1043,7 @@ void WgPeer::WriteMacToPacket(const uint8 *data, MessageMacs *dst) {
   } else {
     has_mac2_cookie_ = false;
 
-    if (dev_->header_obfuscation_) {
+    if (dev_->packet_obfuscator().enabled()) {
       // when obfuscation is enabled just make the top bits random
       for (size_t i = 0; i < 4; i++)
         ((uint32*)dst->mac2)[i] = dev_->GetRandomNumber();
@@ -1482,10 +1469,104 @@ static RandomSiphashKey random_siphash_key;
 
 size_t WgAddrEntry::IpPortHasher::operator()(const WgAddrEntry::IpPort &a) const {
   uint32 xx = Read32(a.bytes + 16);
-  return siphash13_2u64(Read64(a.bytes) + xx, Read64(a.bytes + 8) + xx, &random_siphash_key.key);
+  return (size_t)siphash13_2u64(Read64(a.bytes) + xx, Read64(a.bytes + 8) + xx, &random_siphash_key.key);
 }
 
 size_t WgPublicKeyHasher::operator()(const WgPublicKey&a) const {
-  return siphash13_4u64(a.u64[0], a.u64[1], a.u64[2], a.u64[3], &random_siphash_key.key);
+  return (size_t)siphash13_4u64(a.u64[0], a.u64[1], a.u64[2], a.u64[3], &random_siphash_key.key);
 }
 
+// This scrambles the initial 16 bytes of the packet with the
+// last 8 bytes of the packet as a seed.
+void WgPacketObfuscator::ScrambleUnscramble(uint8 *data, size_t data_size) {
+  uint64 last_uint64 = ReadLE64(data + data_size - 8);
+  uint64 a = siphash_u64_u32(last_uint64, (uint32)data_size, (siphash_key_t*)&key_[0]);
+  uint64 b = siphash_u64_u32(last_uint64, (uint32)data_size, (siphash_key_t*)&key_[2]);
+  a = ToLE64(a);
+  b = ToLE64(b);
+  if (data_size >= 24) {
+    ((uint64*)data)[0] ^= a;
+    ((uint64*)data)[1] ^= b;
+  } else {
+    uint64 d[2] = { a, b };
+    for (size_t i = 0; i < data_size - 8; i++)
+      data[i] ^= ((uint8*)d)[i];
+  }
+}
+
+size_t WgPacketObfuscator::InsertRandomBytesIntoPacket(uint8 *data, size_t data_size) {
+  assert(data_size >= 24);
+  // The bytes at offset 16 are used as a seed to the prng
+  uint64 master_key = siphash_u64_u32(Read64(data + 16), (uint32)data_size, &random_siphash_key.key);
+  uint32 random_bytes = master_key & 0xFF;
+  data[3] = (uint8)random_bytes;
+  for (uint32 i = 0; i < random_bytes; i += 8)
+    *(uint64*)(data + data_size + i) = siphash_u64_u32(master_key + i, i, &random_siphash_key.key);
+  data_size += random_bytes;
+  return data_size;
+}
+
+void WgPacketObfuscator::ObfuscatePacket(Packet *packet) {
+  uint8 *data = packet->data;
+  size_t data_size = packet->size;
+
+  // Too short packets can't be obfuscated
+  if (data_size < 8)
+    return;
+  
+  // If the packet is type 1, 2 or 3, or a keepalive packet of type 4, add random bytes at
+  // the end. This is to make it harder to detect the protocol. Store the # of added bytes
+  // in the 3:rd byte of the packet.
+  uint32 packet_type = ReadLE32(data);
+  if ((packet_type == 4 && data_size <= 32) || packet_type < 4) {
+    if (packet_type != 4) {
+      // The 39:th and 43:rd bytes often have zero MSB because of curve25519 pubkey,
+      // so xor them with something in the header.
+      assert(data_size >= 44);
+      data[39] ^= data[12];
+      data[43] ^= data[12];
+    }
+    packet->size = data_size = InsertRandomBytesIntoPacket(data, data_size);
+  }
+
+  // Scramble the header bytes of the packet
+  ScrambleUnscramble(data, data_size);
+}
+
+void WgPacketObfuscator::DeobfuscatePacket(Packet *packet) {
+  uint8 *data = packet->data;
+  size_t data_size = packet->size;
+
+  // Too short packets can't be obfuscated / deobfuscated
+  if (data_size < 8)
+    return;
+
+  // Unscramble the header bytes of the packet
+  ScrambleUnscramble(data, data_size);
+
+  // Check whether the packet type field says that we have 
+  // extra bytes appended at the end.
+  if (data[0] <= 4) {
+    if (data[0] < 4 && data_size >= 44) {
+      // The 39:th and 43:rd bytes often have zero MSB because of curve25519 pubkey,
+      // so xor them with something in the header.
+      data[39] ^= data[12];
+      data[43] ^= data[12];
+    }
+    if (data[3] <= data_size) {
+      packet->size = (uint32)(data_size - data[3]);
+      data[3] = 0;
+    }
+  }
+}
+
+
+//>> > hashlib.sha256('TunSafe Header Obfuscation Key').hexdigest()
+//'2444423e33eb5bb875961224c6441f54c5dea95a3a4e1139509ffa6992bdb278'
+static const uint8 kHeaderObfuscationKey[32] = { 36, 68, 66, 62, 51, 235, 91, 184, 117, 150, 18, 36, 198, 68, 31, 84, 197, 222, 169, 90, 58, 78, 17, 57, 80, 159, 250, 105, 146, 189, 178, 120 };
+
+void WgPacketObfuscator::SetKey(const uint8 *key, size_t len) {
+  enabled_ = (key != NULL);
+  if (key)
+    blake2s((uint8*)&key_, sizeof(key_), key, len, kHeaderObfuscationKey, sizeof(kHeaderObfuscationKey));
+}

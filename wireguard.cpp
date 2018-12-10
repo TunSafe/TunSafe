@@ -95,10 +95,6 @@ void WireguardProcessor::SetInternetBlocking(InternetBlockState internet_blockin
   internet_blocking_ = internet_blocking;
 }
 
-void WireguardProcessor::SetHeaderObfuscation(const char *key) {
-  dev_.SetHeaderObfuscation(key);
-}
-
 const WgProcessorStats &WireguardProcessor::GetStats() {
   // todo: only supports one peer but i want this in the ui for now.
   stats_.endpoint.sin.sin_family = 0;
@@ -573,42 +569,10 @@ getout_discard:
   return kPacketResult_Free;
 }
 
-// This scrambles the initial 16 bytes of the packet with the
-// next 8 bytes of the packet as a seed.
-static void ScrambleUnscramblePacket(Packet *packet, ScramblerSiphashKeys *keys) {
-  uint8 *data = packet->data;
-  size_t data_size = packet->size;
-
-  if (data_size <= 8)
-    return;
-
-  uint64 last_uint64 = ReadLE64(data_size >= 24 ? data + 16 : data + data_size - 8);
-  uint64 a = siphash_u64_u32(last_uint64, (uint32)data_size, (siphash_key_t*)&keys->keys[0]);
-  uint64 b = siphash_u64_u32(last_uint64, (uint32)data_size, (siphash_key_t*)&keys->keys[2]);
-  a = ToLE64(a);
-  b = ToLE64(b);
-  if (data_size >= 24) {
-    ((uint64*)data)[0] ^= a;
-    ((uint64*)data)[1] ^= b;
-  } else {
-    union {
-      uint64 d[2];
-      uint8 s[16];
-    } scrambler = {{a,b}};
-    for (size_t i = 0; i < data_size - 8; i++)
-      data[i] ^= scrambler.s[i];
-  }
-}
-
 void WireguardProcessor::PrepareOutgoingHandshakePacket(WgPeer *peer, Packet *packet) {
   assert(dev_.IsMainThread());
-
   stats_.udp_packets_out++;
   stats_.udp_bytes_out += packet->size;
-#if WITH_HEADER_OBFUSCATION
-  if (dev_.header_obfuscation_)
-    ScrambleUnscramblePacket(packet, &dev_.header_obfuscation_key_);
-#endif // WITH_HEADER_OBFUSCATION
 }
 
 void WireguardProcessor::RunAllMainThreadScheduled() {
@@ -693,12 +657,6 @@ bool WireguardProcessor::IsMainThreadPacket(Packet *packet) {
 WireguardProcessor::PacketResult WireguardProcessor::HandleUdpPacket2(Packet *packet, bool overload) {
   uint32 type;
   assert(packet->protocol != 0xCD && (uint16)packet->addr.sin.sin_family != 0xCDCD); // catch msvc uninit mem
-
-  // Unscramble incoming packets
-#if WITH_HEADER_OBFUSCATION
-  if (dev_.header_obfuscation_)
-    ScrambleUnscramblePacket(packet, &dev_.header_obfuscation_key_);
-#endif  // WITH_HEADER_OBFUSCATION
 
   stats_.udp_bytes_in += packet->size;
   stats_.udp_packets_in++;

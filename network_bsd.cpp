@@ -480,6 +480,9 @@ bool UdpSocketBsd::DoRead() {
     read_packet->size = r;
     read_packet->protocol = kPacketProtocolUdp;
     network_->read_packet_ = NULL;
+
+    if (processor_->dev().packet_obfuscator().enabled())
+      processor_->dev().packet_obfuscator().DeobfuscatePacket(read_packet);
     processor_->HandleUdpPacket(read_packet, network_->overload_);
     return true;
   } else {

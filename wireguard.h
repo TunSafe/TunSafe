@@ -91,7 +91,6 @@ public:
   void SetAddRoutesMode(bool mode);
   void SetDnsBlocking(bool dns_blocking);
   void SetInternetBlocking(InternetBlockState internet_blocking);
-  void SetHeaderObfuscation(const char *key);
 
   void HandleTunPacket(Packet *packet);
   void HandleUdpPacket(Packet *packet, bool overload);

@@ -272,10 +272,6 @@ struct WgAddrEntry {
 
 };
 
-struct ScramblerSiphashKeys {
-  uint64 keys[4];
-};
-
 union WgPublicKey {
   uint8 bytes[WG_PUBLIC_KEY_LEN];
   uint64 u64[WG_PUBLIC_KEY_LEN / 8];
@@ -341,6 +337,32 @@ public:
 };
 
 
+// This class is used for scrambing / unscrambling of wireguard UDP/TCP packets,
+// including adding random bytes at the end of the non-data packets.
+class WgPacketObfuscator {
+public:
+  WgPacketObfuscator() : enabled_(false) {}
+
+  bool enabled() { return enabled_; }
+  void ObfuscatePacket(Packet *packet);
+  void DeobfuscatePacket(Packet *packet);
+
+  void SetKey(const uint8 *key, size_t len);
+
+  const uint8 *key() { return (uint8*)key_; }
+
+  static size_t InsertRandomBytesIntoPacket(uint8 *data, size_t data_size);
+
+private:
+  void ScrambleUnscramble(uint8 *data, size_t data_size);
+
+  // Whether packet obfuscation is enabled
+  bool enabled_;
+
+  // Siphash keys for packet scrambling
+  uint64 key_[4];
+};
+
 class WgDevice {
   friend class WgPeer;
   friend class WireguardProcessor;
@@ -358,9 +380,6 @@ public:
 
   // Remove all peers
   void RemoveAllPeers();
-
-  // Setup header obfuscation
-  void SetHeaderObfuscation(const char *key);
 
   // Check whether Mac1 appears to be valid
   bool CheckCookieMac1(Packet *packet);
@@ -384,6 +403,8 @@ public:
   WgPlugin *plugin() { return plugin_; }
 
   MultithreadedDelayedDelete *GetDelayedDelete() { return &delayed_delete_; }
+
+  WgPacketObfuscator &packet_obfuscator() { return packet_obfuscator_; }
 
 private:
   std::pair<WgPeer*, WgKeypair*> *LookupPeerInKeyIdLookup(uint32 key_id);
@@ -441,9 +462,6 @@ private:
   // Counter for generating new indices in |keypair_lookup_|
   uint8 next_rng_slot_;
 
-  // Whether packet obfuscation is enabled
-  bool header_obfuscation_;
-
   // Whether a private key has been setup for the device
   bool is_private_key_initialized_;
 
@@ -456,14 +474,14 @@ private:
   uint8 s_priv_[WG_PUBLIC_KEY_LEN];
   uint8 s_pub_[WG_PUBLIC_KEY_LEN];
 
-  // Siphash keys for packet scrambling
-  ScramblerSiphashKeys header_obfuscation_key_;
 
   uint8 precomputed_cookie_key_[WG_SYMMETRIC_KEY_LEN];
   uint8 precomputed_mac1_key_[WG_SYMMETRIC_KEY_LEN];
 
   uint64 random_number_input_[WG_HASH_LEN / 8 + 1];
   uint32 random_number_output_[WG_HASH_LEN / 4];
+
+  WgPacketObfuscator packet_obfuscator_;
 
   WgRateLimit rate_limiter_;
 
