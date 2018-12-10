@@ -13,6 +13,7 @@
 #include "crypto_ops.h"
 #include <string.h>
 #include <assert.h>
+#include "util.h"
 
 enum {
 	CHACHA20_IV_SIZE = 16,
@@ -630,4 +631,32 @@ bool xchacha20poly1305_decrypt(uint8 *dst, const uint8 *src, const size_t src_le
 
 	return ret;
 }
+
+void chacha20_streaming_init(chacha20_streaming *state, uint8 key[CHACHA20POLY1305_KEYLEN]) {
+  state->left = 0;
+  uint32 *st = state->state;
+  WriteLE64((uint8*)st, 0x3320646e61707865);
+  WriteLE64((uint8*)st + 8, 0x6b20657479622d32);
+  Write64((uint8*)st + 16, Read64(key + 0));
+  Write64((uint8*)st + 24, Read64(key + 8));
+  Write64((uint8*)st + 32, Read64(key + 16));
+  Write64((uint8*)st + 40, Read64(key + 24));
+  Write64((uint8*)st + 48, 0);
+  Write64((uint8*)st + 56, 0);
+}
+
+void chacha20_streaming_crypt(chacha20_streaming *state, uint8 *dst, size_t size) {
+  uint32 left = state->left;
+  while (size) {
+    if (left == 0) {
+      memset(state->buf, 0, sizeof(state->buf));
+      chacha20_crypt((struct chacha20_ctx *)state->state, state->buf, state->buf, sizeof(state->buf));
+      left = 64;
+    }
+    size_t step = left > size ? size : left;
+    crypto_xor(postinc(dst, step), state->buf + 64 - exch(left, left - (uint32)step), exch(size, size - step));
+  }
+  state->left = left;
+}
+
 

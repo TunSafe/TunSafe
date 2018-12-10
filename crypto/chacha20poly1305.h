@@ -37,3 +37,13 @@ void poly1305_get_mac(const uint8 *src, size_t src_len,
                      const uint8 *ad, const size_t ad_len,
                      const uint64 nonce, const uint8 key[CHACHA20POLY1305_KEYLEN],
                      uint8 mac[CHACHA20POLY1305_AUTHTAGLEN]);
+
+
+struct chacha20_streaming {
+  uint32 left;
+  uint8 buf[64];
+  uint32 state[16];
+};
+
+void chacha20_streaming_init(chacha20_streaming *state, uint8 key[CHACHA20POLY1305_KEYLEN]);
+void chacha20_streaming_crypt(chacha20_streaming *state, uint8 *dst, size_t size);
