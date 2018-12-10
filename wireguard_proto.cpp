@@ -594,7 +594,7 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
   };
   uint8 t[WG_HASH_LEN];
   WgPeer *peer;
-  WgKeypair *keypair;
+  WgKeypair *keypair = NULL;
   uint32 remote_key_id;
   uint64 now;
   uint8 extbuf[MAX_SIZE_OF_HANDSHAKE_EXTENSION + WG_TIMESTAMP_LEN];
