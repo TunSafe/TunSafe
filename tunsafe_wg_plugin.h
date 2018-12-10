@@ -32,15 +32,8 @@ public:
   enum {
     kMaxTokenLen = 128,
   };
-
-  
-  void Initialize(WireguardProcessor *proc) { proc_ = proc; }
-
   // Called after OnRequest2FA to supply the token.
   virtual void SubmitToken(const uint8 *text, size_t text_len) = 0;
-
-protected:
-  WireguardProcessor *proc_;
 };
 
-TunsafePlugin *CreateTunsafePlugin(PluginDelegate *del);
+TunsafePlugin *CreateTunsafePlugin(PluginDelegate *del, WireguardProcessor *wgp);

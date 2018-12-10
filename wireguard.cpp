@@ -571,6 +571,8 @@ getout_discard:
 
 void WireguardProcessor::PrepareOutgoingHandshakePacket(WgPeer *peer, Packet *packet) {
   assert(dev_.IsMainThread());
+  if (dev_.plugin_)
+    dev_.plugin_->OnOutgoingHandshakePacket(peer, packet);
   stats_.udp_packets_out++;
   stats_.udp_bytes_out += packet->size;
 }

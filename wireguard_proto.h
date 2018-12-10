@@ -550,6 +550,8 @@ public:
   void SetExtradata(WgPeerExtraData *ex) { peer_extra_data_ = ex; }
   WgDevice *dev() { return dev_; }
 
+  const uint8 *epriv() { return hs_.e_priv; }
+
 private:
   bool ParseExtendedHandshake(WgKeypair *keypair, const uint8 *data, size_t data_size);
   static WgKeypair *CreateNewKeypair(bool is_initiator, const uint8 key[WG_HASH_LEN], uint32 send_key_id);
