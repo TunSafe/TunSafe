@@ -101,6 +101,7 @@ public:
   void AddToEndLoop();
 
   int GetFd() { return fd_; }
+  int StealFd();
 
 protected:
   void SetPollFlags(int events) {

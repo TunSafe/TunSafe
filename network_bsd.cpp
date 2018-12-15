@@ -286,6 +286,12 @@ void BaseSocketBsd::AddToEndLoop() {
     network_->endloop_[endloop_slot_ = network_->num_endloop_++] = this;
 }
 
+int BaseSocketBsd::StealFd() {
+  int fd = exch(fd_, -1);
+  CloseSocket();
+  return fd;
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////
 
 TunSocketBsd::TunSocketBsd(NetworkBsd *network, WireguardProcessor *processor)
