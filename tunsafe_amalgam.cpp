@@ -6,6 +6,12 @@
 #define BLAKE2S_WITH_ASM 0
 #endif
 
+// Skip asm on arm64 android
+#if defined(OS_ANDROID) && defined(ARCH_CPU_ARM64)
+#define CHACHA20_WITH_ASM 0
+#define BLAKE2S_WITH_ASM 0
+#endif
+
 #include "wireguard.cpp"
 #include "wireguard_proto.cpp"
 #include "wireguard_config.cpp"
