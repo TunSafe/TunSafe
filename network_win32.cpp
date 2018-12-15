@@ -2072,8 +2072,8 @@ void TunsafeBackendWin32::CollectStats() {
   stats_ = runner_->wg_proc_.GetStats();
   float data[2] = {
     // unit is megabits/second
-    stats_.tun_bytes_in_per_second * (1.0f / 125000),
-    stats_.tun_bytes_out_per_second * (1.0f / 125000),
+    stats_.data_bytes_out_per_second * (1.0f / 125000),
+    stats_.data_bytes_in_per_second * (1.0f / 125000),
   };
   stats_collector_.AddSamples(data);
   stats_mutex_.Release();

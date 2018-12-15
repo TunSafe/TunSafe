@@ -7,14 +7,18 @@
 
 // todo: for multithreaded use case need to use atomic ops.
 struct WgProcessorStats {
-  // Number of bytes sent/received over the physical UDP connection
-  uint64 udp_bytes_in, udp_bytes_out;
-  uint64 udp_packets_in, udp_packets_out;
+  // The amount of authenticated data received over the wireguard connection.
+  uint64 packets_in, data_bytes_in, total_bytes_in;
 
-  // Number of valid packets sent/received over the TUN interface
-  uint64 tun_bytes_in, tun_bytes_out;
-  uint64 tun_packets_in, tun_packets_out;
+  // The amount of authenticated data sent across the wireguard connection.
+  // |data_bytes_out| holds the actual bytes, while |total_bytes_out|
+  // includes wireguard overhead.
+  uint64 packets_out, data_bytes_out, total_bytes_out;
 
+  // The amount of invalid data received from the network
+  uint64 invalid_packets_in, invalid_bytes_in;
+
+ 
   // Error types
   uint32 error_key_id;
   uint32 error_mac;
@@ -22,8 +26,8 @@ struct WgProcessorStats {
   uint32 error_source_addr;
   uint32 error_header;
 
-  // Current speed of TUN packets
-  float tun_bytes_in_per_second, tun_bytes_out_per_second;
+  // Current speed
+  float data_bytes_out_per_second, data_bytes_in_per_second;
 
   // Timestamp of handshakes
   uint64 first_complete_handshake_timestamp;
@@ -143,7 +147,7 @@ private:
   PacketResult HandleHandshakeCookiePacket(Packet *packet);
   PacketResult HandleDataPacket(Packet *packet);
   
-  PacketResult HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet);
+  PacketResult HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet, uint data_size);
   PacketResult HandleShortHeaderFormatPacket(uint32 tag, Packet *packet);
   PacketResult CheckIncomingHandshakeRateLimit(Packet *packet, bool overload);
   bool HandleIcmpv6NeighborSolicitation(const byte *data, size_t data_size);

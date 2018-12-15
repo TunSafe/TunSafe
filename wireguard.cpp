@@ -344,8 +344,6 @@ void WireguardProcessor::HandleTunPacket(Packet *packet) {
 void WireguardProcessor::HandleUdpPacket(Packet *packet, bool overload) {
   PacketResult result = HandleUdpPacket2(packet, overload);
   if (result == kPacketResult_ForwardTun) {
-    //stats_.tun_bytes_out += size_from_header;
-    //stats_.tun_packets_out++;
     tun_->WriteTunPacket(packet);
   } else if (result == kPacketResult_ForwardUdp) {
     udp_->WriteUdpPacket(packet);
@@ -440,9 +438,6 @@ WireguardProcessor::PacketResult WireguardProcessor::WriteAndEncryptPacketToUdp_
     return kPacketResult_InUse;
   }
   assert(!peer->marked_for_delete_);
-
-  stats_.tun_bytes_in += size;
-  stats_.tun_packets_in++;
 
   want_handshake = (send_ctr >= REKEY_AFTER_MESSAGES ||
                     keypair->send_key_state == WgKeypair::KEY_WANT_REFRESH);
@@ -563,8 +558,9 @@ need_big_packet:
   if (want_handshake)
     peer->ScheduleNewHandshake();
 
-  stats_.udp_packets_out++;
-  stats_.udp_bytes_out += packet->size;
+  stats_.packets_out++;
+  stats_.data_bytes_out += orig_size;
+  stats_.total_bytes_out += packet->size;
 
   return kPacketResult_ForwardUdp;
 
@@ -577,8 +573,8 @@ void WireguardProcessor::PrepareOutgoingHandshakePacket(WgPeer *peer, Packet *pa
   assert(dev_.IsMainThread());
   if (dev_.plugin_)
     dev_.plugin_->OnOutgoingHandshakePacket(peer, packet);
-  stats_.udp_packets_out++;
-  stats_.udp_bytes_out += packet->size;
+  stats_.packets_out++;
+  stats_.total_bytes_out += packet->size;
 }
 
 void WireguardProcessor::RunAllMainThreadScheduled() {
@@ -666,9 +662,6 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleUdpPacket2(Packet *pa
   uint32 type;
   assert(packet->protocol != 0xCD && (uint16)packet->addr.sin.sin_family != 0xCDCD); // catch msvc uninit mem
 
-  stats_.udp_bytes_in += packet->size;
-  stats_.udp_packets_in++;
-
   if (packet->size < sizeof(uint32))
     goto invalid_size;
   type = ReadLE32((uint32*)packet->data);
@@ -707,6 +700,8 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleUdpPacket2(Packet *pa
   } else {
     // unknown packet
 invalid_size:
+    stats_.invalid_packets_in++;
+    stats_.invalid_bytes_in += packet->size;
     return kPacketResult_Free;
   }
 }
@@ -819,8 +814,7 @@ WireguardProcessor::PacketResultd WireguardProcessor::HandleShortHeaderFormatPac
     keypair->can_use_short_key_for_outgoing = (ack_tag & WG_ACK_HEADER_KEY_MASK) * WG_SHORT_HEADER_KEY_ID;
 
   packet->data = data;
-  packet->size = bytes_left - keypair->auth_tag_length;
-  return HandleAuthenticatedDataPacket_WillUnlock(keypair, packet);
+  return HandleAuthenticatedDataPacket_WillUnlock(keypair, packet, bytes_left - keypair->auth_tag_length);
 getout_unlock:
   WG_RELEASE_LOCK(keypair->peer->mutex_);
 getout:
@@ -840,7 +834,7 @@ void WireguardProcessor::NotifyHandshakeComplete() {
     procdel_->OnConnected();
 }
 
-WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet) {
+WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPacket_WillUnlock(WgKeypair *keypair, Packet *packet, uint data_size) {
   WgPeer *peer = keypair->peer;
   assert(peer->IsPeerLocked());
   assert(packet->addr.sin.sin_family != 0);
@@ -865,7 +859,7 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
     }
   }
 
-  WG_EXTENSION_HOOKS::OnPeerIncomingUdp(peer, packet);
+  WG_EXTENSION_HOOKS::OnPeerIncomingUdp(peer, packet, data_size);
 
   // Remember how many incoming packets we've seen so we can approximate loss
   keypair->incoming_packet_count++;
@@ -886,11 +880,12 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
     peer->ScheduleNewHandshake();
   }
 
-  uint32 data_size = packet->size;
   if (data_size == 0) {
     peer->OnKeepaliveReceived();
     WG_RELEASE_LOCK(peer->mutex_);
-    goto getout;
+    stats_.packets_in++;
+    stats_.total_bytes_in += packet->size;
+    return kPacketResult_Free;
   }
   peer->OnDataReceived();
   WG_RELEASE_LOCK(peer->mutex_);
@@ -899,7 +894,7 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
   if (WITH_PACKET_COMPRESSION && keypair->compress_handler_) {
     WgCompressHandler::CompressState st = keypair->compress_handler_->Decompress(packet);
     if (st == WgCompressHandler::COMPRESS_FAIL)
-      goto getout;
+      goto getout_error_header;
     if (st == WgCompressHandler::COMPRESS_YES)
       stats_.compression_hdr_saved_in += (int32)(packet->size - exch(data_size, packet->size));
   }
@@ -943,13 +938,18 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
   if (size_from_header > data_size)
     goto getout_error_header;
 
+  stats_.packets_in++;
+  stats_.data_bytes_in += size_from_header;
+  stats_.total_bytes_in += packet->size;
+
   packet->size = size_from_header;
-  
+
   return kPacketResult_ForwardTun;
 
 getout_error_header:
   stats_.error_header++;
-getout:
+  stats_.invalid_packets_in++;
+  stats_.invalid_bytes_in += packet->size;
   return kPacketResult_Free;
 }
 
@@ -963,12 +963,14 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleDataPacket(Packet *pa
   WgKeypair *keypair = dev_.LookupKeypairByKeyId(key_id);
   if (keypair == NULL || counter >= REJECT_AFTER_MESSAGES) {
     stats_.error_key_id++;
-getout:
+  getout:
+    stats_.invalid_packets_in++;
+    stats_.invalid_bytes_in += data_size;
     return kPacketResult_Free;
   }
 
   packet->data = data + sizeof(MessageData);
-  packet->size = data_size - sizeof(MessageData) - keypair->auth_tag_length;
+  uint32 data_size_after = data_size - sizeof(MessageData) - keypair->auth_tag_length;
 
   if (!WgKeypairDecryptPayload(data + sizeof(MessageData), data_size - sizeof(MessageData),
                                NULL, 0, counter, keypair)) {
@@ -988,7 +990,7 @@ getout:
     goto getout;
   } else {
     assert(!keypair->peer->marked_for_delete_);
-    return HandleAuthenticatedDataPacket_WillUnlock(keypair, packet);
+    return HandleAuthenticatedDataPacket_WillUnlock(keypair, packet, data_size_after);
   } 
 }
 
@@ -1003,8 +1005,12 @@ static uint64 GetIpForRateLimit(Packet *packet) {
 WireguardProcessor::PacketResult WireguardProcessor::CheckIncomingHandshakeRateLimit(Packet *packet, bool overload) {
   assert(dev_.IsMainThread());
   WgRateLimit::RateLimitResult rr = dev_.rate_limiter()->CheckRateLimit(GetIpForRateLimit(packet));
-  if ((overload && rr.is_rate_limited()) || !dev_.CheckCookieMac1(packet))
+
+  if ((overload && rr.is_rate_limited()) || !dev_.CheckCookieMac1(packet)) {
+    stats_.invalid_packets_in++;
+    stats_.invalid_bytes_in += packet->size;
     return kPacketResult_Free;
+  }
 
   dev_.rate_limiter()->CommitResult(rr);
   if (overload && !rr.is_first_ip() && !dev_.CheckCookieMac2(packet)) {
@@ -1021,11 +1027,20 @@ WireguardProcessor::PacketResult WireguardProcessor::CheckIncomingHandshakeRateL
 // server receives this when client wants to setup a session
 WireguardProcessor::PacketResult WireguardProcessor::HandleHandshakeInitiationPacket(Packet *packet) {
   assert(dev_.IsMainThread());
+  uint original_size = packet->size;
   WgPeer *peer = WgPeer::ParseMessageHandshakeInitiation(&dev_, packet);
   if (peer) {
     PrepareOutgoingHandshakePacket(peer, packet);
+
+    stats_.packets_in++;
+    stats_.packets_out++;
+    stats_.total_bytes_in += original_size;
+    stats_.total_bytes_out += packet->size;
+
     return kPacketResult_ForwardUdp;
   } else {
+    stats_.invalid_packets_in++;
+    stats_.invalid_bytes_in += original_size;
     return kPacketResult_Free;
   }
 }
@@ -1033,14 +1048,21 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleHandshakeInitiationPa
 // client receives this after session is established
 WireguardProcessor::PacketResult WireguardProcessor::HandleHandshakeResponsePacket(Packet *packet) {
   assert(dev_.IsMainThread());
+  uint original_size = packet->size;
   WgPeer *peer = WgPeer::ParseMessageHandshakeResponse(&dev_, packet);
   if (peer) {
+    stats_.packets_in++;
+    stats_.total_bytes_in += original_size;
+
     stats_.handshakes_out_success++;
     WG_SCOPED_LOCK(peer->mutex_);
     peer->OnHandshakeAuthComplete();
     peer->OnHandshakeFullyComplete();
     NotifyHandshakeComplete();
     SendKeepalive_Locked(peer);
+  } else {
+    stats_.invalid_packets_in++;
+    stats_.invalid_bytes_in += original_size;
   }
   return kPacketResult_Free;
 }
@@ -1093,19 +1115,16 @@ void WireguardProcessor::SecondLoop() {
   assert(dev_.IsMainThread());
   uint64 now = OsGetMilliseconds();
 
-  uint64 bytes_in = stats_.tun_bytes_in - stats_last_bytes_in_;
-  uint64 bytes_out = stats_.tun_bytes_out - stats_last_bytes_out_;
-
-  stats_last_bytes_in_ = stats_.tun_bytes_in;
-  stats_last_bytes_out_ = stats_.tun_bytes_out;
+  uint64 bytes_out = stats_.data_bytes_out - exch(stats_last_bytes_out_, stats_.data_bytes_out);
+  uint64 bytes_in = stats_.data_bytes_in - exch(stats_last_bytes_in_, stats_.data_bytes_in);
 
   uint64 millis = now - stats_last_ts_;
   stats_last_ts_ = now;
 
   double f = 1000.0 / std::max<uint32>((uint32)millis, 500);
 
-  stats_.tun_bytes_in_per_second = (float)(bytes_in * f);
-  stats_.tun_bytes_out_per_second = (float)(bytes_out * f);
+  stats_.data_bytes_out_per_second = (float)(bytes_out * f);
+  stats_.data_bytes_in_per_second = (float)(bytes_in * f);
 
   for (WgPeer *peer = dev_.first_peer(); peer; peer = peer->next_peer_) {
     WgKeypair *keypair = peer->curr_keypair_;

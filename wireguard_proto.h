@@ -819,7 +819,7 @@ bool WgKeypairDecryptPayload(uint8 *dst, const size_t src_len,
 
 struct WgExtensionHooksDefault {
   static uint32 GetIpv4Target(Packet *packet, uint8 *data) { return ReadBE32(data + 16); }
-  static void OnPeerIncomingUdp(WgPeer *peer, const Packet *packet) { }
+  static void OnPeerIncomingUdp(WgPeer *peer, const Packet *packet, uint data_size) { }
   static void OnPeerOutgoingUdp(WgPeer *peer, Packet *packet) { }
   static bool DisableSourceAddressVerification(WgPeer *peer) { return false; }
 };

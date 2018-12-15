@@ -163,14 +163,14 @@ public:
     InvalidatePaintbox();
 
     char buf[64];
-    uint32 mbs_in = (uint32)(stats.tun_bytes_out_per_second * (1.0 / 1250));
-    uint32 gb_in = (uint32)(stats.tun_bytes_out * (1.0 / (1024 * 1024 * 1024 / 100)));
+    uint32 mbs_in = (uint32)(stats.data_bytes_in_per_second * (1.0 / 1250));
+    uint32 gb_in = (uint32)(stats.data_bytes_in * (1.0 / (1024 * 1024 * 1024 / 100)));
 
     snprintf(buf, ARRAYSIZE(buf), "D: %d.%.2d Mbps (%d.%.2d GB)", mbs_in / 100, mbs_in % 100, gb_in / 100, gb_in % 100);
     SendMessage(hwndStatus, SB_SETTEXT, 1, (LPARAM)buf);
 
-    uint32 mbs_out = (uint32)(stats.tun_bytes_in_per_second * (1.0 / 1250));
-    uint32 gb_out = (uint32)(stats.tun_bytes_in * (1.0 / (1024 * 1024 * 1024 / 100)));
+    uint32 mbs_out = (uint32)(stats.data_bytes_out_per_second * (1.0 / 1250));
+    uint32 gb_out = (uint32)(stats.data_bytes_out * (1.0 / (1024 * 1024 * 1024 / 100)));
 
     snprintf(buf, ARRAYSIZE(buf), "U: %d.%.2d Mbps (%d.%.2d GB)", mbs_out / 100, mbs_out % 100, gb_out / 100, gb_out % 100);
     SendMessage(hwndStatus, SB_SETTEXT, 2, (LPARAM)buf);
@@ -1521,6 +1521,7 @@ static const AdvancedTextInfo ADVANCED_TEXT_INFOS[] = {
   {Y + 19 * 4, 66, ""},
   {Y + 19 * 5, 66, "Overhead:"},
   {Y + 19 * 6, 66, "Packet Loss:"},
+  {Y + 19 * 7, 66, "Invalid:"},
 #undef Y
 };
 
@@ -1576,8 +1577,8 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
     
   case 2: 
     snprintf(buffer, 256, "%s in (%lld packets), %s out (%lld packets)",
-             PrintMB(tmp, ps->udp_bytes_in), ps->udp_packets_in,
-             PrintMB(tmp2, ps->udp_bytes_out), ps->udp_packets_out/*, udp_qsize2 - udp_qsize1, g_tun_reads*/);
+             PrintMB(tmp, ps->total_bytes_in), ps->packets_in,
+             PrintMB(tmp2, ps->total_bytes_out), ps->packets_out/*, udp_qsize2 - udp_qsize1, g_tun_reads*/);
     return buffer;
   case 3: return PrintLastHandshakeAt(buffer, ps);
   case 4: {
@@ -1587,11 +1588,11 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
     return buffer;
   }
   case 5: {
-    uint64 overhead_in = ps->udp_bytes_in + ps->udp_packets_in * 40 - ps->tun_bytes_out;
-    uint32 overhead_in_pct = ps->tun_bytes_out ? (uint32)(overhead_in * 100000 / ps->tun_bytes_out) : 0;
+    uint64 overhead_in = ps->total_bytes_in + ps->packets_in * 40 - ps->data_bytes_in;
+    uint32 overhead_in_pct = ps->data_bytes_in ? (uint32)(overhead_in * 100000 / ps->data_bytes_in) : 0;
 
-    uint64 overhead_out = ps->udp_bytes_out + ps->udp_packets_out * 40 - ps->tun_bytes_in;
-    uint32 overhead_out_pct = ps->tun_bytes_in ? (uint32)(overhead_out * 100000 / ps->tun_bytes_in) : 0;
+    uint64 overhead_out = ps->total_bytes_out + ps->packets_out * 40 - ps->data_bytes_out;
+    uint32 overhead_out_pct = ps->data_bytes_out ? (uint32)(overhead_out * 100000 / ps->data_bytes_out) : 0;
 
     snprintf(buffer, 256, "%d.%.3d%% in, %d.%.3d%% out", overhead_in_pct / 1000, overhead_in_pct % 1000,
              overhead_out_pct / 1000, overhead_out_pct % 1000);
@@ -1601,6 +1602,10 @@ static const char *GetAdvancedInfoValue(char buffer[256], int i) {
     snprintf(buffer, 256, "%.3f%% (%d packets)", 
              ps->lost_packets_tot ? 100.0f * (ps->lost_packets_tot - ps->lost_packets_valid) / ps->lost_packets_tot : 0.0f,
              (int)(ps->lost_packets_tot - ps->lost_packets_valid));
+    return buffer;
+  }
+  case 7: {
+    snprintf(buffer, 256, "%s in (%lld packets)", PrintMB(tmp, ps->invalid_bytes_in), ps->invalid_packets_in);
     return buffer;
   }
   default: return "";
