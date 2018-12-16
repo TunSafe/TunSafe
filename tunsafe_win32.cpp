@@ -444,6 +444,11 @@ void ConfigMenuBuilder::Recurse() {
       size_t len = strlen(wfd_.cFileName);
       if (bufpos_ + len >= sizeof(buf_) - 1)
         continue;
+
+      // Ensure it ends with .conf
+      if (!(wfd_.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) && (len < 5 || _strnicmp(&wfd_.cFileName[len - 5], ".conf", 5) != 0))
+        continue;
+
       size_t old_bufpos = bufpos_;
       memcpy(buf_ + bufpos_, wfd_.cFileName, len + 1);
       bufpos_ = bufpos_ + len + 1;

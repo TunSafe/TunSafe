@@ -23,6 +23,7 @@ Changes:
   look totally random. It can also be set to tls-chrome or tls-firefox
   to make the traffic look like HTTPS traffic.
 10.Display incoming invalid packets in Windows UI
+11.Hide files not ending with .conf from list in Windows UI
 
 2018-10-21 - TunSafe v1.5-rc1
 
