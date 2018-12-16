@@ -1007,6 +1007,7 @@ WireguardProcessor::PacketResult WireguardProcessor::CheckIncomingHandshakeRateL
   WgRateLimit::RateLimitResult rr = dev_.rate_limiter()->CheckRateLimit(GetIpForRateLimit(packet));
 
   if ((overload && rr.is_rate_limited()) || !dev_.CheckCookieMac1(packet)) {
+    DPRINTF("Rate limited or cookie mac failed!");
     stats_.invalid_packets_in++;
     stats_.invalid_bytes_in += packet->size;
     return kPacketResult_Free;
@@ -1014,6 +1015,7 @@ WireguardProcessor::PacketResult WireguardProcessor::CheckIncomingHandshakeRateL
 
   dev_.rate_limiter()->CommitResult(rr);
   if (overload && !rr.is_first_ip() && !dev_.CheckCookieMac2(packet)) {
+    DPRINTF("Responding with cookie message");
     dev_.CreateCookieMessage((MessageHandshakeCookie*)packet->data, packet, ((MessageHandshakeInitiation*)packet->data)->sender_key_id);
     packet->size = sizeof(MessageHandshakeCookie);
     PrepareOutgoingHandshakePacket(NULL, packet);

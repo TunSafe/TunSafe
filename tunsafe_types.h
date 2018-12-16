@@ -68,4 +68,10 @@ void RERROR(const char *msg, ...);
 void RINFO(const char *msg, ...);
 void tunsafe_die(const char *msg);
 
+#ifdef _DEBUG
+#define DPRINTF RINFO
+#else
+#define DPRINTF(msg, ...)
+#endif
+
 #endif  // TINYVPN_TYPES_H_
