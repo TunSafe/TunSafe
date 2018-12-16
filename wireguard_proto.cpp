@@ -17,6 +17,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+  kTunsafeExtensionClientID = ('T' | 'S' << 8)
+};
+
 static const uint8 kLabelCookie[] = {'c', 'o', 'o', 'k', 'i', 'e', '-', '-'};
 static const uint8 kLabelMac1[] = {'m', 'a', 'c', '1', '-', '-', '-', '-'};
 static const uint8 kWgInitHash[WG_HASH_LEN] = {0x22,0x11,0xb3,0x61,0x08,0x1a,0xc5,0x66,0x69,0x12,0x43,0xdb,0x45,0x8a,0xd5,0x32,0x2d,0x9c,0x6c,0x66,0x22,0x93,0xe8,0xb7,0x0e,0xe1,0x9c,0x65,0xba,0x07,0x9e,0xf3};
@@ -346,7 +350,6 @@ WgPeer::WgPeer(WgDevice *dev) {
   marked_for_delete_ = false;
   allow_multicast_through_peer_ = false;
   allow_endpoint_change_ = true;
-  supports_handshake_extensions_ = true;
   local_key_id_during_hs_ = 0;
   last_handshake_init_timestamp_ = -1000000ll;
   last_handshake_init_recv_timestamp_ = 0;
@@ -545,15 +548,18 @@ void WgPeer::CreateMessageHandshakeInitiation(Packet *packet) {
 
 
   int extfield_size = 0;
-  if (WITH_HANDSHAKE_EXT && supports_handshake_extensions_)
-    extfield_size = WriteHandshakeExtension(dst->timestamp_enc + WG_TIMESTAMP_LEN, NULL);
-
-  if (dev_->plugin_) {
-    uint32 rv = dev_->plugin_->OnHandshake0(this, dst->timestamp_enc + WG_TIMESTAMP_LEN + extfield_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - extfield_size, dst->ephemeral);
-    assert(!(rv & WgPlugin::kHandshakeResponseFail));
-    extfield_size += rv;
+  if (WITH_HANDSHAKE_EXT) {
+    extfield_size = WriteHandshakeExtension(dst->timestamp_enc + WG_TIMESTAMP_LEN + 4, NULL);
+    if (dev_->plugin_) {
+      uint32 rv = dev_->plugin_->OnHandshake0(this, dst->timestamp_enc + WG_TIMESTAMP_LEN + 4 + extfield_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - 4 - extfield_size, dst->ephemeral);
+      assert(!(rv & WgPlugin::kHandshakeResponseFail));
+      extfield_size += rv;
+    }
+    if (extfield_size) {
+      WriteLE32(dst->timestamp_enc + WG_TIMESTAMP_LEN, kTunsafeExtensionClientID);
+      extfield_size += 4;
+    }
   }
-
   // msg.timestamp := AEAD(K, 0, timestamp, hi)
   chacha20poly1305_encrypt(dst->timestamp_enc, dst->timestamp_enc, extfield_size + WG_TIMESTAMP_LEN, hs_.hi, sizeof(hs_.hi), 0, k);
   // Hi := HASH(Hi || msg.timestamp)
@@ -619,7 +625,7 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
   // Hi2 := Hi
   memcpy(hi2, hi, sizeof(hi2));
   extfield_size = packet->size - sizeof(MessageHandshakeInitiation);
-  if ((uint32)extfield_size > MAX_SIZE_OF_HANDSHAKE_EXTENSION || (extfield_size && !peer->supports_handshake_extensions_))
+  if ((uint32)extfield_size > MAX_SIZE_OF_HANDSHAKE_EXTENSION)
     goto getout;
   // Hi := HASH(Hi || msg.timestamp)
   BlakeMix(hi, src->timestamp_enc, extfield_size + WG_TIMESTAMP_LEN + WG_MAC_LEN);
@@ -668,20 +674,24 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
 
     int extfield_out_size = 0;
     if (WITH_HANDSHAKE_EXT && extfield_size)
-      extfield_out_size = peer->WriteHandshakeExtension(dst->empty_enc, keypair);
+      extfield_out_size = peer->WriteHandshakeExtension(dst->empty_enc + 4, keypair);
 
     // Allow plugin to determine what to do with the packet,
     // it can append new headers to the response, and decide what to do.  
-    if (dev->plugin_) {
+    if (WITH_HANDSHAKE_EXT && dev->plugin_) {
       uint32 rv = dev->plugin_->OnHandshake1(peer, extbuf + WG_TIMESTAMP_LEN, extfield_size, e_remote,
-                                                     dst->empty_enc + extfield_out_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - extfield_out_size, dst->ephemeral);
+                                                     dst->empty_enc + 4 + extfield_out_size, MAX_SIZE_OF_HANDSHAKE_EXTENSION - 4 - extfield_out_size, dst->ephemeral);
       if (rv == WgPlugin::kHandshakeResponseDrop)
         goto getout;
       if (rv & WgPlugin::kHandshakeResponseFail)
         delete exch_null(keypair);
       extfield_out_size += rv & ~WgPlugin::kHandshakeResponseFail;
     }
-
+    if (extfield_out_size) {
+      WriteLE32(dst->empty_enc, kTunsafeExtensionClientID);
+      extfield_out_size += 4;
+    }
+    
     dst->sender_key_id = keypair ? dev->InsertInKeyIdLookup(peer, keypair) : 0;
 
     WG_ACQUIRE_LOCK(peer->mutex_);
@@ -764,7 +774,7 @@ WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packe
 
   // Allow plugin to determine what to do with the packet,
   // it can append new headers to the response, and decide what to do.  
-  if (dev->plugin_) {
+  if (WITH_HANDSHAKE_EXT && dev->plugin_) {
     uint32 rv = dev->plugin_->OnHandshake2(peer, src->empty_enc, extfield_size, src->ephemeral);
     if (rv & WgPlugin::kHandshakeResponseFail) {
       delete keypair;
@@ -841,7 +851,7 @@ int WgPeer::WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair) {
       uint8 value = 0;
       // Include the supported features extension
       if (!IsOnlyZeros(features_, sizeof(features_))) {
-        *dst++ = EXT_BOOLEAN_FEATURES;
+        *dst++ = kExtensionType_Booleans;
         *dst++ = (WG_FEATURES_COUNT + 3) >> 2;
         for (size_t i = 0; i != WG_FEATURES_COUNT; i++) {
           if ((i & 3) == 0)
@@ -857,7 +867,7 @@ int WgPeer::WriteHandshakeExtension(uint8 *dst, WgKeypair *keypair) {
       // Ordered list of cipher suites
       size_t ciphers = num_ciphers_;
       if (ciphers) {
-        *dst++ = EXT_CIPHER_SUITES + cipher_prio_;
+        *dst++ = kExtensionType_CipherSuites + cipher_prio_;
         if (keypair) {
           *dst++ = 1;
           *dst++ = keypair->cipher_suite;
@@ -928,7 +938,14 @@ void WgPeer::DeleteKeypair(WgKeypair **kp) {
 }
 
 bool WgPeer::ParseExtendedHandshake(WgKeypair *kp, const uint8 *data, size_t data_size) {
-  assert(WITH_HANDSHAKE_EXT);
+  // Empty handshake is always OK
+  if (data_size == 0)
+    return true;
+
+  // The first four bytes contain a client ID and major, minor version
+  if (data_size < 4 || (ReadLE32(data) & 0xFFFFFF) != kTunsafeExtensionClientID)
+    return false;
+  data += 4, data_size -= 4;
 
   while (data_size >= 2) {
     uint8 type = data[0], size = data[1];
@@ -936,15 +953,15 @@ bool WgPeer::ParseExtendedHandshake(WgKeypair *kp, const uint8 *data, size_t dat
     if (size > data_size)
       return false;
     switch (type) {
-    case EXT_CIPHER_SUITES_PRIO:
-    case EXT_CIPHER_SUITES:
+    case kExtensionType_CipherSuitesPrio:
+    case kExtensionType_CipherSuites:
       if (WITH_CIPHER_SUITES) {
-        kp->cipher_suite = ResolveCipherSuite(cipher_prio_ - (type - EXT_CIPHER_SUITES),
+        kp->cipher_suite = ResolveCipherSuite(cipher_prio_ - (type - kExtensionType_CipherSuites),
                                               ciphers_, num_ciphers_, data, size);
       }
       break;
 
-    case EXT_BOOLEAN_FEATURES:
+    case kExtensionType_Booleans:
       if (WITH_BOOLEAN_FEATURES) {
         for (uint32 i = 0, j = std::max<uint32>(WG_FEATURES_COUNT, size * 4); i != j; i++) {
           uint8 value = (i < (uint32)size * 4) ? (data[i >> 2] >> ((i * 2) & 7)) & 3 : 0;
@@ -960,10 +977,8 @@ bool WgPeer::ParseExtendedHandshake(WgKeypair *kp, const uint8 *data, size_t dat
   if (data_size != 0)
     return false;
 
-  if (WITH_BOOLEAN_FEATURES)
+  if (WITH_BOOLEAN_FEATURES && WITH_SHORT_MAC)
     kp->auth_tag_length = (kp->enabled_features[WG_FEATURE_ID_SHORT_MAC] ? 8 : CHACHA20POLY1305_AUTHTAGLEN);
-  return true;
-
 
   if (WITH_CIPHER_SUITES && kp->cipher_suite >= EXT_CIPHER_SUITE_AES128_GCM && kp->cipher_suite <= EXT_CIPHER_SUITE_AES256_GCM) {
 #if WITH_AESGCM
@@ -978,6 +993,7 @@ bool WgPeer::ParseExtendedHandshake(WgKeypair *kp, const uint8 *data, size_t dat
 #endif  // WITH_AESGCM
   }
 
+  return true;
 }
 
 WgKeypair *WgPeer::CreateNewKeypair(bool is_initiator, const uint8 chaining_key[WG_HASH_LEN], uint32 remote_key_id) {
@@ -1157,12 +1173,13 @@ void WgPeer::OnHandshakeFullyComplete() {
     for(size_t i = 0; i < WG_FEATURES_COUNT; i++)
       any_feature |= curr_keypair_->enabled_features[i];
     if (curr_keypair_->cipher_suite != 0 || any_feature) {
-      RINFO("Using %s, %s %s %s %s %s", kCipherSuites[curr_keypair_->cipher_suite], 
-            curr_keypair_->enabled_features[0] ? "short_header" : "",
-            curr_keypair_->enabled_features[1] ? "mac64" : "",
-            curr_keypair_->enabled_features[2] ? "ipzip" : "",
-            curr_keypair_->enabled_features[4] ? "skip_keyid_in" : "",
-            curr_keypair_->enabled_features[5] ? "skip_keyid_out" : "");
+      RINFO("Using %s%s%s%s%s%s%s", kCipherSuites[curr_keypair_->cipher_suite], 
+            curr_keypair_->enabled_features[WG_FEATURE_ID_SHORT_HEADER] ? ", short_header" : "",
+            curr_keypair_->enabled_features[WG_FEATURE_ID_SHORT_MAC] ? ", mac64" : "",
+            curr_keypair_->enabled_features[WG_FEATURE_ID_IPZIP] ? ", ipzip" : "",
+            curr_keypair_->enabled_features[WG_FEATURE_ID_SKIP_KEYID_IN] ? ", skip_keyid_in" : "",
+            curr_keypair_->enabled_features[WG_FEATURE_ID_SKIP_KEYID_OUT] ? ", skip_keyid_out" : "",
+            curr_keypair_->enabled_features[WG_FEATURE_HYBRID_TCP] ? ", hybrid_tcp" : "");
     }
   }
   last_complete_handskake_timestamp_ = now;
@@ -1572,7 +1589,7 @@ void WgPacketObfuscator::ObfuscatePacket(Packet *packet) {
       assert(data_size >= 48);
       data[35 + packet_type * 4] ^= data[15];
     }
-    packet->size = data_size = InsertRandomBytesIntoPacket(data, data_size);
+    packet->size = (uint)(data_size = InsertRandomBytesIntoPacket(data, data_size));
   }
 
   // Scramble the header bytes of the packet

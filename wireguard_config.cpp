@@ -54,19 +54,19 @@ static int ParseFeature(const char *str) {
     else if (str[len - 1] == '!')
       what = WG_BOOLEAN_FEATURE_ENFORCES, len--;
   }
-  if (len == 5 && memcmp(str, "mac64", 5) == 0)
+  if (WITH_SHORT_MAC && len == 5 && memcmp(str, "mac64", 5) == 0)
     return what + WG_FEATURE_ID_SHORT_MAC * 16;
-  if (len == 5 && memcmp(str, "ipzip", 5) == 0)
+  if (WITH_PACKET_COMPRESSION && len == 5 && memcmp(str, "ipzip", 5) == 0)
     return what + WG_FEATURE_ID_IPZIP * 16;
   if (len == 10 && memcmp(str, "hybrid_tcp", 10) == 0)
     return what + WG_FEATURE_HYBRID_TCP * 16;
-  if (len == 10 && memcmp(str, "skip_keyid", 10) == 0)
+  if (WITH_SHORT_HEADERS && len == 10 && memcmp(str, "skip_keyid", 10) == 0)
     return what + WG_FEATURE_ID_SKIP_KEYID_IN * 16 + 1 * 4;
-  if (len == 12 && memcmp(str, "short_header", 12) == 0)
+  if (WITH_SHORT_HEADERS && len == 12 && memcmp(str, "short_header", 12) == 0)
     return what + WG_FEATURE_ID_SHORT_HEADER * 16;
-  if (len == 13 && memcmp(str, "skip_keyid_in", 13) == 0)
+  if (WITH_SHORT_HEADERS && len == 13 && memcmp(str, "skip_keyid_in", 13) == 0)
     return what + WG_FEATURE_ID_SKIP_KEYID_IN * 16;
-  if (len == 14 && memcmp(str, "skip_keyid_out", 14) == 0)
+  if (WITH_SHORT_HEADERS && len == 14 && memcmp(str, "skip_keyid_out", 14) == 0)
     return what + WG_FEATURE_ID_SKIP_KEYID_OUT * 16;
   return -1;
 }
@@ -171,9 +171,9 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       }
       
       wg_->SetInternetBlocking((InternetBlockState)v);
-    } else if (strcmp(key, "ObfuscateKey") == 0) {
+    } else if (WITH_HEADER_OBFUSCATION && strcmp(key, "ObfuscateKey") == 0) {
       wg_->dev().packet_obfuscator().SetKey((uint8*)value, strlen(value));
-    } else if (strcmp(key, "ObfuscateTCP") == 0) {
+    } else if (WITH_HEADER_OBFUSCATION && strcmp(key, "ObfuscateTCP") == 0) {
       bool flag;
       int v = 1;
       if (ParseBoolean(value, &flag)) {

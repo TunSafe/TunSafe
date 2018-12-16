@@ -15,10 +15,6 @@ enum {
   WG_SESSION_AUTH_LEN = 16,
 };
 
-enum {
-  WITH_TWO_FACTOR_AUTHENTICATION = 1,
-};
-
 class PluginPeer;
 class TunsafePluginImpl;
 
@@ -52,23 +48,21 @@ bool ExtFieldWriter::WriteField(uint8 code, const uint8 *data, uint32 size) {
 }
 
 enum {
-  kExtensionType_Padding = 0x00,
   // The other peer has no way of identifying a specific instance of
   // a connection. There's no way to distinguish a periodic handshake from
   // a new client connection. Add a session ID to the Peer to solve this. 
   // We don't send the actual session id, instead we send:
   // Hash(plaintext ephemeral public key, session id)
-  kExtensionType_SessionIDAuth = 0x01,
-  kExtensionType_SetSessionID = 0x02,
+  kExtensionType_SessionIDAuth = 0x20,
+  kExtensionType_SetSessionID = 0x21,
 
   // This is sent by the server to request an additional token to allow
   // login, for example a TOTP token, or a password.
   // By cleverly using session ids, the server can avoid having to request
   // this for every new handshake, even when roaming.
-  kExtensionType_TokenRequest = 0x03,
-
+  kExtensionType_TokenRequest = 0x22,
   // This holds the token reply.
-  kExtensionType_TokenReply = 0x04,
+  kExtensionType_TokenReply = 0x23,
 };
 
 class TokenClientHandler {
@@ -597,6 +591,10 @@ uint32 TunsafePluginImpl::OnHandshake1(WgPeer *peer, const uint8 *ext, uint32 ex
   PluginPeer *pp = GetPluginPeer(peer);
   ExtFieldWriter writer(extout, extout_size);
 
+  // Skip the version 
+  if (ext_size >= 4)
+    ext += 4, ext_size -= 4;
+
   bool has_valid_session_id = false;
   uint8 *token_reply = NULL;
   uint8 token_reply_size = 0;
@@ -638,6 +636,10 @@ uint32 TunsafePluginImpl::OnHandshake1(WgPeer *peer, const uint8 *ext, uint32 ex
 // This runs on client and parses response
 uint32 TunsafePluginImpl::OnHandshake2(WgPeer *peer, const uint8 *ext, uint32 ext_size, const uint8 salt[WG_PUBLIC_KEY_LEN]) {
   PluginPeer *pp = GetPluginPeer(peer);
+
+  // Skip the version
+  if (ext_size >= 4)
+    ext += 4, ext_size -= 4;
 
   bool has_valid_session_id = false;
 

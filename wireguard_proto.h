@@ -165,10 +165,10 @@ struct MessageData {
 STATIC_ASSERT(sizeof(MessageData) == 16, MessageData_wrong_size);
 
 enum {
-  EXT_BOOLEAN_FEATURES = 0x16,
-
-  EXT_CIPHER_SUITES = 0x18,
-  EXT_CIPHER_SUITES_PRIO = 0x19,
+  kExtensionType_Padding = 0x00,
+  kExtensionType_Booleans = 0x01,
+  kExtensionType_CipherSuites = 0x02,
+  kExtensionType_CipherSuitesPrio = 0x03,
 
   // The standard wireguard chacha
   EXT_CIPHER_SUITE_CHACHA20POLY1305 = 0x00,
@@ -180,7 +180,6 @@ enum {
   EXT_CIPHER_SUITE_NONE_POLY1305 = 0x03,
 
   EXT_CIPHER_SUITE_COUNT = 4,
-
 };
 
 enum {
@@ -609,9 +608,6 @@ private:
   // The broadcast address of the IPv4 network, used to block broadcast traffic
   // from being sent out over the VPN link.
   uint32 ipv4_broadcast_addr_;
-
-  // Whether the tunsafe specific handshake extensions are supported
-  bool supports_handshake_extensions_;
 
   // Whether any data was sent since the keepalive timer was set
   bool pending_keepalive_;
