@@ -613,6 +613,8 @@ void *UnixSocketDeletionWatcher::RunThreadInner() {
     FD_SET(pipes_[0], &fdset);
     int n = select(std::max(inotify_fd_, pipes_[0]) + 1, &fdset, NULL, NULL, NULL);
     if (n == -1) {
+      if (errno == EINTR)
+        continue;
       perror("select");
       break;
     }
