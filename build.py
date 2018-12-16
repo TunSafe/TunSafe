@@ -56,7 +56,7 @@ if command == 'build_tap':
   SignExe(r'installer\tap\TunSafe-TAP-9.21.2.exe')
   sys.exit(0)
 
-if 1:
+if command != 'skip_build':
   RmTree(BASE + r'\build')
   Run('%s TunSafe.sln /t:Clean;Rebuild /p:Configuration=Release /m /p:Platform=x64' % CONFIG["MSBUILD_PATH"])
   Run('%s TunSafe.sln /t:Clean;Rebuild /p:Configuration=Release /m /p:Platform=Win32' % CONFIG["MSBUILD_PATH"])
@@ -64,7 +64,7 @@ if 1:
 if 1:
   try:
     os.mkdir(BASE + r'\installer\x86')
-  except FileExistsError:
+  except OSError:
     pass
   CopyFile(BASE + r'\build\Win32_Release\TunSafe.exe', BASE + r'\installer\x86\TunSafe.exe')
   CopyFile(BASE + r'\build\Win32_Release\ts.exe', BASE + r'\installer\x86\TunSafe.com')
@@ -73,7 +73,7 @@ if 1:
 
   try:
     os.mkdir(BASE + r'\installer\x64')
-  except FileExistsError:
+  except OSError:
     pass
   CopyFile(BASE + r'\build\x64_Release\TunSafe.exe',   BASE + r'\installer\x64\TunSafe.exe')
   CopyFile(BASE + r'\build\x64_Release\ts.exe',   BASE + r'\installer\x64\TunSafe.com')

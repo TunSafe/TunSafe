@@ -1,3 +1,29 @@
+2018-12-16 - TunSafe v1.5-rc2
+
+Changes:
+1.Don't add endpoint route if route is not in included_routes
+2.In BSD network code, don't add a route that's a subset of an Address
+3.Don't add Excluded routes when Table=off
+4.Display packet loss in Windows UI
+5.Enable DNS block only if the DNS addr is a part of the routes
+6.Support for WireGuard over TCP. Use Endpoint=tcp:// to connect
+  to a TCP server, and use ListenPortTCP=12345 to listen on TCP.
+7.Add support for Two Factor authentication. Read more on:
+  https://github.com/TunSafe/TunSafe/wiki/Two-Factor-Authentication-with-TunSafe
+8.Add support for a hybrid TCP/UDP mode that uses TCP for handshakes
+  and UDP for data traffic. This means that PersistentKeepalive can
+  be significantly raised to for example 300 seconds, since as long
+  as the TCP connection remains open through NAT then the WireGuard
+  connection will stay alive. Enable with Features=hybrid_tcp
+9.Support for obfuscated WireGuard connections. Use ObfuscateKey=foo
+  in the [Interface] section to setup the obfuscator key. It needs
+  to be set to the same thing on both sides. There's also another
+  setting to masquerade TCP connections as TLS. Use ObfuscateTCP to
+  setup how TCP gets obfuscated. The default is to just make everything
+  look totally random. It can also be set to tls-chrome or tls-firefox
+  to make the traffic look like HTTPS traffic.
+10.Display incoming invalid packets in Windows UI
+
 2018-10-21 - TunSafe v1.5-rc1
 
 Changes:
