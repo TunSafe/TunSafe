@@ -9,19 +9,16 @@
 
 class NetworkWin32;
 class PacketProcessor;
+class WgPacketObfuscator;
 
 class TcpSocketWin32 : public QueuedItemCallback {
   friend class NetworkWin32;
   friend class TcpSocketQueue;
 public:
-  explicit TcpSocketWin32(NetworkWin32 *network);
+  explicit TcpSocketWin32(NetworkWin32 *network, PacketProcessor *packet_handler, WgPacketObfuscator *obfuscator, bool is_incoming);
   ~TcpSocketWin32();
 
-  void SetPacketHandler(PacketProcessor *packet_handler) { packet_processor_ = packet_handler; }
-
-  // Write a packet to the TCP socket. This may be called only from the
-  // wireguard thread. Will append to a buffer and schedule it to be written
-  // from the network thread.
+  // Write a packet to the TCP socket.
   void WritePacket(Packet *packet);
 
   // Call from IO completion thread to cancel all outstanding IO
@@ -37,7 +34,6 @@ private:
   void DoMoreReads();
   void DoMoreWrites();
   void DoConnect();
-
   void CloseSocket();
   
   // From OverlappedCallbacks
@@ -64,6 +60,8 @@ private:
 
 public:
   uint8 handshake_attempts;
+  uint8 endpoint_protocol_;
+  uint32 handshake_timestamp_;
 private:
 
   // The handle to the socket
@@ -86,7 +84,6 @@ private:
   QueuedItem connect_overlapped_;
 
   IpAddr endpoint_;
-  uint8 endpoint_protocol_;
 
   // Packets currently involved in the wsabuf writing
   enum { kMaxWsaBuf = 32 };
@@ -95,7 +92,7 @@ private:
 
 class TcpSocketQueue : public QueuedItemCallback {
 public:
-  explicit TcpSocketQueue(NetworkWin32 *network);
+  explicit TcpSocketQueue(NetworkWin32 *network, WgPacketObfuscator *obfusctor);
   ~TcpSocketQueue();
 
   void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
@@ -106,7 +103,7 @@ public:
   void WritePacket(Packet *packet);
 
 private:
-  void TransmitOnePacket(Packet *packet);
+  void TransmitPackets(Packet *packet);
   NetworkWin32 *network_;
 
   // All packets queued for writing on the network thread. Locked by |wqueue_mutex_|
@@ -114,11 +111,12 @@ private:
 
   PacketProcessor *packet_handler_;
 
+  WgPacketObfuscator *obfuscator_;
+
   // Protects wqueue_
   Mutex wqueue_mutex_;
 
   // Used for queueing things on the network instance
   QueuedItem queued_item_;
-
 };
 

@@ -334,7 +334,9 @@ WgPeer::WgPeer(WgDevice *dev) {
   assert(dev->IsMainThread());
   dev_ = dev;
   endpoint_.sin.sin_family = 0;
+  data_endpoint_.sin.sin_family = 0;
   endpoint_protocol_ = 0;
+  data_endpoint_protocol_ = 0;
   next_peer_ = NULL;
   peer_extra_data_ = NULL;
   curr_keypair_ = next_keypair_ = prev_keypair_ = NULL;
@@ -685,6 +687,11 @@ WgPeer *WgPeer::ParseMessageHandshakeInitiation(WgDevice *dev, Packet *packet) {
     WG_ACQUIRE_LOCK(peer->mutex_);
     peer->rx_bytes_ += packet->size;
     if (keypair != NULL) {
+      // The server side needs to remember the endpoint on incoming handshakes.
+      if (peer->allow_endpoint_change_ && keypair->enabled_features[WG_FEATURE_HYBRID_TCP]) {
+        peer->endpoint_ = packet->addr;
+        peer->endpoint_protocol_ = packet->protocol;
+      }
       peer->InsertKeypairInPeer_Locked(keypair);
       peer->OnHandshakeAuthComplete();
     }
@@ -772,8 +779,19 @@ WgPeer *WgPeer::ParseMessageHandshakeResponse(WgDevice *dev, const Packet *packe
 
   WG_ACQUIRE_LOCK(peer->mutex_);
   if (peer->allow_endpoint_change_) {
-    peer->endpoint_ = packet->addr;
+    // TODO: Why is this needed, if we are able to get a response for the handshake init
+    // packet then we already know its endpoint?
     peer->endpoint_protocol_ = packet->protocol;
+    peer->endpoint_ = packet->addr;
+    if (!keypair->enabled_features[WG_FEATURE_HYBRID_TCP] || !peer->IsTransientDataEndpointActive()) {
+      peer->data_endpoint_protocol_ = peer->endpoint_protocol_;
+      peer->data_endpoint_ = peer->endpoint_;
+    }
+  // If hybrid tcp mode was enabled for the connection, switch
+  // the data endpoint to the udp endpoint.
+  } else if (peer->endpoint_protocol_ == kPacketProtocolTcp) {
+    peer->data_endpoint_protocol_ = keypair->enabled_features[WG_FEATURE_HYBRID_TCP] ? kPacketProtocolUdp : kPacketProtocolTcp;
+    peer->data_endpoint_ = peer->endpoint_;
   }
 
   WG_EXTENSION_HOOKS::OnPeerIncomingUdp(peer, packet);
@@ -1065,11 +1083,15 @@ enum {
   TIMER_ZERO_KEYS = 3,
   // Timer for sending a keepalive packet every PERSISTENT_KEEPALIVE_MS
   TIMER_PERSISTENT_KEEPALIVE = 4,
+  // Timer for removing the transient UDP endpoint in hybrid TCP mode after 10 seconds
+  TIMER_HYBRID_TCP = 5,
+
+  TIMERS_COUNT = 6,
 };
 
-#define WgClearTimer(x) (timers_ &= ~(33 << x))
-#define WgIsTimerActive(x) (timers_ & (33 << x))
-#define WgSetTimer(x) (timers_ |= (32 << (x)))
+#define WgClearTimer(x) (timers_ &= ~(((1<<TIMERS_COUNT)+1) << x))
+#define WgIsTimerActive(x) (timers_ & (((1<<TIMERS_COUNT)+1) << x))
+#define WgSetTimer(x) (timers_ |= (((1<<TIMERS_COUNT)) << (x)))
 
 void WgPeer::OnDataSent() {
   assert(IsPeerLocked());
@@ -1092,12 +1114,14 @@ void WgPeer::OnDataReceived() {
   else
     pending_keepalive_ = true;
   WgSetTimer(TIMER_PERSISTENT_KEEPALIVE);
+  WgSetTimer(TIMER_HYBRID_TCP);
 }
 
 void WgPeer::OnKeepaliveReceived() {
   assert(IsPeerLocked());
   WgClearTimer(TIMER_NEW_HANDSHAKE);
   WgSetTimer(TIMER_PERSISTENT_KEEPALIVE);
+  WgSetTimer(TIMER_HYBRID_TCP);
 }
 
 void WgPeer::OnHandshakeInitSent() {
@@ -1158,17 +1182,18 @@ uint32 WgPeer::CheckTimeouts_Locked(uint64 now) {
     return 0;
   uint32 now32 = (uint32)now;
   // Got any new timers?
-  if (t & (0x1f << 5)) {
-    if (t & (1 << (5+0))) timer_value_[0] = now32;
-    if (t & (1 << (5+1))) timer_value_[1] = now32;
-    if (t & (1 << (5+2))) timer_value_[2] = now32;
-    if (t & (1 << (5+3))) timer_value_[3] = now32;
-    if (t & (1 << (5+4))) timer_value_[4] = now32;
-    t |= (t >> 5);
-    t &= 0x1F;
+  if (t & (((1 << TIMERS_COUNT) - 1) << TIMERS_COUNT)) {
+    if (t & (1 << (TIMERS_COUNT+0))) timer_value_[0] = now32;
+    if (t & (1 << (TIMERS_COUNT+1))) timer_value_[1] = now32;
+    if (t & (1 << (TIMERS_COUNT+2))) timer_value_[2] = now32;
+    if (t & (1 << (TIMERS_COUNT+3))) timer_value_[3] = now32;
+    if (t & (1 << (TIMERS_COUNT+4))) timer_value_[4] = now32;
+    if (t & (1 << (TIMERS_COUNT+5))) timer_value_[5] = now32;
+    t |= (t >> TIMERS_COUNT);
+    t &= (1 << TIMERS_COUNT) - 1;
   }
   // Got any expired timers?
-  if (t & 0x1F) {
+  if (t & ((1 << TIMERS_COUNT) - 1)) {
     if ((t & (1 << TIMER_RETRANSMIT_HANDSHAKE)) && (now32 - timer_value_[TIMER_RETRANSMIT_HANDSHAKE]) >= REKEY_TIMEOUT_MS) {
       t ^= (1 << TIMER_RETRANSMIT_HANDSHAKE);
       if (handshake_attempts_ > MAX_HANDSHAKE_ATTEMPTS || endpoint_.sin.sin_family == 0) {
@@ -1212,6 +1237,16 @@ uint32 WgPeer::CheckTimeouts_Locked(uint64 now) {
       ClearKeys_Locked();
       ClearHandshake_Locked();
     }
+
+    if ((t & (1 << TIMER_HYBRID_TCP)) && (now32 - timer_value_[TIMER_HYBRID_TCP]) >= HYBRID_TCP_TIMEOUT_MS) {
+      t &= ~(1 << TIMER_HYBRID_TCP);
+      // Forget about the data endpoint and switch to using the regular endpoint after 15 seconds.
+      if (allow_endpoint_change_) {
+        data_endpoint_protocol_ = endpoint_protocol_;
+        data_endpoint_ = endpoint_;
+      }
+    }
+
   }
   timers_ = t;
   return rv;
@@ -1261,9 +1296,15 @@ void WgPeer::CheckAndUpdateTimeOfNextKeyEvent(uint64 now) {
   time_of_next_key_event_ = next_time;
 }
 
+bool WgPeer::IsTransientDataEndpointActive() {
+  return WgIsTimerActive(TIMER_HYBRID_TCP) != 0;
+}
+
 void WgPeer::SetEndpoint(int endpoint_proto, const IpAddr &sin) {
   endpoint_protocol_ = endpoint_proto;
+  data_endpoint_protocol_ = endpoint_proto;
   endpoint_ = sin;
+  data_endpoint_ = sin;
 }
 
 bool WgPeer::SetPersistentKeepalive(int persistent_keepalive_secs) {
@@ -1484,18 +1525,19 @@ size_t WgPublicKeyHasher::operator()(const WgPublicKey&a) const {
 // This scrambles the initial 16 bytes of the packet with the
 // last 8 bytes of the packet as a seed.
 void WgPacketObfuscator::ScrambleUnscramble(uint8 *data, size_t data_size) {
+  assert(data_size >= 16);
+
   uint64 last_uint64 = ReadLE64(data + data_size - 8);
   uint64 a = siphash_u64_u32(last_uint64, (uint32)data_size, (siphash_key_t*)&key_[0]);
   uint64 b = siphash_u64_u32(last_uint64, (uint32)data_size, (siphash_key_t*)&key_[2]);
-  a = ToLE64(a);
+  ((uint64*)data)[0] ^= ToLE64(a);
   b = ToLE64(b);
   if (data_size >= 24) {
-    ((uint64*)data)[0] ^= a;
     ((uint64*)data)[1] ^= b;
   } else {
-    uint64 d[2] = { a, b };
-    for (size_t i = 0; i < data_size - 8; i++)
-      data[i] ^= ((uint8*)d)[i];
+    uint64 d[1] = { b };
+    for (size_t i = 0; i < data_size - 16; i++)
+      data[i + 8] ^= ((uint8*)d)[i];
   }
 }
 
@@ -1524,12 +1566,11 @@ void WgPacketObfuscator::ObfuscatePacket(Packet *packet) {
   // in the 3:rd byte of the packet.
   uint32 packet_type = ReadLE32(data);
   if ((packet_type == 4 && data_size <= 32) || packet_type < 4) {
-    if (packet_type != 4) {
-      // The 39:th and 43:rd bytes often have zero MSB because of curve25519 pubkey,
-      // so xor them with something in the header.
-      assert(data_size >= 44);
-      data[39] ^= data[12];
-      data[43] ^= data[12];
+    // The 39:th (for handshake init) and 43:rd byte (for handshake response)
+    // have zero MSB because of curve25519 pubkey, so xor it with random.
+    if (packet_type < 4) {
+      assert(data_size >= 48);
+      data[35 + packet_type * 4] ^= data[15];
     }
     packet->size = data_size = InsertRandomBytesIntoPacket(data, data_size);
   }
@@ -1552,16 +1593,14 @@ void WgPacketObfuscator::DeobfuscatePacket(Packet *packet) {
   // Check whether the packet type field says that we have 
   // extra bytes appended at the end.
   if (data[0] <= 4) {
-    if (data[0] < 4 && data_size >= 44) {
-      // The 39:th and 43:rd bytes often have zero MSB because of curve25519 pubkey,
-      // so xor them with something in the header.
-      data[39] ^= data[12];
-      data[43] ^= data[12];
-    }
-    if (data[3] <= data_size) {
-      packet->size = (uint32)(data_size - data[3]);
-      data[3] = 0;
-    }
+    if (data[3] > data_size)
+      return; // invalid
+    packet->size = (uint32)(data_size -= data[3]);
+    data[3] = 0;
+    // The 39:th (for handshake init) and 43:rd byte (for handshake response)
+    // have zero MSB because of curve25519 pubkey, so xor it with random.
+    if (data[0] < 4 && data_size >= 48)
+      data[35 + data[0] * 4] ^= data[15];
   }
 }
 

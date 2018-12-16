@@ -527,6 +527,10 @@ bool UdpSocketBsd::DoWrite() {
 
 void UdpSocketBsd::WritePacket(Packet *packet) {
   assert(fd_ >= 0);
+
+  if (processor_->dev().packet_obfuscator().enabled())
+    processor_->dev().packet_obfuscator().ObfuscatePacket(packet);
+   
   Packet *queue_is_used = udp_queue_;
   *udp_queue_end_ = packet;
   udp_queue_end_ = &Packet_NEXT(packet);
@@ -824,7 +828,8 @@ void TcpSocketListenerBsd::HandleEvents(int revents) {
     int new_fd = accept(fd_, (sockaddr*)&addr, &len);
     if (new_fd >= 0) {
       RINFO("Created new tcp socket");
-      TcpSocketBsd *channel = new TcpSocketBsd(network_, processor_);
+
+      TcpSocketBsd *channel = new TcpSocketBsd(network_, processor_, true);
       if (channel)
         channel->InitializeIncoming(new_fd, addr);
       else
@@ -840,18 +845,61 @@ void TcpSocketListenerBsd::Periodic() {
 }
 //////////////////////////////////////////////////////////////////////////////////////////////
 
-TcpSocketBsd::TcpSocketBsd(NetworkBsd *net, WireguardProcessor *processor) 
+void TcpSocketBsd::WriteTcpPacket(NetworkBsd *network, WireguardProcessor *processor, Packet *packet) {
+  bool is_handshake = ReadLE32(packet->data) == MESSAGE_HANDSHAKE_INITIATION;
+
+  // Check if we have a tcp connection for the endpoint, otherwise create one.
+  for (TcpSocketBsd *tcp = network->tcp_sockets(); tcp; tcp = tcp->next()) {
+    // After we send 3 handshakes on a tcp socket in a row, then close and reopen the socket because it seems defunct.
+    if (CompareIpAddr(&tcp->endpoint(), &packet->addr) == 0 && tcp->endpoint_protocol() == packet->protocol) {
+      if (is_handshake) {
+        uint32 now = (uint32)OsGetMilliseconds();
+        uint32 secs = (now - tcp->handshake_timestamp_) >> 10;
+        tcp->handshake_timestamp_ += secs * 1024;
+        int calc = (secs > (uint32)tcp->handshake_attempts_ + 25) ? 0 : tcp->handshake_attempts_ + 25 - secs;
+        tcp->handshake_attempts_ = calc;
+        if (calc >= 60) {
+          RINFO("Making new Tcp socket due to too many handshake failures");
+          delete tcp;
+          break;
+        }
+      }
+      tcp->WritePacket(packet);
+      return;
+    }
+  }
+  // Drop tcp packet that's for an incoming connection, or packets that are
+  // not a handshake.
+  if ((packet->protocol & kPacketProtocolIncomingConnection) || !is_handshake) {
+    FreePacket(packet);
+    return;
+  }
+  // Initialize a new tcp socket and connect to the endpoint
+  TcpSocketBsd *tcp = new TcpSocketBsd(network, processor, false);
+  if (!tcp || !tcp->InitializeOutgoing(packet->addr)) {
+    delete tcp;
+    FreePacket(packet);
+    return;
+  }
+  tcp->WritePacket(packet);
+}
+
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+TcpSocketBsd::TcpSocketBsd(NetworkBsd *net, WireguardProcessor *processor, bool is_incoming) 
     : BaseSocketBsd(net),
       readable_(false),
       writable_(true),
       endpoint_protocol_(0),
       age(0),
-      handshake_attempts(0),
+      handshake_attempts_(0),
+      handshake_timestamp_(0),
       wqueue_(NULL),
       wqueue_end_(&wqueue_),
-      wqueue_bytes_(0),
+      wqueue_packets_(0),
       processor_(processor),
-      tcp_packet_handler_(&net->packet_pool_) {
+      tcp_packet_handler_(&net->packet_pool_, &processor->dev().packet_obfuscator(), is_incoming) {
   // insert in network's linked list
   next_ = net->tcp_sockets_;
   net->tcp_sockets_ = this;
@@ -908,19 +956,22 @@ bool TcpSocketBsd::InitializeOutgoing(const IpAddr &addr) {
 void TcpSocketBsd::WritePacket(Packet *packet) {
   assert(fd_ >= 0);
 
-  tcp_packet_handler_.AddHeaderToOutgoingPacket(packet);
 
   Packet *old_value = wqueue_;
   *wqueue_end_ = packet;
   wqueue_end_ = &Packet_NEXT(packet);
   packet->queue_next = NULL;
+  packet->prepared = false;
 
   AddToEndLoop();
 
-  wqueue_bytes_ += packet->size;
+  // Note: Cannot use bytes here, because the TCP packet
+  // headers have not been added yet, and then the
+  // accounting doesn't work
+  wqueue_packets_++;
 
-  // When many bytes have been queued, perform the write.
-  if (writable_ && wqueue_bytes_ >= 32768)
+  // When enough packets have been queued up, perform the write.
+  if (writable_ && wqueue_packets_ >= 16)
     DoWrite();
 }
 
@@ -982,10 +1033,19 @@ void TcpSocketBsd::DoWrite() {
   struct iovec vecs[kMaxIoWrite];
   Packet *p = wqueue_;
   size_t nvec = 0;
-  for (; p && nvec < kMaxIoWrite; nvec++, p = Packet_NEXT(p)) {
-    vecs[nvec].iov_base = p->data;
-    vecs[nvec].iov_len = p->size;
+  for (; p && nvec < kMaxIoWrite; p = Packet_NEXT(p)) {
+    if (!p->prepared)
+      tcp_packet_handler_.PrepareOutgoingPackets(p);
+
+    if (p->size != 0) {
+      vecs[nvec].iov_base = p->data;
+      vecs[nvec].iov_len = p->size;
+      nvec++;
+    }
   }
+  if (nvec == 0)
+    return;
+
   ssize_t n = writev(fd_, vecs, nvec);
 
   if (n < 0) {
@@ -998,9 +1058,7 @@ void TcpSocketBsd::DoWrite() {
     }
     return;
   }
-  wqueue_bytes_ -= n;
   // discard those initial n bytes worth of packets
-  size_t i = 0;
   p = wqueue_;
   while (n) {
     if (n < p->size) {
@@ -1009,6 +1067,7 @@ void TcpSocketBsd::DoWrite() {
     }
     n -= p->size;
     FreePacket(exch(p, Packet_NEXT(p)));
+    wqueue_packets_--;
   }
   if (!(wqueue_ = p))
     wqueue_end_ = &wqueue_;

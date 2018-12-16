@@ -18,6 +18,7 @@ enum {
 
 class WireguardProcessor;
 class TunsafeBackendWin32;
+class TunsafeRunner;
 class DnsBlocker;
 
 struct PacketProcessorTunCb : QueuedItemCallback {
@@ -41,7 +42,7 @@ public:
 
   void Reset();
 
-  int Run(WireguardProcessor *wg, TunsafeBackendWin32 *backend);
+  int Run(WireguardProcessor *wg, TunsafeRunner *runner);
   void PostPackets(Packet *first, Packet **end, int count);
   void ForcePost(QueuedItem *item);
   void PostExit(int exit_code);
@@ -62,7 +63,7 @@ public:
 
   struct QueueContext {
     WireguardProcessor *wg;
-    TunsafeBackendWin32 *backend;
+    TunsafeRunner *runner;
     bool overload;
   };
 
@@ -142,32 +143,27 @@ private:
   Packet *finished_reads_, **finished_reads_end_;
   int finished_reads_count_;
 
-  __declspec(align(64)) uint32 qsize1_;
-  __declspec(align(64)) uint32 qsize2_;
+  uint32 qsize1_;
+  uint8 align[64-4];
+  uint32 qsize2_;
 };
 
 // Holds the thread for network communications
-class NetworkWin32 : public UdpInterface {
+class NetworkWin32 {
   friend class UdpSocketWin32;
   friend class TcpSocketWin32;
   friend class TcpSocketQueue;
 public:
   explicit NetworkWin32();
   ~NetworkWin32();
-
+  
   void StartThread();
   void StopThread();
 
   UdpSocketWin32 &udp() { return udp_socket_; }
   SimplePacketPool &packet_pool() { return packet_pool_; }
-  TcpSocketQueue &tcp_socket_queue() { return tcp_socket_queue_; }
   void WakeUp();
   void PostQueuedItem(QueuedItem *item);
-
-  // -- from UdpInterface
-  virtual bool Configure(int listen_port_udp, int listen_port_tcp) override;
-  virtual void WriteUdpPacket(Packet *packet) override;
-
 private:
   void ThreadMain();
   static DWORD WINAPI NetworkThread(void *x);
@@ -190,8 +186,6 @@ private:
   TcpSocketWin32 *tcp_socket_;
 
   SimplePacketPool packet_pool_;
-
-  TcpSocketQueue tcp_socket_queue_;
 };
 
 class TunWin32Adapter {
@@ -199,7 +193,7 @@ public:
   TunWin32Adapter(DnsBlocker *dns_blocker, const char guid[ADAPTER_GUID_SIZE]);
   ~TunWin32Adapter();
 
-  bool OpenAdapter(TunsafeBackendWin32 *backend, DWORD open_flags);
+  bool OpenAdapter(TunsafeRunner *backend, DWORD open_flags);
   bool ConfigureAdapter(const TunInterface::TunConfig &&config, TunInterface::TunConfigOut *out);
   void CloseAdapter(bool is_restart);
 
@@ -233,7 +227,7 @@ private:
 // Implementation of TUN interface handling using IO Completion Ports
 class TunWin32Iocp : public TunInterface {
 public:
-  explicit TunWin32Iocp(DnsBlocker *blocker, TunsafeBackendWin32 *backend);
+  explicit TunWin32Iocp(DnsBlocker *blocker, TunsafeRunner *backend);
   ~TunWin32Iocp();
 
   void SetPacketHandler(PacketProcessor *packet_handler) { packet_handler_ = packet_handler; }
@@ -266,11 +260,61 @@ private:
   // All packets queued for writing
   Packet *wqueue_, **wqueue_end_;
 
-  TunsafeBackendWin32 *backend_;
+  TunsafeRunner *runner_;
   TunWin32Adapter adapter_;
 };
 
-class TunsafeBackendWin32 : public TunsafeBackend, public ProcessorDelegate, public PluginDelegate {
+// This class is the actual TunSafe thing and runs inside of a thread.
+class TunsafeRunner : public UdpInterface, public ProcessorDelegate, public PluginDelegate, public QueuedItemCallback {
+  friend class TunsafeBackendWin32;
+public:
+  TunsafeRunner(TunsafeBackendWin32 *backend);
+  ~TunsafeRunner();
+
+  void SetConfigFile(const char *file, bool is_text_format);
+
+  TunsafeBackendWin32 *backend() { return backend_; }
+
+  // -- from UdpInterface
+  virtual bool Configure(int listen_port_udp, int listen_port_tcp) override;
+  virtual void WriteUdpPacket(Packet *packet) override;
+
+  virtual void OnConnected() override;
+  virtual void OnConnectionRetry(uint32 attempts) override;
+
+  // -- from PluginDelegate
+  virtual void OnRequestToken(WgPeer *peer, uint32 type) override;
+
+  bool Start();
+
+  // Called by the tun thing if tun stops working and a reset is needed.
+  void PostTunRestart();
+
+  uint32 exit_code() { return *packet_processor_.posted_exit_code(); }
+
+  TunsafePlugin *plugin() { return plugin_; }
+
+  void CollectStats();
+  
+private:
+  // From OverlappedCallbacks
+  virtual void OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) override;
+  virtual void OnQueuedItemDelete(QueuedItem *ow) override;
+
+  TunsafeBackendWin32 *backend_;
+  TunsafePlugin *plugin_;
+  bool config_file_is_text_format_;
+  std::string config_file_;
+  TunWin32Iocp tun_;
+  NetworkWin32 net_;
+  TcpSocketQueue tcp_socket_queue_;
+  WireguardProcessor wg_proc_;
+  PacketProcessor packet_processor_;
+};
+
+
+class TunsafeBackendWin32 : public TunsafeBackend {
+  friend class TunsafeRunner;
   friend class PacketProcessor;
   friend class TunWin32Iocp;
   friend class TunWin32Overlapped;
@@ -297,51 +341,43 @@ public:
   virtual uint32 GetTokenRequest() override;
   virtual void SubmitToken(const std::string &&message) override;
   
-  // -- from ProcessorDelegate
-  virtual void OnConnected() override;
-  virtual void OnConnectionRetry(uint32 attempts) override;
-
-  // -- from PluginDelegate
-  virtual void OnRequestToken(WgPeer *peer, uint32 type) override;
+  void OnRequestToken(WgPeer *peer, uint32 type);
 
   void SetPublicKey(const uint8 key[32]);
-  void PostExit(int exit_code);
+
+  StatusCode status() { return status_; }
+  void SetStatus(StatusCode status);
+
+  void CollectStats();
+
+private:
+
   enum {
     MODE_NONE = 0,
     MODE_EXIT = 1,
     MODE_RESTART = 2,
-    MODE_TUN_FAILED = 3,
   };
-  uint32 exit_code() { return *packet_processor_.posted_exit_code(); }
-
-  void SetStatus(StatusCode status);
-private:
 
   void StopInner(bool is_restart);
   static DWORD WINAPI WorkerThread(void *x);
   void PushStats();
 
+  TunsafeRunner *runner_;
   HANDLE worker_thread_;
   bool want_periodic_stats_;
 
   Delegate *delegate_;
-  char *config_file_;
 
   std::atomic<uint32> token_request_;
 
   DnsBlocker dns_blocker_;
   DnsResolver dns_resolver_;
 
-  WireguardProcessor *wg_processor_;
-  TunsafePlugin *tunsafe_wg_plugin_;
-
   uint32 last_tun_adapter_failed_;
   StatsCollector stats_collector_;
 
   Mutex stats_mutex_;
   WgProcessorStats stats_;
-
-  PacketProcessor packet_processor_;
 
   char guid_[ADAPTER_GUID_SIZE];
 };

@@ -56,12 +56,14 @@ static int ParseFeature(const char *str) {
   }
   if (len == 5 && memcmp(str, "mac64", 5) == 0)
     return what + WG_FEATURE_ID_SHORT_MAC * 16;
-  if (len == 12 && memcmp(str, "short_header", 12) == 0)
-    return what + WG_FEATURE_ID_SHORT_HEADER * 16;
   if (len == 5 && memcmp(str, "ipzip", 5) == 0)
     return what + WG_FEATURE_ID_IPZIP * 16;
+  if (len == 10 && memcmp(str, "hybrid_tcp", 10) == 0)
+    return what + WG_FEATURE_HYBRID_TCP * 16;
   if (len == 10 && memcmp(str, "skip_keyid", 10) == 0)
     return what + WG_FEATURE_ID_SKIP_KEYID_IN * 16 + 1 * 4;
+  if (len == 12 && memcmp(str, "short_header", 12) == 0)
+    return what + WG_FEATURE_ID_SHORT_HEADER * 16;
   if (len == 13 && memcmp(str, "skip_keyid_in", 13) == 0)
     return what + WG_FEATURE_ID_SKIP_KEYID_IN * 16;
   if (len == 14 && memcmp(str, "skip_keyid_out", 14) == 0)
@@ -169,8 +171,22 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
       }
       
       wg_->SetInternetBlocking((InternetBlockState)v);
-    } else if (strcmp(key, "HeaderObfuscation") == 0) {
+    } else if (strcmp(key, "ObfuscateKey") == 0) {
       wg_->dev().packet_obfuscator().SetKey((uint8*)value, strlen(value));
+    } else if (strcmp(key, "ObfuscateTCP") == 0) {
+      bool flag;
+      int v = 1;
+      if (ParseBoolean(value, &flag)) {
+        v = flag;
+      } else if (strcmp(value, "tls-firefox") == 0) {
+        v = 2;
+      } else if (strcmp(value, "tls-chrome") == 0) {
+        v = 3;
+      } else if (*value != 0) {
+        RERROR("Unknown mode in ObfuscateTCP: %s", value);
+      }
+      wg_->dev().packet_obfuscator().set_obfuscate_tcp(v);
+
     } else if (strcmp(key, "PostUp") == 0) {
       wg_->prepost().post_up.emplace_back(value);
     } else if (strcmp(key, "PostDown") == 0) {

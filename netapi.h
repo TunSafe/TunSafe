@@ -58,6 +58,7 @@ struct Packet : QueuedItem {
   byte *data;
   uint8 userdata;
   uint8 protocol;         // which protocol is this packet for/from
+  bool prepared;
   IpAddr addr;            // Optionally set to target/source of the packet
 
   enum {

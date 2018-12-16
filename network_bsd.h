@@ -244,7 +244,7 @@ private:
 
 class TcpSocketBsd : public BaseSocketBsd {
 public:
-  explicit TcpSocketBsd(NetworkBsd *bsd, WireguardProcessor *processor);
+  explicit TcpSocketBsd(NetworkBsd *bsd, WireguardProcessor *processor, bool is_incoming);
   virtual ~TcpSocketBsd();
 
   void InitializeIncoming(int fd, const IpAddr &addr);
@@ -259,9 +259,10 @@ public:
   uint8 endpoint_protocol() { return endpoint_protocol_; }
   const IpAddr &endpoint() { return endpoint_; }
 
+  static void WriteTcpPacket(NetworkBsd *network, WireguardProcessor *processor, Packet *packet);
+
 public:
   uint8 age;
-  uint8 handshake_attempts;
 private:
   void DoRead();
   void DoWrite();
@@ -271,8 +272,10 @@ private:
   bool got_eof_;
   uint8 endpoint_protocol_;
   bool want_connect_;
-
-  uint32 wqueue_bytes_;
+  uint8 handshake_attempts_;
+  uint32 handshake_timestamp_;
+  
+  uint wqueue_packets_;
   Packet *wqueue_, **wqueue_end_;
   TcpSocketBsd *next_;
   WireguardProcessor *processor_;

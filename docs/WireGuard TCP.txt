@@ -65,40 +65,12 @@ TT LLLLLL LLLLLLLL  [Payload LL bytes]
 The packet types (TT) currently defined are:
 TT = 00 = Normal   The payload is a normal unmodified WireGuard packet
                    including the regular WireGuard header.
-     01 = Reserved
      10 = Data     A WireGuard data packet (type 04) without the 16 byte
-                   header. The predicted header is prefixed to the payload.
-     11 = Control  A TCP control packet. Currently this is used only to setup
-                   the header prediction. See below.
+                   header.
+     ?1 = Reserved
 
-There's only one defined Control packet, type 00 (SetKeyAndCounter):
-
-    0                   1                   2                   3
-    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |1 1|  Length is 13 (14 bits)   |  00 (8 bits)  |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Key ID (32 bits)                         |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Counter (64 bits)                      ...
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-
-This sets up the Key ID and Counter used for the Data packets. Then Counter
-is incremented by 1 for every such packet.
-
-For every Data packet, the predicted Key ID and Counter is expanded to a
-regular WireGuard data (type 04) header, which is prefixed to the payload:
-
-    0                   1                   2                   3
-    0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |  04 (8 bits)  |             Reserved (24 bits)                |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Key ID (32 bits)                         |
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                      Counter (64 bits)                      ...
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-   |                     Data Payload (LL * 8 bits)              ...
-   +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+When parsing an incoming Data (TT=10) packet, the Key ID and Counter from
+the most recently parsed WireGuard data packet (type 04) is prepended to
+the payload, with Counter incremented by 1.
 
 This happens independently in each of the two TCP directions.

@@ -678,8 +678,6 @@ public:
   WireguardProcessor *processor() { return &processor_; }
 
 private:
-  void WriteTcpPacket(Packet *packet);
-
   // Close all TCP connections that are not pointed to by any of the peer endpoint.
   void CloseOrphanTcpConnections();
 
@@ -697,7 +695,7 @@ private:
 TunsafeBackendBsdImpl::TunsafeBackendBsdImpl() 
     : is_connected_(false),
       close_orphan_counter_(0),
-      plugin_(CreateTunsafePlugin(this)),
+      plugin_(CreateTunsafePlugin(this, &processor_)),
       processor_(this, this, this),
       network_(this, 1000),
       tun_(&network_, &processor_), 
@@ -732,49 +730,11 @@ bool TunsafeBackendBsdImpl::Configure(int listen_port, int listen_port_tcp) {
          (listen_port_tcp == 0 || tcp_socket_listener_.Initialize(listen_port_tcp));
 }
 
-void TunsafeBackendBsdImpl::WriteTcpPacket(Packet *packet) {
-  // Check if we have a tcp connection for the endpoint, otherwise create one.
-  for (TcpSocketBsd *tcp = network_.tcp_sockets(); tcp; tcp = tcp->next()) {
-    // After we send 3 handshakes on a tcp socket in a row, then close and reopen the socket because it seems defunct.
-    if (CompareIpAddr(&tcp->endpoint(), &packet->addr) == 0 && tcp->endpoint_protocol() == packet->protocol) {
-      if (ReadLE32(packet->data) == MESSAGE_HANDSHAKE_INITIATION) {
-        if (tcp->handshake_attempts == 2) {
-          RINFO("Making new Tcp socket due to too many handshake failures");
-          delete tcp;
-          break;
-        }
-        tcp->handshake_attempts++;
-      } else {
-        tcp->handshake_attempts = -1;
-      }
-      tcp->WritePacket(packet);
-      return;
-    }
-  }
-  // Drop tcp packet that's for an incoming connection, or packets that are
-  // not a handshake.
-  if ((packet->protocol & kPacketProtocolIncomingConnection) ||
-      ReadLE32(packet->data) != MESSAGE_HANDSHAKE_INITIATION) {
-    FreePacket(packet);
-    return;
-  }
-  // Initialize a new tcp socket and connect to the endpoint
-  TcpSocketBsd *tcp = new TcpSocketBsd(&network_, &processor_);
-  if (!tcp || !tcp->InitializeOutgoing(packet->addr)) {
-    delete tcp;
-    FreePacket(packet);
-    return;
-  }
-  tcp->WritePacket(packet);
-}
-
 void TunsafeBackendBsdImpl::WriteUdpPacket(Packet *packet) {
   assert((packet->protocol & 0x7F) <= 2);
   if (packet->protocol & kPacketProtocolTcp) {
-    WriteTcpPacket(packet);
+    TcpSocketBsd::WriteTcpPacket(&network_, &processor_, packet);
   } else {
-    if (processor_.dev().packet_obfuscator().enabled())
-      processor_.dev().packet_obfuscator().ObfuscatePacket(packet);
     udp_.WritePacket(packet);
   }
 }

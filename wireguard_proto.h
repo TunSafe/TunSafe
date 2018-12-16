@@ -62,7 +62,12 @@ enum ProtocolTimeouts {
   REJECT_AFTER_TIME_MS = 180000,
   MIN_HANDSHAKE_INTERVAL_MS = 20,
 
-  MAX_SIZE_OF_HANDSHAKE_EXTENSION = 1024,
+  HYBRID_TCP_TIMEOUT_MS = 15000,
+
+  // Chosen so that 1500 - 28 - sizeof(handshakeresponse) which means
+  // we can use this to probe mtu.
+  MAX_SIZE_OF_HANDSHAKE_EXTENSION = 1380,
+
 };
 
 enum ProtocolLimits {
@@ -179,12 +184,13 @@ enum {
 };
 
 enum {
-  WG_FEATURES_COUNT = 6,
+  WG_FEATURES_COUNT = 7,
   WG_FEATURE_ID_SHORT_HEADER = 0,    // Supports short headers
   WG_FEATURE_ID_SHORT_MAC = 1,       // Supports 8-byte MAC
   WG_FEATURE_ID_IPZIP = 2,           // Using ipzip
   WG_FEATURE_ID_SKIP_KEYID_IN = 4,   // Skip keyid for incoming packets
   WG_FEATURE_ID_SKIP_KEYID_OUT = 5,  // Skip keyid for outgoing packets
+  WG_FEATURE_HYBRID_TCP = 6,         // Use hybrid-tcp mode
 };
 
 enum {
@@ -340,7 +346,7 @@ public:
 // including adding random bytes at the end of the non-data packets.
 class WgPacketObfuscator {
 public:
-  WgPacketObfuscator() : enabled_(false) {}
+  WgPacketObfuscator() : enabled_(false), obfuscate_tcp_(-1) {}
 
   bool enabled() { return enabled_; }
   void ObfuscatePacket(Packet *packet);
@@ -350,6 +356,9 @@ public:
 
   const uint8 *key() { return (uint8*)key_; }
 
+  int obfuscate_tcp() { return obfuscate_tcp_; }
+  void set_obfuscate_tcp(int v) { obfuscate_tcp_ = v; }
+
   static size_t InsertRandomBytesIntoPacket(uint8 *data, size_t data_size);
 
 private:
@@ -357,6 +366,9 @@ private:
 
   // Whether packet obfuscation is enabled
   bool enabled_;
+
+  // Type of obfuscation for tcp
+  int obfuscate_tcp_;
 
   // Siphash keys for packet scrambling
   uint64 key_[4];
@@ -394,6 +406,8 @@ public:
   const uint8 *public_key() const { return s_pub_; }
   WgRateLimit *rate_limiter() { return &rate_limiter_; }
   bool is_private_key_initialized() { return is_private_key_initialized_; }
+
+  void SetCurrentThreadAsMainThread() { main_thread_id_ = GetCurrentThreadId(); }
 
   bool IsMainThread() { return CurrentThreadIdEquals(main_thread_id_); }
   bool IsMainOrDataThread() { return CurrentThreadIdEquals(main_thread_id_) || WG_IF_LOCKS_ENABLED_ELSE(delayed_delete_.enabled(), false);  }
@@ -565,7 +579,7 @@ private:
   void ClearHandshake_Locked();
   void ClearPacketQueue_Locked();
   void ScheduleNewHandshake();
-
+  bool IsTransientDataEndpointActive();
   
   WgDevice *dev_;
   WgPeer *next_peer_;
@@ -582,7 +596,6 @@ private:
 
   // For timer management
   uint32 timers_;
-  uint32 timer_value_[5];
 
   // Holds the entry into the key id table during handshake - mt only.
   uint32 local_key_id_during_hs_;
@@ -623,7 +636,7 @@ private:
   uint8 handshake_attempts_;
 
   // What's the protocol of the currently configured endpoint
-  uint8 endpoint_protocol_;
+  uint8 endpoint_protocol_, data_endpoint_protocol_;
 
   // Which features are enabled for this peer?
   uint8 features_[WG_FEATURES_COUNT];
@@ -632,9 +645,6 @@ private:
   uint8 num_queued_packets_;
   Packet *first_queued_packet_, **last_queued_packet_ptr_;
 
-  // Address of peer
-  IpAddr endpoint_;
-
   // For statistics
   uint64 last_handshake_init_timestamp_;
   uint64 last_complete_handskake_timestamp_;
@@ -642,6 +652,13 @@ private:
   // Timestamp to detect flooding of handshakes
   uint64 last_handshake_init_recv_timestamp_;  // main thread only
 
+  // Address of peer
+  IpAddr endpoint_;
+
+  // Alternative endpoint. This is used in hybrid tcp mode to hold the 
+  // udp endpoint.
+  IpAddr data_endpoint_;
+  
   // Number of handshake attempts since last successful handshake
   uint32 total_handshake_attempts_;
 
@@ -653,6 +670,8 @@ private:
 
   uint32 keepalive_timeout_ms_; // Set to KEEPALIVE_TIMEOUT_MS
 
+  uint32 timer_value_[6];
+  
   uint64 rx_bytes_;
   uint64 tx_bytes_;
 

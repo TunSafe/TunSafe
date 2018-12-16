@@ -207,6 +207,10 @@ bool WireguardProcessor::ConfigureTun() {
   
   for (WgPeer *peer = dev_.first_peer(); peer; peer = peer->next_peer_) {
     peer->ipv4_broadcast_addr_ = ipv4_broadcast_addr;
+
+    if (peer->endpoint_protocol_ == kPacketProtocolTcp)
+      peer->allow_endpoint_change_ = false;
+    
     if (peer->endpoint_.sin.sin_family != 0) {
       RINFO("Sending handshake...");
       SendHandshakeInitiation(peer);
@@ -419,7 +423,7 @@ WireguardProcessor::PacketResult WireguardProcessor::WriteAndEncryptPacketToUdp_
   uint64 send_ctr;
 
   // Ensure packet will fit including the biggest padding
-  if (peer->endpoint_.sin.sin_family == 0 ||
+  if (peer->data_endpoint_.sin.sin_family == 0 ||
       size > kPacketCapacity - 15 - CHACHA20POLY1305_AUTHTAGLEN)
     goto getout_discard;
 
@@ -443,8 +447,8 @@ WireguardProcessor::PacketResult WireguardProcessor::WriteAndEncryptPacketToUdp_
   want_handshake = (send_ctr >= REKEY_AFTER_MESSAGES ||
                     keypair->send_key_state == WgKeypair::KEY_WANT_REFRESH);
   keypair->send_ctr = send_ctr + 1;
-  packet->addr = peer->endpoint_;
-  packet->protocol = peer->endpoint_protocol_;
+  packet->addr = peer->data_endpoint_;
+  packet->protocol = peer->data_endpoint_protocol_;
 
   WG_EXTENSION_HOOKS::OnPeerOutgoingUdp(peer, packet);
 
@@ -639,7 +643,9 @@ void WireguardProcessor::SendHandshakeInitiation(WgPeer *peer) {
     if (attempts >= 3 && peer->allow_endpoint_change_ &&
         (peer->endpoint_protocol_ & kPacketProtocolIncomingConnection)) {
       peer->endpoint_protocol_ = 0;
+      peer->data_endpoint_protocol_ = 0;
       peer->endpoint_.sin.sin_family = 0;
+      peer->data_endpoint_.sin.sin_family = 0;
     }
 
     WG_RELEASE_LOCK(peer->mutex_);
@@ -840,15 +846,23 @@ WireguardProcessor::PacketResult WireguardProcessor::HandleAuthenticatedDataPack
   assert(packet->addr.sin.sin_family != 0);
 
   // Remember the endpoint of the peer
-  if (peer->allow_endpoint_change_ &&
-      (CompareIpAddr(&peer->endpoint_, &packet->addr) | (peer->endpoint_protocol_ ^ packet->protocol)) != 0) {
+  if (peer->allow_endpoint_change_ && 
+      (CompareIpAddr(&peer->data_endpoint_, &packet->addr) | (peer->data_endpoint_protocol_ ^ packet->protocol)) != 0) {
+
 #if WITH_SHORT_HEADERS
     // When the endpoint changes, forget about using the short key.
     keypair->broadcast_short_key = 0;
     keypair->can_use_short_key_for_outgoing = false;
 #endif  // WITH_SHORT_HEADERS
-    peer->endpoint_ = packet->addr;
-    peer->endpoint_protocol_ = packet->protocol;
+
+    peer->data_endpoint_ = packet->addr;
+    peer->data_endpoint_protocol_ = packet->protocol;
+
+    // In the hybrid tcp mode, only the data endpoint gets overwritten on incoming data packets.
+    if (!keypair->enabled_features[WG_FEATURE_HYBRID_TCP]) {
+      peer->endpoint_ = packet->addr;
+      peer->endpoint_protocol_ = packet->protocol;
+    }
   }
 
   WG_EXTENSION_HOOKS::OnPeerIncomingUdp(peer, packet);

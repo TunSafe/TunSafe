@@ -9,18 +9,18 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-TcpSocketWin32::TcpSocketWin32(NetworkWin32 *network)
-  : tcp_packet_handler_(&network->packet_pool()) {
+TcpSocketWin32::TcpSocketWin32(NetworkWin32 *network, PacketProcessor *packet_handler, WgPacketObfuscator *obfuscator, bool is_incoming)
+    : packet_processor_(packet_handler), tcp_packet_handler_(&network->packet_pool(), obfuscator, is_incoming) {
   network_ = network;
   reads_active_ = 0;
   writes_active_ = 0;
   handshake_attempts = 0;
+  handshake_timestamp_ = 0;
   state_ = STATE_NONE;
   wqueue_ = NULL;
   wqueue_end_ = &wqueue_;
   socket_ = INVALID_SOCKET;
   next_ = NULL;
-  packet_processor_ = NULL;
   // insert in network's linked list
   next_ = network->tcp_socket_;
   network->tcp_socket_ = this;
@@ -45,6 +45,7 @@ void TcpSocketWin32::CloseSocket() {
 }
 
 void TcpSocketWin32::WritePacket(Packet *packet) {
+  packet->prepared = false;
   packet->queue_next = NULL;
   *wqueue_end_ = packet;
   wqueue_end_ = &Packet_NEXT(packet);
@@ -145,7 +146,9 @@ void TcpSocketWin32::DoMoreWrites() {
       return;
 
     do {
-      tcp_packet_handler_.AddHeaderToOutgoingPacket(p);
+      if (!p->prepared)
+        tcp_packet_handler_.PrepareOutgoingPackets(p);
+
       wsabuf[num_wsabuf].buf = (char*)p->data;
       wsabuf[num_wsabuf].len = (ULONG)p->size;
       packets_in_write_io_[num_wsabuf] = p;
@@ -179,8 +182,7 @@ void TcpSocketWin32::DoIO() {
     while (Packet *p = tcp_packet_handler_.GetNextWireguardPacket()) {
       p->protocol = endpoint_protocol_;
       p->addr = endpoint_;
-      
-      p->queue_cb = packet_processor_->udp_queue();
+      p->queue_cb = packet_processor_->tcp_queue();
       packet_processor_->ForcePost(p);
     }
     if (tcp_packet_handler_.error()) {
@@ -269,63 +271,73 @@ void TcpSocketWin32::OnQueuedItemDelete(QueuedItem *qi) {
 
 /////////////////////////////////////////////////////////////////////////
 
-TcpSocketQueue::TcpSocketQueue(NetworkWin32 *network) {
+TcpSocketQueue::TcpSocketQueue(NetworkWin32 *network, WgPacketObfuscator *obfuscator) {
   network_ = network;
   wqueue_ = NULL;
   wqueue_end_ = &wqueue_;
   queued_item_.queue_cb = this;
   packet_handler_ = NULL;
+  obfuscator_ = obfuscator;
 }
 
 TcpSocketQueue::~TcpSocketQueue() {
   FreePacketList(wqueue_);
 }
 
-void TcpSocketQueue::TransmitOnePacket(Packet *packet) {
-  // Check if we have a tcp connection for the endpoint, otherwise create one.
-  for (TcpSocketWin32 *tcp = network_->tcp_socket_; tcp; tcp = tcp->next_) {
-    // After we send 3 handshakes on a tcp socket in a row, then close and reopen the socket because it seems defunct.
-    if (CompareIpAddr(&tcp->endpoint_, &packet->addr) == 0 && tcp->endpoint_protocol_ == packet->protocol) {
-      if (ReadLE32(packet->data) == MESSAGE_HANDSHAKE_INITIATION) {
-        if (tcp->handshake_attempts == 2) {
-          RINFO("Making new Tcp socket due to too many handshake failures");
-          tcp->CloseSocket();
-          break;
+void TcpSocketQueue::TransmitPackets(Packet *packet) {
+AGAIN:
+  while (packet) {
+    bool is_handshake = ReadLE32(packet->data) == MESSAGE_HANDSHAKE_INITIATION;
+
+    // Check if we have a tcp connection for the endpoint, otherwise create one.
+    for (TcpSocketWin32 *tcp = network_->tcp_socket_; tcp; tcp = tcp->next_) {
+      // After we send 3 handshakes on a tcp socket in a row within a minute,
+      // then close and reopen the socket because it seems defunct.
+      if (CompareIpAddr(&tcp->endpoint_, &packet->addr) == 0 && tcp->endpoint_protocol_ == packet->protocol) {
+        if (is_handshake) {
+          uint32 now = (uint32)OsGetMilliseconds();
+          uint32 secs = (now - tcp->handshake_timestamp_) >> 10;
+          tcp->handshake_timestamp_ += secs * 1024;
+          int calc = (secs > (uint32)tcp->handshake_attempts + 25) ? 0 : tcp->handshake_attempts + 25 - secs;
+          tcp->handshake_attempts = calc;
+          if (calc >= 60) {
+            RINFO("Making new Tcp socket due to too many handshake failures");
+            tcp->CloseSocket();
+            break;
+          }
         }
-        tcp->handshake_attempts++;
-      } else {
-        tcp->handshake_attempts = -1;
+        tcp->WritePacket(exch(packet, Packet_NEXT(packet)));
+        goto AGAIN;
       }
-      tcp->WritePacket(packet);
-      return;
     }
+
+    // Drop tcp packet that's for an incoming connection, or packets that are
+    // not a handshake.
+    if ((packet->protocol & kPacketProtocolIncomingConnection) || !is_handshake) {
+      FreePacket(exch(packet, Packet_NEXT(packet)));
+      continue;
+    }
+
+    // Initialize a new tcp socket and connect to the endpoint
+    TcpSocketWin32 *tcp = new TcpSocketWin32(network_, packet_handler_, obfuscator_, false);
+    tcp->state_ = TcpSocketWin32::STATE_WANT_CONNECT;
+    tcp->endpoint_ = packet->addr;
+    tcp->endpoint_protocol_ = kPacketProtocolTcp;
+    tcp->handshake_timestamp_ = (uint32)OsGetMilliseconds();
+    tcp->WritePacket(exch(packet, Packet_NEXT(packet)));
   }
 
-  // Drop tcp packet that's for an incoming connection, or packets that are
-  // not a handshake.
-  if ((packet->protocol & kPacketProtocolIncomingConnection) ||
-      packet->size < 4 || ReadLE32(packet->data) != MESSAGE_HANDSHAKE_INITIATION) {
-    FreePacket(packet);
-    return;
-  }
-
-  // Initialize a new tcp socket and connect to the endpoint
-  TcpSocketWin32 *tcp = new TcpSocketWin32(network_);
-  tcp->state_ = TcpSocketWin32::STATE_WANT_CONNECT;
-  tcp->endpoint_ = packet->addr;
-  tcp->endpoint_protocol_ = kPacketProtocolTcp;
-  tcp->SetPacketHandler(packet_handler_);
-  tcp->WritePacket(packet);
 }
 
 void TcpSocketQueue::OnQueuedItemEvent(QueuedItem *ow, uintptr_t extra) {
+  // Runs on the network thread
   wqueue_mutex_.Acquire();
   Packet *packet = wqueue_;
   wqueue_ = NULL;
   wqueue_end_ = &wqueue_;
   wqueue_mutex_.Release();
-  while (packet)
-    TransmitOnePacket(exch(packet, Packet_NEXT(packet)));
+
+  TransmitPackets(packet);
 }
 
 void TcpSocketQueue::OnQueuedItemDelete(QueuedItem *ow) {

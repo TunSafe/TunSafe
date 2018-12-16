@@ -54,7 +54,6 @@ public:
     kStatusTunRetrying = 10,
 
     kErrorInitialize = -1,
-    kErrorTunPermanent = -2,
     kErrorServiceLost = -3,
   };
 

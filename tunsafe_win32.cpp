@@ -1187,7 +1187,6 @@ static HFONT CreateFontHelper(int size, byte flags, const char *face, int angle 
 static const char *StatusCodeToString(TunsafeBackend::StatusCode code) {
   switch (code) {
   case TunsafeBackend::kErrorInitialize:    return "Configuration Error";
-  case TunsafeBackend::kErrorTunPermanent:  return "TUN Adapter Error";
   case TunsafeBackend::kErrorServiceLost:   return "Service Lost";
   case TunsafeBackend::kStatusStopped:      return "Disconnected";
   case TunsafeBackend::kStatusInitializing: return "Initializing";
