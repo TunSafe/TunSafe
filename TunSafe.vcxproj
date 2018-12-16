@@ -22,7 +22,7 @@
     <ProjectGuid>{626FBC16-64C6-407D-BC2B-6C087794E0D0}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>TunSafe</RootNamespace>
-    <WindowsTargetPlatformVersion>10.0.17134.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion>10.0.17763.0</WindowsTargetPlatformVersion>
     <ProjectName>TunSafe</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
