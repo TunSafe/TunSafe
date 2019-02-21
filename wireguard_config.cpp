@@ -222,7 +222,7 @@ bool WgFileParser::ParseFlag(const char *group, const char *key, char *value) {
     } else if (strcmp(key, "PublicKey") == 0) {
       if (!ParseBase64Key(value, pi_.pub.bytes))
         return false;
-    } else if (strcmp(key, "PresharedKey") == 0) {
+    } else if (strcmp(key, "PreSharedKey") == 0) {
       if (!ParseBase64Key(value, pi_.psk))
         return false;
       peer_->SetPresharedKey(pi_.psk);
