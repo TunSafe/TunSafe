@@ -1159,7 +1159,8 @@ static void ComputeIpv6DefaultRoute(const uint8 *ipv6_address, uint8 ipv6_cidr, 
   if (n == 0)
     return;
   // adjust the final byte
-  default_route_v6[n - 1] &= ~(0xff >> (ipv6_cidr & 7));
+  if ((ipv6_cidr & 7) != 0)
+    default_route_v6[n - 1] &= ~(0xff >> (ipv6_cidr & 7));
   // set the very last byte to something
   default_route_v6[15] |= 1;
   // ensure it doesn't collide
