@@ -43,7 +43,15 @@
 #  - tunsafe binary file
 #  - tunsafe configuration file
 #
-# ---------
+#  - Entware-NG (QNAP)
+#
+# -------
+# Install
+# EL7: copy to /etc/init.d/
+# QNAP: copy to /opt/etc/init.d
+#
+# ------------
+# Requirements
 # Changelog
 # 20190728/PB: initial version
 
@@ -58,9 +66,17 @@ done
 
 TUNSAFE_BIN=${TUNSAFE_BIN:-/opt/sbin/tunsafe}
 TUNSAFE_IFACE=${TUNSAFE_IFACE:-tun0}
-TUNSAFE_CONF=${TUNSAFE_CONF:-/etc/TunSafe.conf}
 TUNSAFE_RUN=${TUNSAFE_RUN:-/var/run/wireguard/$TUNSAFE_IFACE.sock}
-TUNSAFE_INIT=${TUNSAFE_INIT:-/etc/init.d/tunsafe.init.sh}
+
+if [ -e	/sbin/qcfg ]; then
+	# QNAP system
+	TUNSAFE_CONF=${TUNSAFE_CONF:-/opt/etc/TunSafe.conf}
+	TUNSAFE_INIT=${TUNSAFE_INIT:-/opt/etc/init.d/tunsafe.init.sh}
+else
+	TUNSAFE_CONF=${TUNSAFE_CONF:-/etc/TunSafe.conf}
+	TUNSAFE_INIT=${TUNSAFE_INIT:-/etc/init.d/tunsafe.init.sh}
+fi
+
 
 # failsafe checks
 if [ -z "$TUNSAFE_BIN" ]; then
@@ -272,8 +288,8 @@ autostart() {
 
 	if [ -e	/sbin/qcfg ]; then
 		# QNAP system
-		init_start="/etc/rcS.d/S99$(basename $TUNSAFE_INIT)"
-		init_stop="/etc/rcK.d/K01$(basename $TUNSAFE_INIT)"
+		init_start="/opt/etc/init.d/S99$(basename $TUNSAFE_INIT)"
+		init_stop="/opt/etc/init.d/K01$(basename $TUNSAFE_INIT)"
 
 		for entry in $init_start $init_stop; do
 			if [ -e "$entry" ]; then
