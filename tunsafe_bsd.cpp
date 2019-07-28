@@ -36,7 +36,10 @@
 #include <net/if_tun.h>
 #include <net/if_dl.h>
 #elif defined(OS_LINUX)
+#if defined(IFF_UP)
+#else
 #include <linux/if.h>
+#endif
 #include <linux/if_tun.h>
 #include <sys/prctl.h>
 #include <linux/rtnetlink.h>
