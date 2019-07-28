@@ -1,4 +1,4 @@
-#/bin/bash
+#!/bin/bash
 #
 # chkconfig: - 99 01
 # description: controls "TunSafe"
