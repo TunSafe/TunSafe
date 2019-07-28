@@ -1,0 +1,30 @@
+Enterprise Linux 7 (Red Hat, CentOS, ...) have only clang with major version 3 included.
+
+clang major version 5 is available via CentOS 7 SLC extension (devtoolset-7)
+
+clang major version 6 is available for CentOS 7 only via "Springdale"
+
+
+Instructions for CentOS 7:
+
+# store Springdale signing key
+curl -o /etc/pki/rpm-gpg/RPM-GPG-KEY-springdale http://springdale.math.ias.edu/data/springdale/7/x86_64/os/RPM-GPG-KEY-springdale
+
+# create Springdale EL7 SCL repository extension
+cat <<'END' >/etc/yum.repos.d/springdale-7-SCL.repo
+[SCL-core]
+name=Springdale SCL Base $releasever - $basearch
+mirrorlist=http://springdale.princeton.edu/data/springdale/SCL/$releasever/$basearch/mirrorlist
+#baseurl=http://springdale.princeton.edu/data/springdale/SCL/$releasever/$basearch
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-springdale
+END
+
+# install clang-6
+yum install llvm-toolset-6.0-clang
+
+# enable clang-6
+scl enable llvm-toolset-6.0 /bin/bash
+
+# build
+./build_linux.sh
