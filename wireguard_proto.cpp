@@ -1575,7 +1575,7 @@ void WgPacketObfuscator::ObfuscatePacket(Packet *packet) {
   size_t data_size = packet->size;
 
   // Too short packets can't be obfuscated
-  if (data_size < 8)
+  if (data_size < 16)
     return;
   
   // If the packet is type 1, 2 or 3, or a keepalive packet of type 4, add random bytes at
@@ -1601,7 +1601,7 @@ void WgPacketObfuscator::DeobfuscatePacket(Packet *packet) {
   size_t data_size = packet->size;
 
   // Too short packets can't be obfuscated / deobfuscated
-  if (data_size < 8)
+  if (data_size < 16)
     return;
 
   // Unscramble the header bytes of the packet
